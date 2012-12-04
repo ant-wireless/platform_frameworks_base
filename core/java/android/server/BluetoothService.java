@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2012 Dynastream Innovations
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1700,6 +1701,25 @@ public class BluetoothService extends IBluetooth.Stub {
         return mStateChangeTracker.size();
     }
 
+    public boolean changeAntWirelessState(boolean on, IBluetoothStateChangeCallback callback) {
+        int type;
+        if (on) {
+            type = BluetoothAdapterStateMachine.ANT_WIRELESS_TURN_ON;
+        } else {
+            type = BluetoothAdapterStateMachine.ANT_WIRELESS_TURN_OFF;
+        }
+        mBluetoothState.sendMessage(type, callback);
+        return true;
+    }
+
+    /* package */ int getHciScanMode() {
+        return getHciScanModeNative();
+    }
+
+    /* package */ void setHciScanMode(int mode) {
+        setHciScanModeNative(mode);
+    }
+
     private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -2921,4 +2941,7 @@ public class BluetoothService extends IBluetooth.Stub {
     native ParcelFileDescriptor getChannelFdNative(String channelPath);
     native boolean releaseChannelFdNative(String channelPath);
     native boolean setAuthorizationNative(String address, boolean value, int data);
+
+    native int getHciScanModeNative();
+    native void setHciScanModeNative(int mode);
 }

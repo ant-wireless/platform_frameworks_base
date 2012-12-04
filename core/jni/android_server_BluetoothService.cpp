@@ -1,5 +1,6 @@
 /*
 ** Copyright 2006, The Android Open Source Project
+** Copyright (C) 2012 Dynastream Innovations
 **
 ** Licensed under the Apache License, Version 2.0 (the "License");
 ** you may not use this file except in compliance with the License.
@@ -48,6 +49,7 @@
 #ifdef HAVE_BLUETOOTH
 #include <dbus/dbus.h>
 #include <bluedroid/bluetooth.h>
+#include <bluetooth/hci.h>
 #endif
 
 #include <cutils/properties.h>
@@ -1688,6 +1690,73 @@ static jobject getChannelFdNative(JNIEnv *env, jobject object, jstring channelPa
     return NULL;
 }
 
+static inline int create_hci_sock() {
+    int sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
+    if (sk < 0) {
+        ALOGE("Failed to create bluetooth hci socket: %s (%d)",
+             strerror(errno), errno);
+    }
+    return sk;
+}
+
+static jint getHciScanModeNative(JNIEnv *env, jobject object) {
+    ALOGV("%s", __FUNCTION__);
+#ifndef HAVE_BLUETOOTH
+    return -1;
+#endif
+    struct hci_dev_info dev_info;
+    int hci_sock = create_hci_sock();
+    int ret, iscan, pscan;
+    if (hci_sock < 0) return -1;
+
+    dev_info.dev_id = 0; // TODO defines
+
+    if (ioctl(hci_sock, HCIGETDEVINFO, (void *)&dev_info) < 0) {
+        ALOGE("Error getting bluetooth's SCAN. errno = %s", strerror(errno));
+        return -1;
+    }
+    iscan = (dev_info.flags & (1 << HCI_ISCAN));
+    pscan = (dev_info.flags & (1 << HCI_PSCAN));
+    if (pscan) {
+        if (iscan) {
+            ret = 23; // SCAN_MODE_CONNECTABLE_DISCOVERABLE
+        } else {
+            ret = 21; // SCAN_MODE_CONNECTABLE
+        }
+    } else {
+        ret = 20; // SCAN_MODE_NONE
+    }
+    close(hci_sock);
+    return ret;
+}
+
+static void setHciScanModeNative(JNIEnv *env, jobject object, jint mode) {
+    ALOGV("%s", __FUNCTION__);
+#ifdef HAVE_BLUETOOTH
+    struct hci_dev_req dr;
+    int hci_sock = create_hci_sock();
+    if (hci_sock < 0) return;
+
+    dr.dev_id = 0; // TODO defines
+    switch (mode) {
+    case 20: // SCAN_MODE_NONE
+        dr.dev_opt = SCAN_DISABLED;
+        break;
+    case 23: // SCAN_MODE_CONNECTABLE_DISCOVERABLE
+        dr.dev_opt = SCAN_INQUIRY|SCAN_PAGE;
+        break;
+    case 21: // SCAN_MODE_CONNECTABLE
+    default: // Android default is connectable
+        dr.dev_opt = SCAN_PAGE;
+        break;
+    }
+
+    if (ioctl(hci_sock, HCISETSCAN, (unsigned long) &dr) < 0) {
+        ALOGE("Error setting bluetooth's SCAN. errno = %s", strerror(errno));
+    }
+    close(hci_sock);
+#endif
+}
 
 
 static JNINativeMethod sMethods[] = {
@@ -1774,6 +1843,8 @@ static JNINativeMethod sMethods[] = {
               (void *)getChannelApplicationNative},
     {"getChannelFdNative", "(Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;", (void *)getChannelFdNative},
     {"releaseChannelFdNative", "(Ljava/lang/String;)Z", (void *)releaseChannelFdNative},
+    {"getHciScanModeNative", "()I", (void *)getHciScanModeNative},
+    {"setHciScanModeNative", "(I)V", (void *)setHciScanModeNative}
 };
 
 
