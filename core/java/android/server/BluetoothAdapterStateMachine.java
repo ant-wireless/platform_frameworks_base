@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2012 Dynastream Innovations
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,32 +37,44 @@ import java.io.PrintWriter;
 /**
  * Bluetooth Adapter StateMachine
  * All the states are at the same level, ie, no hierarchy.
- *                         (BluetootOn)<----------------------<-
- *                           |    ^    -------------------->-  |
- *                           |    |                         |  |
- *            USER_TURN_OFF  |    | SCAN_MODE_CHANGED    m1 |  | USER_TURN_ON
- *         AIRPLANE_MODE_ON  |    |                         |  |
- *                           V    |                         |  |
- *                         (Switching)                   (PerProcessState)
- *                           |    ^                         |  |
- *     POWER_STATE_CHANGED & |    | TURN_ON(_CONTINUE)      |  |
- * ALL_DEVICES_DISCONNECTED  |    |                     m2  |  |
- *                           V    |------------------------<   | SCAN_MODE_CHANGED
- *                          (HotOff)-------------------------->- PER_PROCESS_TURN_ON
- *                           /    ^
- *                          /     |  SERVICE_RECORD_LOADED
- *                         |      |
- *              TURN_COLD  |   (Warmup)
- *                         \      ^
- *                          \     |  TURN_HOT/TURN_ON
- *                           |    |  AIRPLANE_MODE_OFF(when Bluetooth was on before)
- *                           V    |
- *                           (PowerOff)   <----- initial state
+ *
+ *                                             USER_TURN_ON
+ *                                      <-------------------------
+ *                         (BluetoothOn)------------------------->(PerProcessState)
+ *                           |  ^       \  ^           m1           /  ^     |  ^
+ *                 TURN_OFF  |  | m4     \  \ m7               m10 /  /      |  |
+ *         AIRPLANE_MODE_ON  |  |         \  \                    /  /       |  |
+ *                           V  |       m8 V  \              <---/  /        |  |
+ *                       (Switching)       (AntWirelessState)------/ m9     /  /
+ *                           |  ^               /  ^                       /  /
+ *     POWER_STATE_CHANGED & |  |           m6 /  / m5                    /  /
+ * ALL_DEVICES_DISCONNECTED  |  | m3          V  /                    m2 /  /
+ *                           |  |----------(HotOff)<--------------------/  / SCAN_MODE_CHANGED &
+ *                           |------------> |    ^ -----------------------/  PER_PROCESS_TURN_ON
+ *                                          /    |
+ *                                         /     |  SERVICE_RECORD_LOADED
+ *                                        |      |
+ *                             TURN_COLD  |   (Warmup)
+ *                                        \      ^
+ *                                         \     |  TURN_HOT/TURN_ON
+ *                                          |    |  AIRPLANE_MODE_OFF(when Bluetooth was on before)
+ *                                          V    |
+ *                                        (PowerOff)  <----- initial state
  *
  * Legend:
- * m1 = TURN_HOT
- * m2 = Transition to HotOff when number of process wanting BT on is 0.
- *      POWER_STATE_CHANGED will make the transition.
+ * m1 =  TURN_HOT when the number of process wanting BT is non-zero.
+ * m2 =  Transition to HotOff when number of process wanting BT on is 0 and ANT wireless if off.
+ *       POWER_STATE_CHANGED will make the transition.
+ * m3 =  TURN_ON(_CONTINUE)
+ * m4 =  SCAN_MODE_CHANGED
+ * m5 =  ANT_WIRELESS_TURN_ON This will also disable PSCAN on hci0.
+ * m6 =  ANT_WIRELESS_TURN_OFF
+ * m7 =  USER_TURN_ON This will also enable PSCAN on hci0.
+ * m8 =  TURN_HOT when ANT wireless is on, and the number of process want BT on is 0.
+                 this will also disable PSCAN.
+ * m9 =  PER_PROCESS_TURN_ON & SCAN_MODE_CHANGED This will also enable PSCAN on hci0.
+ * m10 = Transition to AntWirelessState when number of process wanting BT is 0 and ANT wireless is
+         on. PER_PROCESS_TURN_OFF will make the transition. this will also disable PSCAN.
  * Note:
  * The diagram above shows all the states and messages that trigger normal state changes.
  * The diagram above does not capture everything:
@@ -93,6 +106,11 @@ final class BluetoothAdapterStateMachine extends StateMachine {
     // and not connectable. This way the Bluetooth Module can be quickly
     // switched on if needed
     static final int TURN_HOT = 5;
+
+    // ANT Wireless enable / disable messages to prevent Bluetooth from powering off
+    // the chip when ANT is active.
+    static final int ANT_WIRELESS_TURN_ON = 6;
+    static final int ANT_WIRELESS_TURN_OFF = 7;
 
     // Message(what) to report a event that the state machine need to respond to
     //
@@ -136,6 +154,13 @@ final class BluetoothAdapterStateMachine extends StateMachine {
     private WarmUp mWarmUp;
     private PowerOff mPowerOff;
     private PerProcessState mPerProcessState;
+    private AntWirelessState mAntWirelessState;
+
+    // this indicates when ANT Wireless is active, meaning bluetooth off should not
+    // power down the chip
+    private boolean mAntWirelessActive = false;
+    // this holds the ANT Wireless callback, it is remembered for when chip power is lost
+    private IBluetoothStateChangeCallback mAntWirelessCallback;
 
     // this is the BluetoothAdapter state that reported externally
     private int mPublicState;
@@ -164,6 +189,7 @@ final class BluetoothAdapterStateMachine extends StateMachine {
         mWarmUp = new WarmUp();
         mPowerOff = new PowerOff();
         mPerProcessState = new PerProcessState();
+        mAntWirelessState = new AntWirelessState();
 
         addState(mBluetoothOn);
         addState(mSwitching);
@@ -171,6 +197,7 @@ final class BluetoothAdapterStateMachine extends StateMachine {
         addState(mWarmUp);
         addState(mPowerOff);
         addState(mPerProcessState);
+        addState(mAntWirelessState);
 
         setInitialState(mPowerOff);
         mPublicState = BluetoothAdapter.STATE_OFF;
@@ -184,6 +211,9 @@ final class BluetoothAdapterStateMachine extends StateMachine {
         @Override
         public void enter() {
             if (DBG) log("Enter PowerOff: " + getCurrentMessage().what);
+            if (mAntWirelessActive) {
+                antWirelessCallback(false); // chip power lost, notify ANT Wireless
+            }
         }
         @Override
         public boolean processMessage(Message message) {
@@ -240,6 +270,15 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                     break;
                 case PER_PROCESS_TURN_OFF:
                     perProcessCallback(false, (IBluetoothStateChangeCallback) message.obj);
+                    break;
+                case ANT_WIRELESS_TURN_ON:
+                    if (prepareBluetooth()) {
+                        transitionTo(mWarmUp);
+                    }
+                    deferMessage(message);
+                    break;
+                case ANT_WIRELESS_TURN_OFF:
+                    antWirelessCallback(false, (IBluetoothStateChangeCallback) message.obj);
                     break;
                 case USER_TURN_OFF:
                     Log.w(TAG, "PowerOff received: " + message.what);
@@ -340,6 +379,8 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                 case AIRPLANE_MODE_OFF:
                 case PER_PROCESS_TURN_ON:
                 case PER_PROCESS_TURN_OFF:
+                case ANT_WIRELESS_TURN_ON:
+                case ANT_WIRELESS_TURN_OFF:
                     deferMessage(message);
                     break;
                 case USER_TURN_OFF:
@@ -414,6 +455,18 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                     break;
                 case PER_PROCESS_TURN_OFF:
                     perProcessCallback(false, (IBluetoothStateChangeCallback)message.obj);
+                    break;
+                case ANT_WIRELESS_TURN_ON:
+                    transitionTo(mAntWirelessState);
+
+                    // Resend the ANT_WIRELESS_TURN_ON message so that the callback
+                    // can be sent through.
+                    deferMessage(message);
+
+                    mBluetoothService.switchConnectable(true);
+                    break;
+                case ANT_WIRELESS_TURN_OFF:
+                    antWirelessCallback(false, (IBluetoothStateChangeCallback)message.obj);
                     break;
                 case USER_TURN_OFF: // ignore
                     break;
@@ -515,6 +568,8 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                 case AIRPLANE_MODE_ON:
                 case PER_PROCESS_TURN_ON:
                 case PER_PROCESS_TURN_OFF:
+                case ANT_WIRELESS_TURN_ON:
+                case ANT_WIRELESS_TURN_OFF:
                 case USER_TURN_OFF:
                     deferMessage(message);
                     break;
@@ -550,6 +605,10 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                         transitionTo(mPerProcessState);
                         deferMessage(obtainMessage(TURN_HOT));
                         break;
+                    } else if (mAntWirelessActive) {
+                        transitionTo(mAntWirelessState);
+                        deferMessage(obtainMessage(TURN_HOT));
+                        break;
                     }
                     //$FALL-THROUGH$ to AIRPLANE_MODE_ON
                 case AIRPLANE_MODE_ON:
@@ -568,6 +627,8 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                     if (message.what == AIRPLANE_MODE_ON || mBluetoothService.isAirplaneModeOn()) {
                         // We inform all the per process callbacks
                         allProcessesCallback(false);
+                        antWirelessCallback(false);
+                        deferMessage(obtainMessage(AIRPLANE_MODE_ON));
                     }
                     break;
                 case AIRPLANE_MODE_OFF:
@@ -580,10 +641,18 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                 case PER_PROCESS_TURN_OFF:
                     perProcessCallback(false, (IBluetoothStateChangeCallback)message.obj);
                     break;
+                case ANT_WIRELESS_TURN_ON:
+                    antWirelessCallback(true, (IBluetoothStateChangeCallback)message.obj);
+                    break;
+                case ANT_WIRELESS_TURN_OFF:
+                    antWirelessCallback(false, (IBluetoothStateChangeCallback)message.obj);
+                    break;
                 case POWER_STATE_CHANGED:
                     if ((Boolean) message.obj) {
-                        // reset the state machine and send it TURN_ON_CONTINUE message
-                        recoverStateMachine(USER_TURN_ON, false);
+                        if (!mAntWirelessActive) {
+                            // reset the state machine and send it TURN_ON_CONTINUE message
+                            recoverStateMachine(USER_TURN_ON, false);
+                        }
                     }
                     break;
                 default:
@@ -649,6 +718,11 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                                 perProcessCallback(false, c);
                                 deferMessage(obtainMessage(PER_PROCESS_TURN_ON, c));
                             }
+                            if (mAntWirelessActive) {
+                                antWirelessCallback(false);
+                                deferMessage(obtainMessage(ANT_WIRELESS_TURN_ON,
+                                        mAntWirelessCallback));
+                            }
                         }
                     }
                     break;
@@ -694,18 +768,189 @@ final class BluetoothAdapterStateMachine extends StateMachine {
                         perProcessCallback(false, c);
                         deferMessage(obtainMessage(PER_PROCESS_TURN_ON, c));
                     }
+                    if (mAntWirelessActive) {
+                        antWirelessCallback(false);
+                        deferMessage(obtainMessage(ANT_WIRELESS_TURN_ON, mAntWirelessCallback));
+                    }
                     break;
                 case PER_PROCESS_TURN_OFF:
                     perProcessCallback(false, (IBluetoothStateChangeCallback)message.obj);
                     if (mBluetoothService.isApplicationStateChangeTrackerEmpty()) {
-                        mBluetoothService.switchConnectable(false);
-                        sendMessageDelayed(TURN_OFF_TIMEOUT, TURN_OFF_TIMEOUT_TIME);
+                        if (mAntWirelessActive) {
+                            transitionTo(mAntWirelessState);
+                            deferMessage(message);
+                        } else {
+                            mBluetoothService.switchConnectable(false);
+                            sendMessageDelayed(TURN_OFF_TIMEOUT, TURN_OFF_TIMEOUT_TIME);
+                        }
                     }
                     break;
                 case AIRPLANE_MODE_ON:
                     mBluetoothService.switchConnectable(false);
                     sendMessageDelayed(TURN_OFF_TIMEOUT, TURN_OFF_TIMEOUT_TIME);
                     allProcessesCallback(false);
+                    antWirelessCallback(false);
+                    // we turn all the way to PowerOff with AIRPLANE_MODE_ON
+                    deferMessage(obtainMessage(AIRPLANE_MODE_ON));
+                    break;
+                case USER_TURN_OFF:
+                    Log.w(TAG, "PerProcessState received: " + message.what);
+                    break;
+                case ANT_WIRELESS_TURN_ON:
+                    antWirelessCallback(true, (IBluetoothStateChangeCallback)message.obj);
+                    break;
+                case ANT_WIRELESS_TURN_OFF:
+                    antWirelessCallback(false, (IBluetoothStateChangeCallback)message.obj);
+                    break;
+                default:
+                    return NOT_HANDLED;
+            }
+            return retValue;
+        }
+    }
+
+    private class AntWirelessState extends State {
+        boolean isTurningOn = false;
+        boolean isTurningOff = false;
+
+        @Override
+        public void enter() {
+            int what = getCurrentMessage().what;
+            if (DBG) log("Enter AntWirelessState: " + what);
+
+            if (what == ANT_WIRELESS_TURN_ON) {
+                isTurningOn = true;
+            } else if (what == USER_TURN_OFF || what == PER_PROCESS_TURN_OFF) {
+                isTurningOn = false;
+            } else {
+                Log.e(TAG, "enter AntWirelessState: wrong msg: " + what);
+            }
+            isTurningOff = false;
+        }
+
+        @Override
+        public boolean processMessage(Message message) {
+            log("AntWirelessState process message: " + message.what);
+
+            boolean retValue = HANDLED;
+            switch (message.what) {
+                case ANT_WIRELESS_TURN_ON:
+                    if (mAntWirelessActive) { // already on
+                        antWirelessCallback(true, (IBluetoothStateChangeCallback) message.obj);
+                    } else {
+                        // save the callback for when power on signal is received
+                        mAntWirelessCallback = (IBluetoothStateChangeCallback) message.obj;
+                    }
+                    break;
+                case ANT_WIRELESS_TURN_OFF:
+                    // BlueZ wont let us turn off without PSCAN on, so if needed turn it on, and
+                    // wait for the response, then switch connectable.
+                    if (mBluetoothService.getHciScanMode() == BluetoothAdapter.SCAN_MODE_NONE) {
+                        isTurningOff = true;
+                        mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_CONNECTABLE);
+                    } else {
+                        mBluetoothService.switchConnectable(false);
+                    }
+                    sendMessageDelayed(TURN_OFF_TIMEOUT, TURN_OFF_TIMEOUT_TIME);
+                    break;
+                case SCAN_MODE_CHANGED:
+                    if (isTurningOff) {
+                        if (mBluetoothService.getHciScanMode() != BluetoothAdapter.SCAN_MODE_NONE) {
+                            // Now that PSCAN is turned on, we can power off
+                            mBluetoothService.switchConnectable(false);
+                        }
+                    }
+                    break;
+                case POWER_STATE_CHANGED:
+                    removeMessages(TURN_OFF_TIMEOUT);
+                    if (!((Boolean) message.obj)) {
+                        // power is gone, notify callback
+                        antWirelessCallback(false);
+                        transitionTo(mHotOff);
+                        if (!mContext.getResources().getBoolean
+                            (com.android.internal.R.bool.config_bluetooth_adapter_quick_switch)) {
+                            deferMessage(obtainMessage(TURN_COLD));
+                        }
+                    } else {
+                        if (isTurningOn) {
+                            log("ANT_WIRELESS_TURN_ON disable scan");
+                            mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_NONE);
+                            antWirelessCallback(true);
+                        } else {
+                            recoverStateMachine(TURN_COLD, null);
+                            antWirelessCallback(false);
+                            deferMessage(obtainMessage(ANT_WIRELESS_TURN_ON, mAntWirelessCallback));
+                        }
+                    }
+                    break;
+                case TURN_OFF_TIMEOUT:
+                    transitionTo(mHotOff);
+                    Log.e(TAG, "Power-down timed out, resetting...");
+                    deferMessage(obtainMessage(TURN_COLD));
+                    if (mContext.getResources().getBoolean
+                        (com.android.internal.R.bool.config_bluetooth_adapter_quick_switch)) {
+                        deferMessage(obtainMessage(TURN_HOT));
+                    }
+                    break;
+                case USER_TURN_ON:
+                    broadcastState(BluetoothAdapter.STATE_TURNING_ON);
+                    log("USER_TURN_ON enable scan");
+                    mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_CONNECTABLE);
+                    antWirelessCallback(true);
+                    persistSwitchSetting(true);
+                    mBluetoothService.initBluetoothAfterTurningOn();
+                    transitionTo(mBluetoothOn);
+                    broadcastState(BluetoothAdapter.STATE_ON);
+                    // run bluetooth now that it's turned on
+                    mBluetoothService.runBluetooth();
+                    break;
+                case TURN_HOT:
+                    broadcastState(BluetoothAdapter.STATE_TURNING_OFF);
+                    if (mBluetoothService.getAdapterConnectionState() !=
+                        BluetoothAdapter.STATE_DISCONNECTED) {
+                        mBluetoothService.disconnectDevices();
+                        sendMessageDelayed(DEVICES_DISCONNECT_TIMEOUT,
+                                           DEVICES_DISCONNECT_TIMEOUT_TIME);
+                        break;
+                    }
+                    //$FALL-THROUGH$ all devices are already disconnected
+                case ALL_DEVICES_DISCONNECTED:
+                    removeMessages(DEVICES_DISCONNECT_TIMEOUT);
+                    finishSwitchingOff();
+                    log("USER_TURN_OFF disable scan");
+                    mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_NONE);
+                    break;
+                case DEVICES_DISCONNECT_TIMEOUT:
+                    finishSwitchingOff();
+                    Log.e(TAG, "Devices fail to disconnect, reseting...");
+                    transitionTo(mHotOff);
+                    deferMessage(obtainMessage(TURN_COLD));
+                    antWirelessCallback(false);
+                    deferMessage(obtainMessage(ANT_WIRELESS_TURN_ON, mAntWirelessCallback));
+                    break;
+                case PER_PROCESS_TURN_ON:
+                    log("PER_PROCESS_TURN_ON enable scan");
+                    mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_CONNECTABLE);
+                    antWirelessCallback(true);
+                    transitionTo(mPerProcessState);
+                    deferMessage(message);
+                    break;
+                case PER_PROCESS_TURN_OFF:
+                    log("PER_PROCESS_TURN_OFF disable scan");
+                    mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_NONE);
+                    break;
+                case AIRPLANE_MODE_ON:
+                    // BlueZ wont let us turn off without PSCAN on, so if needed turn it on, and
+                    // wait for the response, then switch connectable.
+                    if (mBluetoothService.getHciScanMode() == BluetoothAdapter.SCAN_MODE_NONE) {
+                        isTurningOff = true;
+                        mBluetoothService.setHciScanMode(BluetoothAdapter.SCAN_MODE_CONNECTABLE);
+                    } else {
+                        mBluetoothService.switchConnectable(false);
+                    }
+                    sendMessageDelayed(TURN_OFF_TIMEOUT, TURN_OFF_TIMEOUT_TIME);
+                    // we turn all the way to PowerOff with AIRPLANE_MODE_ON
+                    deferMessage(obtainMessage(AIRPLANE_MODE_ON));
                     break;
                 case USER_TURN_OFF:
                     Log.w(TAG, "PerProcessState received: " + message.what);
@@ -735,6 +980,16 @@ final class BluetoothAdapterStateMachine extends StateMachine {
         try {
             c.onBluetoothStateChange(on);
         } catch (RemoteException e) {}
+    }
+
+    private void antWirelessCallback(boolean on, IBluetoothStateChangeCallback c) {
+        mAntWirelessActive = on;
+        mAntWirelessCallback = c; // keep the most recent callback reference
+        perProcessCallback(on, c);
+    }
+
+    private void antWirelessCallback(boolean on) {
+        antWirelessCallback(on, mAntWirelessCallback);
     }
 
     private void allProcessesCallback(boolean on) {
