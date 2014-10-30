@@ -1810,6 +1810,18 @@
     <string name="permdesc_bluetoothPriv" product="default">Allows the app to
       pair with remote devices without user interaction.</string>
 
+    <!-- Title of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permlab_bluetoothVendorSpecific">allow vendor specific Bluetooth behaviour</string>
+    <!-- Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permdesc_bluetoothVendorSpecific" product="tablet">Allows the app to
+      access vendor specific features of the bluetooth implementation</string>
+    <!-- Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permdesc_bluetoothVendorSpecific" product="tv">Allows the app to
+      access vendor specific features of the bluetooth implementation</string>
+    <!-- Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permdesc_bluetoothVendorSpecific" product="default">Allows the app to
+      access vendor specific features of the bluetooth implementation</string>
+
     <string name="permlab_accessWimaxState">connect and disconnect from WiMAX</string>
     <string name="permdesc_accessWimaxState">Allows the app to determine whether
      WiMAX is enabled and information about any WiMAX networks that are

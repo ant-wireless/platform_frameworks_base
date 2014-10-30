@@ -781,6 +781,15 @@
         android:description="@string/permdesc_bluetoothPriv"
         android:label="@string/permlab_bluetoothPriv" />
 
+    <!-- Allows an app to directly send or recieve bluetooth vendor specific
+         HCI messages from the bluetooth host controller.
+         @hide -->
+    <permission android:name="android.permission.BLUETOOTH_VENDOR_SPECIFIC"
+        android:permissionGroup="android.permission-group.BLUETOOTH_NETWORK"
+        android:protectionLevel="system|signature"
+        android:description="@string/permdesc_bluetoothVendorSpecific"
+        android:label="@string/permlab_bluetoothVendorSpecific" />
+
     <!-- Allows bluetooth stack to access files
          @hide This should only be used by Bluetooth apk.
     -->
