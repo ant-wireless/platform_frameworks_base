@@ -18,7 +18,7 @@
 
 #include <jni.h>
 #include <JNIHelp.h>
-#include <android_runtime/AndroidRuntime.h>
+#include "core_jni_helpers.h"
 
 #include <sqlite3.h>
 #include <sqlite3_android.h>
@@ -39,7 +39,7 @@ static void sqliteLogCallback(void* data, int iErrCode, const char* zMsg) {
     bool verboseLog = !!data;
     if (iErrCode == 0 || iErrCode == SQLITE_CONSTRAINT || iErrCode == SQLITE_SCHEMA) {
         if (verboseLog) {
-            ALOGV(LOG_VERBOSE, SQLITE_LOG_TAG, "(%d) %s\n", iErrCode, zMsg);
+            ALOG(LOG_VERBOSE, SQLITE_LOG_TAG, "(%d) %s\n", iErrCode, zMsg);
         }
     } else {
         ALOG(LOG_ERROR, SQLITE_LOG_TAG, "(%d) %s\n", iErrCode, zMsg);
@@ -74,15 +74,14 @@ static jint nativeReleaseMemory(JNIEnv* env, jclass clazz) {
 static JNINativeMethod sMethods[] =
 {
     /* name, signature, funcPtr */
-    { "nativeReleaseMemory", "()I",
-            (void*)nativeReleaseMemory },
+    { "nativeReleaseMemory", "()I", (void*)nativeReleaseMemory },
 };
 
 int register_android_database_SQLiteGlobal(JNIEnv *env)
 {
     sqliteInitialize();
 
-    return AndroidRuntime::registerNativeMethods(env, "android/database/sqlite/SQLiteGlobal",
+    return RegisterMethodsOrDie(env, "android/database/sqlite/SQLiteGlobal",
             sMethods, NELEM(sMethods));
 }
 

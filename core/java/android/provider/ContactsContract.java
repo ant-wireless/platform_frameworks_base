@@ -18,6 +18,7 @@ package android.provider;
 
 import android.accounts.Account;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.ContentProviderClient;
 import android.content.ContentProviderOperation;
 import android.content.ContentResolver;
@@ -35,20 +36,17 @@ import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.graphics.Rect;
 import android.net.Uri;
-import android.os.Bundle;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Pair;
 import android.view.View;
+import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * <p>
@@ -166,8 +164,6 @@ public final class ContactsContract {
      * {@link Contacts#CONTENT_STREQUENT_FILTER_URI}, which requires the ContactsProvider to
      * return only phone-related results. For example, frequently contacted person list should
      * include persons contacted via phone (not email, sms, etc.)
-     *
-     * @hide
      */
     public static final String STREQUENT_PHONE_ONLY = "strequent_phone_only";
 
@@ -176,24 +172,23 @@ public final class ContactsContract {
      * The boolean indicates that the provider did not create a snippet and that the client asking
      * for the snippet should do it (true means the snippeting was deferred to the client).
      *
-     * @hide
+     * @see SearchSnippets
      */
     public static final String DEFERRED_SNIPPETING = "deferred_snippeting";
 
     /**
-     * Key to retrieve the original query on the client side.
+     * Key to retrieve the original deferred snippeting from the cursor on the client side.
      *
-     * @hide
+     * @see SearchSnippets
+     * @see #DEFERRED_SNIPPETING
      */
     public static final String DEFERRED_SNIPPETING_QUERY = "deferred_snippeting_query";
 
     /**
-     * A boolean parameter for {@link CommonDataKinds.Phone#CONTENT_URI},
-     * {@link CommonDataKinds.Email#CONTENT_URI}, and
-     * {@link CommonDataKinds.StructuredPostal#CONTENT_URI}.
+     * A boolean parameter for {@link CommonDataKinds.Phone#CONTENT_URI Phone.CONTENT_URI},
+     * {@link CommonDataKinds.Email#CONTENT_URI Email.CONTENT_URI}, and
+     * {@link CommonDataKinds.StructuredPostal#CONTENT_URI StructuredPostal.CONTENT_URI}.
      * This enables a content provider to remove duplicate entries in results.
-     *
-     * @hide
      */
     public static final String REMOVE_DUPLICATE_ENTRIES = "remove_duplicate_entries";
 
@@ -251,57 +246,6 @@ public final class ContactsContract {
     }
 
     /**
-     * @hide
-     */
-    public static final class Preferences {
-
-        /**
-         * A key in the {@link android.provider.Settings android.provider.Settings} provider
-         * that stores the preferred sorting order for contacts (by given name vs. by family name).
-         *
-         * @hide
-         */
-        public static final String SORT_ORDER = "android.contacts.SORT_ORDER";
-
-        /**
-         * The value for the SORT_ORDER key corresponding to sorting by given name first.
-         *
-         * @hide
-         */
-        public static final int SORT_ORDER_PRIMARY = 1;
-
-        /**
-         * The value for the SORT_ORDER key corresponding to sorting by family name first.
-         *
-         * @hide
-         */
-        public static final int SORT_ORDER_ALTERNATIVE = 2;
-
-        /**
-         * A key in the {@link android.provider.Settings android.provider.Settings} provider
-         * that stores the preferred display order for contacts (given name first vs. family
-         * name first).
-         *
-         * @hide
-         */
-        public static final String DISPLAY_ORDER = "android.contacts.DISPLAY_ORDER";
-
-        /**
-         * The value for the DISPLAY_ORDER key corresponding to showing the given name first.
-         *
-         * @hide
-         */
-        public static final int DISPLAY_ORDER_PRIMARY = 1;
-
-        /**
-         * The value for the DISPLAY_ORDER key corresponding to showing the family name first.
-         *
-         * @hide
-         */
-        public static final int DISPLAY_ORDER_ALTERNATIVE = 2;
-    }
-
-    /**
      * A Directory represents a contacts corpus, e.g. Local contacts,
      * Google Apps Global Address List or Corporate Global Address List.
      * <p>
@@ -345,10 +289,10 @@ public final class ContactsContract {
      * directory provider URIs by themselves. This level of indirection allows
      * Contacts Provider to implement additional system-level features and
      * optimizations. Access to Contacts Provider is protected by the
-     * READ_CONTACTS permission, but access to the directory provider is not.
-     * Therefore directory providers must reject requests coming from clients
-     * other than the Contacts Provider itself. An easy way to prevent such
-     * unauthorized access is to check the name of the calling package:
+     * READ_CONTACTS permission, but access to the directory provider is protected by
+     * BIND_DIRECTORY_SEARCH. This permission was introduced at the API level 17, for previous
+     * platform versions the provider should perform the following check to make sure the call
+     * is coming from the ContactsProvider:
      * <pre>
      * private boolean isCallerAllowed() {
      *   PackageManager pm = getContext().getPackageManager();
@@ -826,6 +770,13 @@ public final class ContactsContract {
         public static final String STARRED = "starred";
 
         /**
+         * The position at which the contact is pinned. If {@link PinnedPositions#UNPINNED},
+         * the contact is not pinned. Also see {@link PinnedPositions}.
+         * <P>Type: INTEGER </P>
+         */
+        public static final String PINNED = "pinned";
+
+        /**
          * URI for a custom ringtone associated with the contact. If null or missing,
          * the default ringtone is used.
          * <P>Type: TEXT (URI to the ringtone)</P>
@@ -860,7 +811,6 @@ public final class ContactsContract {
         /**
          * Reference to the row in the RawContacts table holding the contact name.
          * <P>Type: INTEGER REFERENCES raw_contacts(_id)</P>
-         * @hide
          */
         public static final String NAME_RAW_CONTACT_ID = "name_raw_contact_id";
 
@@ -915,6 +865,12 @@ public final class ContactsContract {
         public static final String PHOTO_THUMBNAIL_URI = "photo_thumb_uri";
 
         /**
+         * Flag that reflects whether the contact exists inside the default directory.
+         * Ie, whether the contact is designed to only be visible outside search.
+         */
+        public static final String IN_DEFAULT_DIRECTORY = "in_default_directory";
+
+        /**
          * Flag that reflects the {@link Groups#GROUP_VISIBLE} state of any
          * {@link CommonDataKinds.GroupMembership} for this contact.
          */
@@ -938,6 +894,15 @@ public final class ContactsContract {
          * its row id changed as a result of a sync or aggregation.
          */
         public static final String LOOKUP_KEY = "lookup";
+
+        /**
+         * Timestamp (milliseconds since epoch) of when this contact was last updated.  This
+         * includes updates to all data associated with this contact including raw contacts.  Any
+         * modification (including deletes and inserts) of underlying contact data are also
+         * reflected in this timestamp.
+         */
+        public static final String CONTACT_LAST_UPDATED_TIMESTAMP =
+                "contact_last_updated_timestamp";
     }
 
     /**
@@ -1146,43 +1111,53 @@ public final class ContactsContract {
         public static final String SORT_KEY_ALTERNATIVE = "sort_key_alt";
     }
 
-    /**
-     * URI parameter and cursor extras that return counts of rows grouped by the
-     * address book index, which is usually the first letter of the sort key.
-     * When this parameter is supplied, the row counts are returned in the
-     * cursor extras bundle.
-     *
-     * @hide
-     */
-    public final static class ContactCounts {
+    interface ContactCounts {
 
         /**
-         * Add this query parameter to a URI to get back row counts grouped by
-         * the address book index as cursor extras. For most languages it is the
-         * first letter of the sort key. This parameter does not affect the main
-         * content of the cursor.
+         * Add this query parameter to a URI to get back row counts grouped by the address book
+         * index as cursor extras. For most languages it is the first letter of the sort key. This
+         * parameter does not affect the main content of the cursor.
          *
-         * @hide
+         * <p>
+         * <pre>
+         * Example:
+         *
+         * import android.provider.ContactsContract.Contacts;
+         *
+         * Uri uri = Contacts.CONTENT_URI.buildUpon()
+         *          .appendQueryParameter(Contacts.EXTRA_ADDRESS_BOOK_INDEX, "true")
+         *          .build();
+         * Cursor cursor = getContentResolver().query(uri,
+         *          new String[] {Contacts.DISPLAY_NAME},
+         *          null, null, null);
+         * Bundle bundle = cursor.getExtras();
+         * if (bundle.containsKey(Contacts.EXTRA_ADDRESS_BOOK_INDEX_TITLES) &&
+         *         bundle.containsKey(Contacts.EXTRA_ADDRESS_BOOK_INDEX_COUNTS)) {
+         *     String sections[] =
+         *             bundle.getStringArray(Contacts.EXTRA_ADDRESS_BOOK_INDEX_TITLES);
+         *     int counts[] = bundle.getIntArray(Contacts.EXTRA_ADDRESS_BOOK_INDEX_COUNTS);
+         * }
+         * </pre>
+         * </p>
          */
-        public static final String ADDRESS_BOOK_INDEX_EXTRAS = "address_book_index_extras";
+        public static final String EXTRA_ADDRESS_BOOK_INDEX =
+                "android.provider.extra.ADDRESS_BOOK_INDEX";
 
         /**
          * The array of address book index titles, which are returned in the
          * same order as the data in the cursor.
          * <p>TYPE: String[]</p>
-         *
-         * @hide
          */
-        public static final String EXTRA_ADDRESS_BOOK_INDEX_TITLES = "address_book_index_titles";
+        public static final String EXTRA_ADDRESS_BOOK_INDEX_TITLES =
+                "android.provider.extra.ADDRESS_BOOK_INDEX_TITLES";
 
         /**
          * The array of group counts for the corresponding group.  Contains the same number
          * of elements as the EXTRA_ADDRESS_BOOK_INDEX_TITLES array.
          * <p>TYPE: int[]</p>
-         *
-         * @hide
          */
-        public static final String EXTRA_ADDRESS_BOOK_INDEX_COUNTS = "address_book_index_counts";
+        public static final String EXTRA_ADDRESS_BOOK_INDEX_COUNTS =
+                "android.provider.extra.ADDRESS_BOOK_INDEX_COUNTS";
     }
 
     /**
@@ -1358,7 +1333,7 @@ public final class ContactsContract {
      * status definitions. Automatically computed as the highest presence of all
      * constituent raw contacts. The provider may choose not to store this value
      * in persistent storage. The expectation is that presence status will be
-     * updated on a regular basic.</td>
+     * updated on a regular basis.</td>
      * </tr>
      * <tr>
      * <td>String</td>
@@ -1398,7 +1373,7 @@ public final class ContactsContract {
      * </table>
      */
     public static class Contacts implements BaseColumns, ContactsColumns,
-            ContactOptionsColumns, ContactNameColumns, ContactStatusColumns {
+            ContactOptionsColumns, ContactNameColumns, ContactStatusColumns, ContactCounts {
         /**
          * This utility class cannot be instantiated
          */
@@ -1408,6 +1383,19 @@ public final class ContactsContract {
          * The content:// style URI for this table
          */
         public static final Uri CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI, "contacts");
+
+        /**
+         * Special contacts URI to refer to contacts on the corp profile from the personal
+         * profile.
+         *
+         * It's supported only by a few specific places for referring to contact pictures that
+         * are in the corp provider for enterprise caller-ID.  Contact picture URIs returned from
+         * {@link PhoneLookup#ENTERPRISE_CONTENT_FILTER_URI} may contain this kind of URI.
+         *
+         * @hide
+         */
+        public static final Uri CORP_CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI,
+                "contacts_corp");
 
         /**
          * A content:// style URI for this table that should be used to create
@@ -1452,17 +1440,43 @@ public final class ContactsContract {
          * Base {@link Uri} for referencing multiple {@link Contacts} entry,
          * created by appending {@link #LOOKUP_KEY} using
          * {@link Uri#withAppendedPath(Uri, String)}. The lookup keys have to be
-         * encoded and joined with the colon (":") separator. The resulting string
-         * has to be encoded again. Provides
-         * {@link OpenableColumns} columns when queried, or returns the
+         * joined with the colon (":") separator, and the resulting string encoded.
+         *
+         * Provides {@link OpenableColumns} columns when queried, or returns the
          * referenced contact formatted as a vCard when opened through
          * {@link ContentResolver#openAssetFileDescriptor(Uri, String)}.
          *
-         * This is private API because we do not have a well-defined way to
-         * specify several entities yet. The format of this Uri might change in the future
-         * or the Uri might be completely removed.
+         * <p>
+         * Usage example:
+         * <dl>
+         * <dt>The following code snippet creates a multi-vcard URI that references all the
+         * contacts in a user's database.</dt>
+         * <dd>
          *
-         * @hide
+         * <pre>
+         * public Uri getAllContactsVcardUri() {
+         *     Cursor cursor = getActivity().getContentResolver().query(Contacts.CONTENT_URI,
+         *         new String[] {Contacts.LOOKUP_KEY}, null, null, null);
+         *     if (cursor == null) {
+         *         return null;
+         *     }
+         *     try {
+         *         StringBuilder uriListBuilder = new StringBuilder();
+         *         int index = 0;
+         *         while (cursor.moveToNext()) {
+         *             if (index != 0) uriListBuilder.append(':');
+         *             uriListBuilder.append(cursor.getString(0));
+         *             index++;
+         *         }
+         *         return Uri.withAppendedPath(Contacts.CONTENT_MULTI_VCARD_URI,
+         *                 Uri.encode(uriListBuilder.toString()));
+         *     } finally {
+         *         cursor.close();
+         *     }
+         * }
+         * </pre>
+         *
+         * </p>
          */
         public static final Uri CONTENT_MULTI_VCARD_URI = Uri.withAppendedPath(CONTENT_URI,
                 "as_multi_vcard");
@@ -1568,8 +1582,7 @@ public final class ContactsContract {
                 CONTENT_URI, "strequent");
 
         /**
-         * The content:// style URI for showing frequently contacted person listing.
-         * @hide
+         * The content:// style URI for showing a list of frequently contacted people.
          */
         public static final Uri CONTENT_FREQUENT_URI = Uri.withAppendedPath(
                 CONTENT_URI, "frequent");
@@ -1603,6 +1616,24 @@ public final class ContactsContract {
          * person.
          */
         public static final String CONTENT_VCARD_TYPE = "text/x-vcard";
+
+
+        /**
+         * Mimimal ID for corp contacts returned from
+         * {@link PhoneLookup#ENTERPRISE_CONTENT_FILTER_URI}.
+         *
+         * @hide
+         */
+        public static long ENTERPRISE_CONTACT_ID_BASE = 1000000000; // slightly smaller than 2 ** 30
+
+        /**
+         * Return TRUE if a contact ID is from the contacts provider on the enterprise profile.
+         *
+         * {@link PhoneLookup#ENTERPRISE_CONTENT_FILTER_URI} may return such a contact.
+         */
+        public static boolean isEnterpriseContactId(long contactId) {
+            return (contactId >= ENTERPRISE_CONTACT_ID_BASE) && (contactId < Profile.MIN_ID);
+        }
 
         /**
          * A sub-directory of a single contact that contains all of the constituent raw contact
@@ -1652,7 +1683,7 @@ public final class ContactsContract {
          */
         public static final class Entity implements BaseColumns, ContactsColumns,
                 ContactNameColumns, RawContactsColumns, BaseSyncColumns, SyncColumns, DataColumns,
-                StatusColumns, ContactOptionsColumns, ContactStatusColumns {
+                StatusColumns, ContactOptionsColumns, ContactStatusColumns, DataUsageStatColumns {
             /**
              * no public constructor since this is a utility class
              */
@@ -1688,16 +1719,28 @@ public final class ContactsContract {
          * Querying for social stream data requires android.permission.READ_SOCIAL_STREAM
          * permission.
          * </p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final class StreamItems implements StreamItemsColumns {
             /**
              * no public constructor since this is a utility class
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             private StreamItems() {}
 
             /**
              * The directory twig for this sub-table
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             public static final String CONTENT_DIRECTORY = "stream_items";
         }
 
@@ -2112,6 +2155,56 @@ public final class ContactsContract {
         return id >= Profile.MIN_ID;
     }
 
+    protected interface DeletedContactsColumns {
+
+        /**
+         * A reference to the {@link ContactsContract.Contacts#_ID} that was deleted.
+         * <P>Type: INTEGER</P>
+         */
+        public static final String CONTACT_ID = "contact_id";
+
+        /**
+         * Time (milliseconds since epoch) that the contact was deleted.
+         */
+        public static final String CONTACT_DELETED_TIMESTAMP = "contact_deleted_timestamp";
+    }
+
+    /**
+     * Constants for the deleted contact table.  This table holds a log of deleted contacts.
+     * <p>
+     * Log older than {@link #DAYS_KEPT_MILLISECONDS} may be deleted.
+     */
+    public static final class DeletedContacts implements DeletedContactsColumns {
+
+        /**
+         * This utility class cannot be instantiated
+         */
+        private DeletedContacts() {
+        }
+
+        /**
+         * The content:// style URI for this table, which requests a directory of raw contact rows
+         * matching the selection criteria.
+         */
+        public static final Uri CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI,
+                "deleted_contacts");
+
+        /**
+         * Number of days that the delete log will be kept.  After this time, delete records may be
+         * deleted.
+         *
+         * @hide
+         */
+        private static final int DAYS_KEPT = 30;
+
+        /**
+         * Milliseconds that the delete log will be kept.  After this time, delete records may be
+         * deleted.
+         */
+        public static final long DAYS_KEPT_MILLISECONDS = 1000L * 60L * 60L * 24L * (long)DAYS_KEPT;
+    }
+
+
     protected interface RawContactsColumns {
         /**
          * A reference to the {@link ContactsContract.Contacts#_ID} that this
@@ -2138,7 +2231,11 @@ public final class ContactsContract {
          * type.  For applications that need to be aware of the data set, this can
          * be used instead of account type to distinguish sets of data.  This is
          * never intended to be used for specifying accounts.
-         * @hide
+         * <p>
+         * This column does *not* escape forward slashes in the account type or the data set.
+         * If this is an issue, consider using
+         * {@link ContactsContract.RawContacts#ACCOUNT_TYPE} and
+         * {@link ContactsContract.RawContacts#DATA_SET} directly.
          */
         public static final String ACCOUNT_TYPE_AND_DATA_SET = "account_type_and_data_set";
 
@@ -2325,7 +2422,7 @@ public final class ContactsContract {
      * parameters.  The latter approach is preferable, especially when you can reuse the
      * URI:
      * <pre>
-     * Uri rawContactUri = RawContacts.URI.buildUpon()
+     * Uri rawContactUri = RawContacts.CONTENT_URI.buildUpon()
      *          .appendQueryParameter(RawContacts.ACCOUNT_NAME, accountName)
      *          .appendQueryParameter(RawContacts.ACCOUNT_TYPE, accountType)
      *          .build();
@@ -2750,17 +2847,29 @@ public final class ContactsContract {
          * inserting or updating social stream items requires android.permission.WRITE_SOCIAL_STREAM
          * permission.
          * </p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final class StreamItems implements BaseColumns, StreamItemsColumns {
             /**
              * No public constructor since this is a utility class
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             private StreamItems() {
             }
 
             /**
              * The directory twig for this sub-table
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             public static final String CONTENT_DIRECTORY = "stream_items";
         }
 
@@ -3175,18 +3284,30 @@ public final class ContactsContract {
      * </pre>
      * </dd>
      * </dl>
+     *
+     * @deprecated - Do not use. This will not be supported in the future. In the future,
+     * cursors returned from related queries will be empty.
      */
+    @Deprecated
     public static final class StreamItems implements BaseColumns, StreamItemsColumns {
         /**
          * This utility class cannot be instantiated
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         private StreamItems() {
         }
 
         /**
          * The content:// style URI for this table, which handles social network stream
          * updates for the user's contacts.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final Uri CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI, "stream_items");
 
         /**
@@ -3201,31 +3322,51 @@ public final class ContactsContract {
          * When using this URI, the stream item ID for the photo(s) must be identified
          * in the {@link ContentValues} passed in.
          * </p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final Uri CONTENT_PHOTO_URI = Uri.withAppendedPath(CONTENT_URI, "photo");
 
         /**
          * This URI allows the caller to query for the maximum number of stream items
          * that will be stored under any single raw contact.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final Uri CONTENT_LIMIT_URI =
                 Uri.withAppendedPath(AUTHORITY_URI, "stream_items_limit");
 
         /**
          * The MIME type of a directory of stream items.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String CONTENT_TYPE = "vnd.android.cursor.dir/stream_item";
 
         /**
          * The MIME type of a single stream item.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String CONTENT_ITEM_TYPE = "vnd.android.cursor.item/stream_item";
 
         /**
          * Queries to {@link ContactsContract.StreamItems#CONTENT_LIMIT_URI} will
          * contain this column, with the value indicating the maximum number of
          * stream items that will be stored under any single raw contact.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String MAX_ITEMS = "max_items";
 
         /**
@@ -3241,28 +3382,48 @@ public final class ContactsContract {
          * requires android.permission.READ_SOCIAL_STREAM permission, and inserting or updating
          * social stream photos requires android.permission.WRITE_SOCIAL_STREAM permission.
          * </p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final class StreamItemPhotos
                 implements BaseColumns, StreamItemPhotosColumns {
             /**
              * No public constructor since this is a utility class
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             private StreamItemPhotos() {
             }
 
             /**
              * The directory twig for this sub-table
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             public static final String CONTENT_DIRECTORY = "photo";
 
             /**
              * The MIME type of a directory of stream item photos.
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             public static final String CONTENT_TYPE = "vnd.android.cursor.dir/stream_item_photo";
 
             /**
              * The MIME type of a single stream item photo.
+             *
+             * @deprecated - Do not use. This will not be supported in the future. In the future,
+             * cursors returned from related queries will be empty.
              */
+            @Deprecated
             public static final String CONTENT_ITEM_TYPE
                     = "vnd.android.cursor.item/stream_item_photo";
         }
@@ -3272,7 +3433,10 @@ public final class ContactsContract {
      * Columns in the StreamItems table.
      *
      * @see ContactsContract.StreamItems
+     * @deprecated - Do not use. This will not be supported in the future. In the future,
+     * cursors returned from related queries will be empty.
      */
+    @Deprecated
     protected interface StreamItemsColumns {
         /**
          * A reference to the {@link android.provider.ContactsContract.Contacts#_ID}
@@ -3280,7 +3444,11 @@ public final class ContactsContract {
          *
          * <p>Type: INTEGER</p>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String CONTACT_ID = "contact_id";
 
         /**
@@ -3289,14 +3457,22 @@ public final class ContactsContract {
          *
          * <p>Type: TEXT</p>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String CONTACT_LOOKUP_KEY = "contact_lookup";
 
         /**
          * A reference to the {@link RawContacts#_ID}
          * that this stream item belongs to.
          * <p>Type: INTEGER</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String RAW_CONTACT_ID = "raw_contact_id";
 
         /**
@@ -3304,7 +3480,11 @@ public final class ContactsContract {
          * this stream item. This value is only designed for use when building
          * user interfaces, and should not be used to infer the owner.
          * <P>Type: TEXT</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String RES_PACKAGE = "res_package";
 
         /**
@@ -3313,7 +3493,11 @@ public final class ContactsContract {
          *
          * <p>Type: TEXT</p>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String ACCOUNT_TYPE = "account_type";
 
         /**
@@ -3322,7 +3506,11 @@ public final class ContactsContract {
          *
          * <p>Type: TEXT</p>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String ACCOUNT_NAME = "account_name";
 
         /**
@@ -3333,7 +3521,11 @@ public final class ContactsContract {
          *
          * <P>Type: TEXT</P>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String DATA_SET = "data_set";
 
         /**
@@ -3342,7 +3534,11 @@ public final class ContactsContract {
          *
          * <P>Type: TEXT</P>
          * <p>read-only</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String RAW_CONTACT_SOURCE_ID = "raw_contact_source_id";
 
         /**
@@ -3350,7 +3546,11 @@ public final class ContactsContract {
          * This resource should be scoped by the {@link #RES_PACKAGE}. As this can only reference
          * drawables, the "@drawable/" prefix must be omitted.
          * <P>Type: TEXT</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String RES_ICON = "icon";
 
         /**
@@ -3358,7 +3558,11 @@ public final class ContactsContract {
          * Talk". This resource should be scoped by the {@link #RES_PACKAGE}. As this can only
          * reference strings, the "@string/" prefix must be omitted.
          * <p>Type: TEXT</p>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String RES_LABEL = "label";
 
         /**
@@ -3375,14 +3579,22 @@ public final class ContactsContract {
          * is unspecified, but it should not break tags.
          * </P>
          * <P>Type: TEXT</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String TEXT = "text";
 
         /**
          * The absolute time (milliseconds since epoch) when this stream item was
          * inserted/updated.
          * <P>Type: NUMBER</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String TIMESTAMP = "timestamp";
 
         /**
@@ -3400,16 +3612,44 @@ public final class ContactsContract {
          * is unspecified, but it should not break tags.
          * </P>
          * <P>Type: TEXT</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String COMMENTS = "comments";
 
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC1 = "stream_item_sync1";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC2 = "stream_item_sync2";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC3 = "stream_item_sync3";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC4 = "stream_item_sync4";
     }
 
@@ -3582,11 +3822,19 @@ public final class ContactsContract {
      * <pre>
      * </dd>
      * </dl>
+     *
+     * @deprecated - Do not use. This will not be supported in the future. In the future,
+     * cursors returned from related queries will be empty.
      */
+    @Deprecated
     public static final class StreamItemPhotos implements BaseColumns, StreamItemPhotosColumns {
         /**
          * No public constructor since this is a utility class
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         private StreamItemPhotos() {
         }
 
@@ -3601,7 +3849,11 @@ public final class ContactsContract {
          * as an asset file.
          * </p>
          * <P>Type: BLOB</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String PHOTO = "photo";
     }
 
@@ -3609,42 +3861,85 @@ public final class ContactsContract {
      * Columns in the StreamItemPhotos table.
      *
      * @see ContactsContract.StreamItemPhotos
+     * @deprecated - Do not use. This will not be supported in the future. In the future,
+     * cursors returned from related queries will be empty.
      */
+    @Deprecated
     protected interface StreamItemPhotosColumns {
         /**
          * A reference to the {@link StreamItems#_ID} this photo is associated with.
          * <P>Type: NUMBER</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String STREAM_ITEM_ID = "stream_item_id";
 
         /**
          * An integer to use for sort order for photos in the stream item.  If not
          * specified, the {@link StreamItemPhotos#_ID} will be used for sorting.
          * <P>Type: NUMBER</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String SORT_INDEX = "sort_index";
 
         /**
          * Photo file ID for the photo.
          * See {@link ContactsContract.DisplayPhoto}.
          * <P>Type: NUMBER</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String PHOTO_FILE_ID = "photo_file_id";
 
         /**
          * URI for retrieving the photo content, automatically populated.  Callers
          * may retrieve the photo content by opening this URI as an asset file.
          * <P>Type: TEXT</P>
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
          */
+        @Deprecated
         public static final String PHOTO_URI = "photo_uri";
 
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC1 = "stream_item_photo_sync1";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC2 = "stream_item_photo_sync2";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC3 = "stream_item_photo_sync3";
-        /** Generic column for use by sync adapters. */
+        /**
+         * Generic column for use by sync adapters.
+         *
+         * @deprecated - Do not use. This will not be supported in the future. In the future,
+         * cursors returned from related queries will be empty.
+         */
+        @Deprecated
         public static final String SYNC4 = "stream_item_photo_sync4";
     }
 
@@ -3702,8 +3997,6 @@ public final class ContactsContract {
          * The package name to use when creating {@link Resources} objects for
          * this data row. This value is only designed for use when building user
          * interfaces, and should not be used to infer the owner.
-         *
-         * @hide
          */
         public static final String RES_PACKAGE = "res_package";
 
@@ -3792,13 +4085,24 @@ public final class ContactsContract {
     }
 
     /**
+     * Columns in the Data_Usage_Stat table
+     */
+    protected interface DataUsageStatColumns {
+        /** The last time (in milliseconds) this {@link Data} was used. */
+        public static final String LAST_TIME_USED = "last_time_used";
+
+        /** The number of times the referenced {@link Data} has been used. */
+        public static final String TIMES_USED = "times_used";
+    }
+
+    /**
      * Combines all columns returned by {@link ContactsContract.Data} table queries.
      *
      * @see ContactsContract.Data
      */
     protected interface DataColumnsWithJoins extends BaseColumns, DataColumns, StatusColumns,
             RawContactsColumns, ContactsColumns, ContactNameColumns, ContactOptionsColumns,
-            ContactStatusColumns {
+            ContactStatusColumns, DataUsageStatColumns {
     }
 
     /**
@@ -4130,7 +4434,7 @@ public final class ContactsContract {
      * all IM rows. See {@link StatusUpdates} for individual status definitions.
      * The provider may choose not to store this value
      * in persistent storage. The expectation is that presence status will be
-     * updated on a regular basic.
+     * updated on a regular basis.
      * </td>
      * </tr>
      * <tr>
@@ -4311,7 +4615,7 @@ public final class ContactsContract {
      * </tr>
      * </table>
      */
-    public final static class Data implements DataColumnsWithJoins {
+    public final static class Data implements DataColumnsWithJoins, ContactCounts {
         /**
          * This utility class cannot be instantiated
          */
@@ -4322,6 +4626,13 @@ public final class ContactsContract {
          * of data rows matching the selection criteria.
          */
         public static final Uri CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI, "data");
+
+        /**
+         * A boolean parameter for {@link Data#CONTENT_URI}.
+         * This specifies whether or not the returned data items should be filtered to show
+         * data items belonging to visible contacts only.
+         */
+        public static final String VISIBLE_CONTACTS_ONLY = "visible_contacts_only";
 
         /**
          * The MIME type of the results from {@link #CONTENT_URI}.
@@ -4694,11 +5005,47 @@ public final class ContactsContract {
          * The content:// style URI for this table. Append the phone number you want to lookup
          * to this URI and query it to perform a lookup. For example:
          * <pre>
-         * Uri lookupUri = Uri.withAppendedPath(PhoneLookup.CONTENT_URI, Uri.encode(phoneNumber));
+         * Uri lookupUri = Uri.withAppendedPath(PhoneLookup.CONTENT_FILTER_URI,
+         *         Uri.encode(phoneNumber));
          * </pre>
          */
         public static final Uri CONTENT_FILTER_URI = Uri.withAppendedPath(AUTHORITY_URI,
                 "phone_lookup");
+
+        /**
+         * URI used for the "enterprise caller-id".
+         *
+         * It supports the same semantics as {@link #CONTENT_FILTER_URI} and returns the same
+         * columns.  If the device has no corp profile that is linked to the current profile, it
+         * behaves in the exact same way as {@link #CONTENT_FILTER_URI}.  If there is a corp profile
+         * linked to the current profile, it first queries against the personal contact database,
+         * and if no matching contacts are found there, then queries against the
+         * corp contacts database.
+         * <p>
+         * If a result is from the corp profile, it makes the following changes to the data:
+         * <ul>
+         *     <li>
+         *     {@link #PHOTO_THUMBNAIL_URI} and {@link #PHOTO_URI} will be rewritten to special
+         *     URIs.  Use {@link ContentResolver#openAssetFileDescriptor} or its siblings to
+         *     load pictures from them.
+         *     {@link #PHOTO_ID} and {@link #PHOTO_FILE_ID} will be set to null.  Do not use them.
+         *     </li>
+         *     <li>
+         *     Corp contacts will get artificial {@link #_ID}s.  In order to tell whether a contact
+         *     is from the corp profile, use
+         *     {@link ContactsContract.Contacts#isEnterpriseContactId(long)}.
+         *     </li>
+         * </ul>
+         * <p>
+         * This URI does NOT support selection nor order-by.
+         *
+         * <pre>
+         * Uri lookupUri = Uri.withAppendedPath(PhoneLookup.ENTERPRISE_CONTENT_FILTER_URI,
+         *         Uri.encode(phoneNumber));
+         * </pre>
+         */
+        public static final Uri ENTERPRISE_CONTENT_FILTER_URI = Uri.withAppendedPath(AUTHORITY_URI,
+                "phone_lookup_enterprise");
 
         /**
          * The MIME type of {@link #CONTENT_FILTER_URI} providing a directory of phone lookup rows.
@@ -4707,11 +5054,11 @@ public final class ContactsContract {
          */
         public static final String CONTENT_TYPE = "vnd.android.cursor.dir/phone_lookup";
 
-       /**
-        * Boolean parameter that is used to look up a SIP address.
-        *
-        * @hide
-        */
+        /**
+         * If this boolean parameter is set to true, then the appended query is treated as a
+         * SIP address and the lookup will be performed against SIP addresses in the user's
+         * contacts.
+         */
         public static final String QUERY_PARAMETER_SIP_ADDRESS = "sip";
     }
 
@@ -4986,33 +5333,59 @@ public final class ContactsContract {
     }
 
     /**
-     * Additional column returned by the {@link Contacts#CONTENT_FILTER_URI} providing the
-     * explanation of why the filter matched the contact.  Specifically, it contains the
-     * data elements that matched the query.  The overall number of words in the snippet
-     * can be capped.
+     * Additional column returned by
+     * {@link ContactsContract.Contacts#CONTENT_FILTER_URI Contacts.CONTENT_FILTER_URI} explaining
+     * why the filter matched the contact. This column will contain extracts from the contact's
+     * constituent {@link Data Data} items, formatted in a way that indicates the section of the
+     * snippet that matched the filter.
      *
-     * @hide
+     * <p>
+     * The following example searches for all contacts that match the query "presi" and requests
+     * the snippet column as well.
+     * <pre>
+     * Builder builder = Contacts.CONTENT_FILTER_URI.buildUpon();
+     * builder.appendPath("presi");
+     * // Defer snippeting to the client side if possible, for performance reasons.
+     * builder.appendQueryParameter(SearchSnippets.DEFERRED_SNIPPETING_KEY,"1");
+     *
+     * Cursor cursor = getContentResolver().query(builder.build());
+     *
+     * Bundle extras = cursor.getExtras();
+     * if (extras.getBoolean(ContactsContract.DEFERRED_SNIPPETING)) {
+     *     // Do our own snippet formatting.
+     *     // For a contact with the email address (president@organization.com), the snippet
+     *     // column will contain the string "president@organization.com".
+     * } else {
+     *     // The snippet has already been pre-formatted, we can display it as is.
+     *     // For a contact with the email address (president@organization.com), the snippet
+     *     // column will contain the string "[presi]dent@organization.com".
+     * }
+     * </pre>
+     * </p>
      */
-    public static class SearchSnippetColumns {
+    public static class SearchSnippets {
 
         /**
-         * The search snippet constructed according to the SQLite rules, see
-         * http://www.sqlite.org/fts3.html#snippet
+         * The search snippet constructed by SQLite snippeting functionality.
          * <p>
-         * The snippet may contain (parts of) several data elements comprising
-         * the contact.
+         * The snippet may contain (parts of) several data elements belonging to the contact,
+         * with the matching parts optionally surrounded by special characters that indicate the
+         * start and end of matching text.
          *
-         * @hide
+         * For example, if a contact has an address "123 Main Street", using a filter "mai" would
+         * return the formatted snippet "123 [Mai]n street".
+         *
+         * @see <a href="http://www.sqlite.org/fts3.html#snippet">
+         *         http://www.sqlite.org/fts3.html#snippet</a>
          */
         public static final String SNIPPET = "snippet";
-
 
         /**
          * Comma-separated parameters for the generation of the snippet:
          * <ul>
-         * <li>The "start match" text. Default is &lt;b&gt;</li>
-         * <li>The "end match" text. Default is &lt;/b&gt;</li>
-         * <li>The "ellipsis" text. Default is &lt;b&gt;...&lt;/b&gt;</li>
+         * <li>The "start match" text. Default is '['</li>
+         * <li>The "end match" text. Default is ']'</li>
+         * <li>The "ellipsis" text. Default is "..."</li>
          * <li>Maximum number of tokens to include in the snippet. Can be either
          * a positive or a negative number: A positive number indicates how many
          * tokens can be returned in total. A negative number indicates how many
@@ -5024,15 +5397,13 @@ public final class ContactsContract {
         public static final String SNIPPET_ARGS_PARAM_KEY = "snippet_args";
 
         /**
-         * A key to ask the provider to defer the snippeting to the client if possible.
-         * Value of 1 implies true, 0 implies false when 0 is the default.
+         * The key to ask the provider to defer the formatting of the snippet to the client if
+         * possible, for performance reasons.
+         * A value of 1 indicates true, 0 indicates false. False is the default.
          * When a cursor is returned to the client, it should check for an extra with the name
          * {@link ContactsContract#DEFERRED_SNIPPETING} in the cursor. If it exists, the client
-         * should do its own snippeting using {@link ContactsContract#snippetize}. If
-         * it doesn't exist, the snippet column in the cursor should already contain a snippetized
-         * string.
-         *
-         * @hide
+         * should do its own formatting of the snippet. If it doesn't exist, the snippet column
+         * in the cursor should already contain a formatted snippet.
          */
         public static final String DEFERRED_SNIPPETING_KEY = "deferred_snippeting";
     }
@@ -5153,7 +5524,7 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class StructuredName implements DataColumnsWithJoins {
+        public static final class StructuredName implements DataColumnsWithJoins, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -5221,8 +5592,6 @@ public final class ContactsContract {
             /**
              * The style used for combining given/middle/family name into a full name.
              * See {@link ContactsContract.FullNameStyle}.
-             *
-             * @hide
              */
             public static final String FULL_NAME_STYLE = DATA10;
 
@@ -5300,7 +5669,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Nickname implements DataColumnsWithJoins, CommonColumns {
+        public static final class Nickname implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts{
             /**
              * This utility class cannot be instantiated
              */
@@ -5384,7 +5754,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Phone implements DataColumnsWithJoins, CommonColumns {
+        public static final class Phone implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -5576,7 +5947,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Email implements DataColumnsWithJoins, CommonColumns {
+        public static final class Email implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -5768,7 +6140,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class StructuredPostal implements DataColumnsWithJoins, CommonColumns {
+        public static final class StructuredPostal implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -5962,7 +6335,7 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Im implements DataColumnsWithJoins, CommonColumns {
+        public static final class Im implements DataColumnsWithJoins, CommonColumns, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6146,7 +6519,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Organization implements DataColumnsWithJoins, CommonColumns {
+        public static final class Organization implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6289,7 +6663,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Relation implements DataColumnsWithJoins, CommonColumns {
+        public static final class Relation implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6404,7 +6779,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Event implements DataColumnsWithJoins, CommonColumns {
+        public static final class Event implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6437,6 +6813,21 @@ public final class ContactsContract {
                     case TYPE_BIRTHDAY: return com.android.internal.R.string.eventTypeBirthday;
                     case TYPE_OTHER: return com.android.internal.R.string.eventTypeOther;
                     default: return com.android.internal.R.string.eventTypeCustom;
+                }
+            }
+
+            /**
+             * Return a {@link CharSequence} that best describes the given type,
+             * possibly substituting the given {@link #LABEL} value
+             * for {@link #TYPE_CUSTOM}.
+             */
+            public static final CharSequence getTypeLabel(Resources res, int type,
+                    CharSequence label) {
+                if (type == TYPE_CUSTOM && !TextUtils.isEmpty(label)) {
+                    return label;
+                } else {
+                    final int labelRes = getTypeResource(type);
+                    return res.getText(labelRes);
                 }
             }
         }
@@ -6477,7 +6868,7 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Photo implements DataColumnsWithJoins {
+        public static final class Photo implements DataColumnsWithJoins, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6525,7 +6916,7 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Note implements DataColumnsWithJoins {
+        public static final class Note implements DataColumnsWithJoins, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6580,7 +6971,7 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class GroupMembership implements DataColumnsWithJoins {
+        public static final class GroupMembership implements DataColumnsWithJoins, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6652,7 +7043,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class Website implements DataColumnsWithJoins, CommonColumns {
+        public static final class Website implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6719,7 +7111,8 @@ public final class ContactsContract {
          * </tr>
          * </table>
          */
-        public static final class SipAddress implements DataColumnsWithJoins, CommonColumns {
+        public static final class SipAddress implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6777,7 +7170,7 @@ public final class ContactsContract {
          * to the same person.
          * </p>
          */
-        public static final class Identity implements DataColumnsWithJoins {
+        public static final class Identity implements DataColumnsWithJoins, ContactCounts {
             /**
              * This utility class cannot be instantiated
              */
@@ -6814,10 +7207,9 @@ public final class ContactsContract {
          * each column. For example the meaning for {@link Phone}'s type is different than
          * {@link SipAddress}'s.
          * </p>
-         *
-         * @hide
          */
-        public static final class Callable implements DataColumnsWithJoins, CommonColumns {
+        public static final class Callable implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
             /**
              * Similar to {@link Phone#CONTENT_URI}, but returns callable data instead of only
              * phone numbers.
@@ -6830,6 +7222,39 @@ public final class ContactsContract {
              */
             public static final Uri CONTENT_FILTER_URI = Uri.withAppendedPath(CONTENT_URI,
                     "filter");
+        }
+
+        /**
+         * A special class of data items, used to refer to types of data that can be used to attempt
+         * to start communicating with a person ({@link Phone} and {@link Email}). Note that this
+         * is NOT a separate data kind.
+         *
+         * This URI allows the ContactsProvider to return a unified result for data items that users
+         * can use to initiate communications with another contact. {@link Phone} and {@link Email}
+         * are the current data types in this category.
+         */
+        public static final class Contactables implements DataColumnsWithJoins, CommonColumns,
+                ContactCounts {
+            /**
+             * The content:// style URI for these data items, which requests a directory of data
+             * rows matching the selection criteria.
+             */
+            public static final Uri CONTENT_URI = Uri.withAppendedPath(Data.CONTENT_URI,
+                    "contactables");
+
+            /**
+             * The content:// style URI for these data items, which allows for a query parameter to
+             * be appended onto the end to filter for data items matching the query.
+             */
+            public static final Uri CONTENT_FILTER_URI = Uri.withAppendedPath(
+                    Contactables.CONTENT_URI, "filter");
+
+            /**
+             * A boolean parameter for {@link Data#CONTENT_URI}.
+             * This specifies whether or not the returned data items should be filtered to show
+             * data items belonging to visible contacts only.
+             */
+            public static final String VISIBLE_CONTACTS_ONLY = "visible_contacts_only";
         }
     }
 
@@ -6870,8 +7295,6 @@ public final class ContactsContract {
          * The package name to use when creating {@link Resources} objects for
          * this group. This value is only designed for use when building user
          * interfaces, and should not be used to infer the owner.
-         *
-         * @hide
          */
         public static final String RES_PACKAGE = "res_package";
 
@@ -6879,8 +7302,6 @@ public final class ContactsContract {
          * The display title of this group to load as a resource from
          * {@link #RES_PACKAGE}, which may be localized.
          * <P>Type: TEXT</P>
-         *
-         * @hide
          */
         public static final String TITLE_RES = "title_res";
 
@@ -7606,16 +8027,94 @@ public final class ContactsContract {
     }
 
     /**
-     * Helper methods to display QuickContact dialogs that allow users to pivot on
+     * <p>
+     * Contact-specific information about whether or not a contact has been pinned by the user
+     * at a particular position within the system contact application's user interface.
+     * </p>
+     *
+     * <p>
+     * This pinning information can be used by individual applications to customize how
+     * they order particular pinned contacts. For example, a Dialer application could
+     * use pinned information to order user-pinned contacts in a top row of favorites.
+     * </p>
+     *
+     * <p>
+     * It is possible for two or more contacts to occupy the same pinned position (due
+     * to aggregation and sync), so this pinning information should be used on a best-effort
+     * basis to order contacts in-application rather than an absolute guide on where a contact
+     * should be positioned. Contacts returned by the ContactsProvider will not be ordered based
+     * on this information, so it is up to the client application to reorder these contacts within
+     * their own UI adhering to (or ignoring as appropriate) information stored in the pinned
+     * column.
+     * </p>
+     *
+     * <p>
+     * By default, unpinned contacts will have a pinned position of
+     * {@link PinnedPositions#UNPINNED}. Client-provided pinned positions can be positive
+     * integers that are greater than 1.
+     * </p>
+     */
+    public static final class PinnedPositions {
+        /**
+         * The method to invoke in order to undemote a formerly demoted contact. The contact id of
+         * the contact must be provided as an argument. If the contact was not previously demoted,
+         * nothing will be done.
+         * @hide
+         */
+        public static final String UNDEMOTE_METHOD = "undemote";
+
+        /**
+         * Undemotes a formerly demoted contact. If the contact was not previously demoted, nothing
+         * will be done.
+         *
+         * @param contentResolver to perform the undemote operation on.
+         * @param contactId the id of the contact to undemote.
+         */
+        public static void undemote(ContentResolver contentResolver, long contactId) {
+            contentResolver.call(ContactsContract.AUTHORITY_URI, PinnedPositions.UNDEMOTE_METHOD,
+                    String.valueOf(contactId), null);
+        }
+
+        /**
+         * Pins a contact at a provided position, or unpins a contact.
+         *
+         * @param contentResolver to perform the pinning operation on.
+         * @param pinnedPosition the position to pin the contact at. To unpin a contact, use
+         *         {@link PinnedPositions#UNPINNED}.
+         */
+        public static void pin(
+                ContentResolver contentResolver, long contactId, int pinnedPosition) {
+            final Uri uri = Uri.withAppendedPath(Contacts.CONTENT_URI, String.valueOf(contactId));
+            final ContentValues values = new ContentValues();
+            values.put(Contacts.PINNED, pinnedPosition);
+            contentResolver.update(uri, values, null, null);
+        }
+
+        /**
+         * Default value for the pinned position of an unpinned contact.
+         */
+        public static final int UNPINNED = 0;
+
+        /**
+         * Value of pinned position for a contact that a user has indicated should be considered
+         * of the lowest priority. It is up to the client application to determine how to present
+         * such a contact - for example all the way at the bottom of a contact list, or simply
+         * just hidden from view.
+         */
+        public static final int DEMOTED = -1;
+    }
+
+    /**
+     * Helper methods to display QuickContact dialogs that display all the information belonging to
      * a specific {@link Contacts} entry.
      */
     public static final class QuickContact {
         /**
-         * Action used to trigger person pivot dialog.
-         * @hide
+         * Action used to launch the system contacts application and bring up a QuickContact dialog
+         * for the provided {@link Contacts} entry.
          */
         public static final String ACTION_QUICK_CONTACT =
-                "com.android.contacts.action.QUICK_CONTACT";
+                "android.provider.action.QUICK_CONTACT";
 
         /**
          * Extra used to specify pivot dialog location in screen coordinates.
@@ -7623,20 +8122,19 @@ public final class ContactsContract {
          * @hide
          */
         @Deprecated
-        public static final String EXTRA_TARGET_RECT = "target_rect";
+        public static final String EXTRA_TARGET_RECT = "android.provider.extra.TARGET_RECT";
 
         /**
          * Extra used to specify size of pivot dialog.
          * @hide
          */
-        public static final String EXTRA_MODE = "mode";
+        public static final String EXTRA_MODE = "android.provider.extra.MODE";
 
         /**
-         * Extra used to indicate a list of specific MIME-types to exclude and
-         * not display. Stored as a {@link String} array.
-         * @hide
+         * Extra used to indicate a list of specific MIME-types to exclude and not display in the
+         * QuickContacts dialog. Stored as a {@link String} array.
          */
-        public static final String EXTRA_EXCLUDE_MIMES = "exclude_mimes";
+        public static final String EXTRA_EXCLUDE_MIMES = "android.provider.extra.EXCLUDE_MIMES";
 
         /**
          * Small QuickContact mode, usually presented with minimal actions.
@@ -7656,6 +8154,55 @@ public final class ContactsContract {
          * information, such as a photo.
          */
         public static final int MODE_LARGE = 3;
+
+        /**
+         * Constructs the QuickContacts intent with a view's rect.
+         * @hide
+         */
+        public static Intent composeQuickContactsIntent(Context context, View target, Uri lookupUri,
+                int mode, String[] excludeMimes) {
+            // Find location and bounds of target view, adjusting based on the
+            // assumed local density.
+            final float appScale = context.getResources().getCompatibilityInfo().applicationScale;
+            final int[] pos = new int[2];
+            target.getLocationOnScreen(pos);
+
+            final Rect rect = new Rect();
+            rect.left = (int) (pos[0] * appScale + 0.5f);
+            rect.top = (int) (pos[1] * appScale + 0.5f);
+            rect.right = (int) ((pos[0] + target.getWidth()) * appScale + 0.5f);
+            rect.bottom = (int) ((pos[1] + target.getHeight()) * appScale + 0.5f);
+
+            return composeQuickContactsIntent(context, rect, lookupUri, mode, excludeMimes);
+        }
+
+        /**
+         * Constructs the QuickContacts intent.
+         * @hide
+         */
+        public static Intent composeQuickContactsIntent(Context context, Rect target,
+                Uri lookupUri, int mode, String[] excludeMimes) {
+            // When launching from an Activiy, we don't want to start a new task, but otherwise
+            // we *must* start a new task.  (Otherwise startActivity() would crash.)
+            Context actualContext = context;
+            while ((actualContext instanceof ContextWrapper)
+                    && !(actualContext instanceof Activity)) {
+                actualContext = ((ContextWrapper) actualContext).getBaseContext();
+            }
+            final int intentFlags = ((actualContext instanceof Activity)
+                    ? 0 : Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    // Workaround for b/16898764. Declaring singleTop in manifest doesn't work.
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP;
+
+            // Launch pivot dialog through intent for now
+            final Intent intent = new Intent(ACTION_QUICK_CONTACT).addFlags(intentFlags);
+
+            intent.setData(lookupUri);
+            intent.setSourceBounds(target);
+            intent.putExtra(EXTRA_MODE, mode);
+            intent.putExtra(EXTRA_EXCLUDE_MIMES, excludeMimes);
+            return intent;
+        }
 
         /**
          * Trigger a dialog that lists the various methods of interacting with
@@ -7682,20 +8229,10 @@ public final class ContactsContract {
          */
         public static void showQuickContact(Context context, View target, Uri lookupUri, int mode,
                 String[] excludeMimes) {
-            // Find location and bounds of target view, adjusting based on the
-            // assumed local density.
-            final float appScale = context.getResources().getCompatibilityInfo().applicationScale;
-            final int[] pos = new int[2];
-            target.getLocationOnScreen(pos);
-
-            final Rect rect = new Rect();
-            rect.left = (int) (pos[0] * appScale + 0.5f);
-            rect.top = (int) (pos[1] * appScale + 0.5f);
-            rect.right = (int) ((pos[0] + target.getWidth()) * appScale + 0.5f);
-            rect.bottom = (int) ((pos[1] + target.getHeight()) * appScale + 0.5f);
-
             // Trigger with obtained rectangle
-            showQuickContact(context, rect, lookupUri, mode, excludeMimes);
+            Intent intent = composeQuickContactsIntent(context, target, lookupUri, mode,
+                    excludeMimes);
+            startActivityWithErrorToast(context, intent);
         }
 
         /**
@@ -7726,25 +8263,18 @@ public final class ContactsContract {
          */
         public static void showQuickContact(Context context, Rect target, Uri lookupUri, int mode,
                 String[] excludeMimes) {
-            // When launching from an Activiy, we don't want to start a new task, but otherwise
-            // we *must* start a new task.  (Otherwise startActivity() would crash.)
-            Context actualContext = context;
-            while ((actualContext instanceof ContextWrapper)
-                    && !(actualContext instanceof Activity)) {
-                actualContext = ((ContextWrapper) actualContext).getBaseContext();
+            Intent intent = composeQuickContactsIntent(context, target, lookupUri, mode,
+                    excludeMimes);
+            startActivityWithErrorToast(context, intent);
+        }
+
+        private static void startActivityWithErrorToast(Context context, Intent intent) {
+            try {
+              context.startActivity(intent);
+            } catch (ActivityNotFoundException e) {
+                Toast.makeText(context, com.android.internal.R.string.quick_contacts_not_available,
+                                Toast.LENGTH_SHORT).show();
             }
-            final int intentFlags = (actualContext instanceof Activity)
-                    ? Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET
-                    : Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK;
-
-            // Launch pivot dialog through intent for now
-            final Intent intent = new Intent(ACTION_QUICK_CONTACT).addFlags(intentFlags);
-
-            intent.setData(lookupUri);
-            intent.setSourceBounds(target);
-            intent.putExtra(EXTRA_MODE, mode);
-            intent.putExtra(EXTRA_EXCLUDE_MIMES, excludeMimes);
-            context.startActivity(intent);
         }
     }
 
@@ -7835,6 +8365,13 @@ public final class ContactsContract {
                 "android.provider.Contacts.SEARCH_SUGGESTION_CREATE_CONTACT_CLICKED";
 
         /**
+         * This is the intent that is fired when the contacts database is created. <p> The
+         * READ_CONTACT permission is required to receive these broadcasts.
+         */
+        public static final String CONTACTS_DATABASE_CREATED =
+                "android.provider.Contacts.DATABASE_CREATED";
+
+        /**
          * Starts an Activity that lets the user pick a contact to attach an image to.
          * After picking the contact it launches the image cropper in face detection mode.
          */
@@ -7898,6 +8435,16 @@ public final class ContactsContract {
          */
         public static final String ACTION_GET_MULTIPLE_PHONES =
                 "com.android.contacts.action.GET_MULTIPLE_PHONES";
+
+        /**
+         * A broadcast action which is sent when any change has been made to the profile, such
+         * as the profile name or the picture.  A receiver must have
+         * the android.permission.READ_PROFILE permission.
+         *
+         * @hide
+         */
+        public static final String ACTION_PROFILE_CHANGED =
+                "android.provider.Contacts.PROFILE_CHANGED";
 
         /**
          * Used with {@link #SHOW_OR_CREATE_CONTACT} to force creating a new
@@ -8038,6 +8585,12 @@ public final class ContactsContract {
                     "com.android.contacts.action.LIST_FREQUENT";
 
             /**
+             * The action for the "Join Contact" picker.
+             */
+            public static final String PICK_JOIN_CONTACT_ACTION =
+                    "com.android.contacts.action.JOIN_CONTACT";
+
+            /**
              * The action for the "strequent" contacts list tab. It first lists the starred
              * contacts in alphabetical order and then the frequent contacts in descending
              * order of the number of times they have been contacted.
@@ -8069,6 +8622,15 @@ public final class ContactsContract {
              */
             public static final String FILTER_TEXT_EXTRA_KEY =
                     "com.android.contacts.extra.FILTER_TEXT";
+
+            /**
+             * Used with JOIN_CONTACT action to set the target for aggregation. This action type
+             * uses contact ids instead of contact uris for the sake of backwards compatibility.
+             * <p>
+             * Type: LONG
+             */
+            public static final String TARGET_CONTACT_ID_EXTRA_KEY
+                    = "com.android.contacts.action.CONTACT_ID";
         }
 
         /**
@@ -8315,138 +8877,4 @@ public final class ContactsContract {
             public static final String DATA_SET = "com.android.contacts.extra.DATA_SET";
         }
     }
-
-    /**
-     * Creates a snippet out of the given content that matches the given query.
-     * @param content - The content to use to compute the snippet.
-     * @param displayName - Display name for the contact - if this already contains the search
-     *        content, no snippet should be shown.
-     * @param query - String to search for in the content.
-     * @param snippetStartMatch - Marks the start of the matching string in the snippet.
-     * @param snippetEndMatch - Marks the end of the matching string in the snippet.
-     * @param snippetEllipsis - Ellipsis string appended to the end of the snippet (if too long).
-     * @param snippetMaxTokens - Maximum number of words from the snippet that will be displayed.
-     * @return The computed snippet, or null if the snippet could not be computed or should not be
-     *         shown.
-     *
-     *  @hide
-     */
-    public static String snippetize(String content, String displayName, String query,
-            char snippetStartMatch, char snippetEndMatch, String snippetEllipsis,
-            int snippetMaxTokens) {
-
-        String lowerQuery = query != null ? query.toLowerCase() : null;
-        if (TextUtils.isEmpty(content) || TextUtils.isEmpty(query) ||
-                TextUtils.isEmpty(displayName) || !content.toLowerCase().contains(lowerQuery)) {
-            return null;
-        }
-
-        // If the display name already contains the query term, return empty - snippets should
-        // not be needed in that case.
-        String lowerDisplayName = displayName != null ? displayName.toLowerCase() : "";
-        List<String> nameTokens = new ArrayList<String>();
-        List<Integer> nameTokenOffsets = new ArrayList<Integer>();
-        split(lowerDisplayName.trim(), nameTokens, nameTokenOffsets);
-        for (String nameToken : nameTokens) {
-            if (nameToken.startsWith(lowerQuery)) {
-                return null;
-            }
-        }
-
-        String[] contentLines = content.split("\n");
-
-        // Locate the lines of the content that contain the query term.
-        for (String contentLine : contentLines) {
-            if (contentLine.toLowerCase().contains(lowerQuery)) {
-
-                // Line contains the query string - now search for it at the start of tokens.
-                List<String> lineTokens = new ArrayList<String>();
-                List<Integer> tokenOffsets = new ArrayList<Integer>();
-                split(contentLine, lineTokens, tokenOffsets);
-
-                // As we find matches against the query, we'll populate this list with the marked
-                // (or unchanged) tokens.
-                List<String> markedTokens = new ArrayList<String>();
-
-                int firstToken = -1;
-                int lastToken = -1;
-                for (int i = 0; i < lineTokens.size(); i++) {
-                    String token = lineTokens.get(i);
-                    String lowerToken = token.toLowerCase();
-                    if (lowerToken.startsWith(lowerQuery)) {
-
-                        // Query term matched; surround the token with match markers.
-                        markedTokens.add(snippetStartMatch + token + snippetEndMatch);
-
-                        // If this is the first token found with a match, mark the token
-                        // positions to use for assembling the snippet.
-                        if (firstToken == -1) {
-                            firstToken =
-                                    Math.max(0, i - (int) Math.floor(
-                                            Math.abs(snippetMaxTokens)
-                                            / 2.0));
-                            lastToken =
-                                    Math.min(lineTokens.size(), firstToken +
-                                            Math.abs(snippetMaxTokens));
-                        }
-                    } else {
-                        markedTokens.add(token);
-                    }
-                }
-
-                // Assemble the snippet by piecing the tokens back together.
-                if (firstToken > -1) {
-                    StringBuilder sb = new StringBuilder();
-                    if (firstToken > 0) {
-                        sb.append(snippetEllipsis);
-                    }
-                    for (int i = firstToken; i < lastToken; i++) {
-                        String markedToken = markedTokens.get(i);
-                        String originalToken = lineTokens.get(i);
-                        sb.append(markedToken);
-                        if (i < lastToken - 1) {
-                            // Add the characters that appeared between this token and the next.
-                            sb.append(contentLine.substring(
-                                    tokenOffsets.get(i) + originalToken.length(),
-                                    tokenOffsets.get(i + 1)));
-                        }
-                    }
-                    if (lastToken < lineTokens.size()) {
-                        sb.append(snippetEllipsis);
-                    }
-                    return sb.toString();
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Pattern for splitting a line into tokens.  This matches e-mail addresses as a single token,
-     * otherwise splitting on any group of non-alphanumeric characters.
-     *
-     * @hide
-     */
-    private static Pattern SPLIT_PATTERN =
-        Pattern.compile("([\\w-\\.]+)@((?:[\\w]+\\.)+)([a-zA-Z]{2,4})|[\\w]+");
-
-    /**
-     * Helper method for splitting a string into tokens.  The lists passed in are populated with the
-     * tokens and offsets into the content of each token.  The tokenization function parses e-mail
-     * addresses as a single token; otherwise it splits on any non-alphanumeric character.
-     * @param content Content to split.
-     * @param tokens List of token strings to populate.
-     * @param offsets List of offsets into the content for each token returned.
-     *
-     * @hide
-     */
-    private static void split(String content, List<String> tokens, List<Integer> offsets) {
-        Matcher matcher = SPLIT_PATTERN.matcher(content);
-        while (matcher.find()) {
-            tokens.add(matcher.group());
-            offsets.add(matcher.start());
-        }
-    }
-
-
 }

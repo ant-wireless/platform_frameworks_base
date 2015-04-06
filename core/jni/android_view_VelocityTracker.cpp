@@ -20,12 +20,13 @@
 
 #include <android_runtime/AndroidRuntime.h>
 #include <utils/Log.h>
-#include <androidfw/Input.h>
-#include <androidfw/VelocityTracker.h>
+#include <input/Input.h>
+#include <input/VelocityTracker.h>
 #include "android_view_MotionEvent.h"
 
 #include <ScopedUtfChars.h>
 
+#include "core_jni_helpers.h"
 
 namespace android {
 
@@ -138,26 +139,26 @@ bool VelocityTrackerState::getEstimator(int32_t id, VelocityTracker::Estimator* 
 
 // --- JNI Methods ---
 
-static jint android_view_VelocityTracker_nativeInitialize(JNIEnv* env, jclass clazz,
+static jlong android_view_VelocityTracker_nativeInitialize(JNIEnv* env, jclass clazz,
         jstring strategyStr) {
     if (strategyStr) {
         ScopedUtfChars strategy(env, strategyStr);
-        return reinterpret_cast<jint>(new VelocityTrackerState(strategy.c_str()));
+        return reinterpret_cast<jlong>(new VelocityTrackerState(strategy.c_str()));
     }
-    return reinterpret_cast<jint>(new VelocityTrackerState(NULL));
+    return reinterpret_cast<jlong>(new VelocityTrackerState(NULL));
 }
 
-static void android_view_VelocityTracker_nativeDispose(JNIEnv* env, jclass clazz, jint ptr) {
+static void android_view_VelocityTracker_nativeDispose(JNIEnv* env, jclass clazz, jlong ptr) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     delete state;
 }
 
-static void android_view_VelocityTracker_nativeClear(JNIEnv* env, jclass clazz, jint ptr) {
+static void android_view_VelocityTracker_nativeClear(JNIEnv* env, jclass clazz, jlong ptr) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     state->clear();
 }
 
-static void android_view_VelocityTracker_nativeAddMovement(JNIEnv* env, jclass clazz, jint ptr,
+static void android_view_VelocityTracker_nativeAddMovement(JNIEnv* env, jclass clazz, jlong ptr,
         jobject eventObj) {
     const MotionEvent* event = android_view_MotionEvent_getNativePtr(env, eventObj);
     if (!event) {
@@ -170,13 +171,13 @@ static void android_view_VelocityTracker_nativeAddMovement(JNIEnv* env, jclass c
 }
 
 static void android_view_VelocityTracker_nativeComputeCurrentVelocity(JNIEnv* env, jclass clazz,
-        jint ptr, jint units, jfloat maxVelocity) {
+        jlong ptr, jint units, jfloat maxVelocity) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     state->computeCurrentVelocity(units, maxVelocity);
 }
 
 static jfloat android_view_VelocityTracker_nativeGetXVelocity(JNIEnv* env, jclass clazz,
-        jint ptr, jint id) {
+        jlong ptr, jint id) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     float vx;
     state->getVelocity(id, &vx, NULL);
@@ -184,7 +185,7 @@ static jfloat android_view_VelocityTracker_nativeGetXVelocity(JNIEnv* env, jclas
 }
 
 static jfloat android_view_VelocityTracker_nativeGetYVelocity(JNIEnv* env, jclass clazz,
-        jint ptr, jint id) {
+        jlong ptr, jint id) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     float vy;
     state->getVelocity(id, NULL, &vy);
@@ -192,7 +193,7 @@ static jfloat android_view_VelocityTracker_nativeGetYVelocity(JNIEnv* env, jclas
 }
 
 static jboolean android_view_VelocityTracker_nativeGetEstimator(JNIEnv* env, jclass clazz,
-        jint ptr, jint id, jobject outEstimatorObj) {
+        jlong ptr, jint id, jobject outEstimatorObj) {
     VelocityTrackerState* state = reinterpret_cast<VelocityTrackerState*>(ptr);
     VelocityTracker::Estimator estimator;
     bool result = state->getEstimator(id, &estimator);
@@ -217,56 +218,43 @@ static jboolean android_view_VelocityTracker_nativeGetEstimator(JNIEnv* env, jcl
 static JNINativeMethod gVelocityTrackerMethods[] = {
     /* name, signature, funcPtr */
     { "nativeInitialize",
-            "(Ljava/lang/String;)I",
+            "(Ljava/lang/String;)J",
             (void*)android_view_VelocityTracker_nativeInitialize },
     { "nativeDispose",
-            "(I)V",
+            "(J)V",
             (void*)android_view_VelocityTracker_nativeDispose },
     { "nativeClear",
-            "(I)V",
+            "(J)V",
             (void*)android_view_VelocityTracker_nativeClear },
     { "nativeAddMovement",
-            "(ILandroid/view/MotionEvent;)V",
+            "(JLandroid/view/MotionEvent;)V",
             (void*)android_view_VelocityTracker_nativeAddMovement },
     { "nativeComputeCurrentVelocity",
-            "(IIF)V",
+            "(JIF)V",
             (void*)android_view_VelocityTracker_nativeComputeCurrentVelocity },
     { "nativeGetXVelocity",
-            "(II)F",
+            "(JI)F",
             (void*)android_view_VelocityTracker_nativeGetXVelocity },
     { "nativeGetYVelocity",
-            "(II)F",
+            "(JI)F",
             (void*)android_view_VelocityTracker_nativeGetYVelocity },
     { "nativeGetEstimator",
-            "(IILandroid/view/VelocityTracker$Estimator;)Z",
+            "(JILandroid/view/VelocityTracker$Estimator;)Z",
             (void*)android_view_VelocityTracker_nativeGetEstimator },
 };
 
-#define FIND_CLASS(var, className) \
-        var = env->FindClass(className); \
-        LOG_FATAL_IF(! var, "Unable to find class " className);
-
-#define GET_FIELD_ID(var, clazz, fieldName, fieldDescriptor) \
-        var = env->GetFieldID(clazz, fieldName, fieldDescriptor); \
-        LOG_FATAL_IF(! var, "Unable to find field " fieldName);
-
 int register_android_view_VelocityTracker(JNIEnv* env) {
-    int res = jniRegisterNativeMethods(env, "android/view/VelocityTracker",
-            gVelocityTrackerMethods, NELEM(gVelocityTrackerMethods));
-    LOG_FATAL_IF(res < 0, "Unable to register native methods.");
+    int res = RegisterMethodsOrDie(env, "android/view/VelocityTracker", gVelocityTrackerMethods,
+                                   NELEM(gVelocityTrackerMethods));
 
-    jclass clazz;
-    FIND_CLASS(clazz, "android/view/VelocityTracker$Estimator");
+    jclass clazz = FindClassOrDie(env, "android/view/VelocityTracker$Estimator");
 
-    GET_FIELD_ID(gEstimatorClassInfo.xCoeff, clazz,
-            "xCoeff", "[F");
-    GET_FIELD_ID(gEstimatorClassInfo.yCoeff, clazz,
-            "yCoeff", "[F");
-    GET_FIELD_ID(gEstimatorClassInfo.degree, clazz,
-            "degree", "I");
-    GET_FIELD_ID(gEstimatorClassInfo.confidence, clazz,
-            "confidence", "F");
-    return 0;
+    gEstimatorClassInfo.xCoeff = GetFieldIDOrDie(env, clazz, "xCoeff", "[F");
+    gEstimatorClassInfo.yCoeff = GetFieldIDOrDie(env, clazz, "yCoeff", "[F");
+    gEstimatorClassInfo.degree = GetFieldIDOrDie(env, clazz, "degree", "I");
+    gEstimatorClassInfo.confidence = GetFieldIDOrDie(env, clazz, "confidence", "F");
+
+    return res;
 }
 
 } // namespace android

@@ -20,7 +20,7 @@
 #include "jni.h"
 #include "JNIHelp.h"
 #include <utils/misc.h>
-#include <android_runtime/AndroidRuntime.h>
+#include <core_jni_helpers.h>
 #include <utils/Log.h>
 
 #include <androidfw/ResourceTypes.h>
@@ -31,7 +31,7 @@ namespace android {
 
 // ----------------------------------------------------------------------------
 
-static jint android_content_StringBlock_nativeCreate(JNIEnv* env, jobject clazz,
+static jlong android_content_StringBlock_nativeCreate(JNIEnv* env, jobject clazz,
                                                   jbyteArray bArray,
                                                   jint off, jint len)
 {
@@ -52,16 +52,17 @@ static jint android_content_StringBlock_nativeCreate(JNIEnv* env, jobject clazz,
 
     if (osb == NULL || osb->getError() != NO_ERROR) {
         jniThrowException(env, "java/lang/IllegalArgumentException", NULL);
+        delete osb;
         return 0;
     }
 
-    return (jint)osb;
+    return reinterpret_cast<jlong>(osb);
 }
 
 static jint android_content_StringBlock_nativeGetSize(JNIEnv* env, jobject clazz,
-                                                   jint token)
+                                                   jlong token)
 {
-    ResStringPool* osb = (ResStringPool*)token;
+    ResStringPool* osb = reinterpret_cast<ResStringPool*>(token);
     if (osb == NULL) {
         jniThrowNullPointerException(env, NULL);
         return 0;
@@ -71,9 +72,9 @@ static jint android_content_StringBlock_nativeGetSize(JNIEnv* env, jobject clazz
 }
 
 static jstring android_content_StringBlock_nativeGetString(JNIEnv* env, jobject clazz,
-                                                        jint token, jint idx)
+                                                        jlong token, jint idx)
 {
-    ResStringPool* osb = (ResStringPool*)token;
+    ResStringPool* osb = reinterpret_cast<ResStringPool*>(token);
     if (osb == NULL) {
         jniThrowNullPointerException(env, NULL);
         return 0;
@@ -95,9 +96,9 @@ static jstring android_content_StringBlock_nativeGetString(JNIEnv* env, jobject 
 }
 
 static jintArray android_content_StringBlock_nativeGetStyle(JNIEnv* env, jobject clazz,
-                                                         jint token, jint idx)
+                                                         jlong token, jint idx)
 {
-    ResStringPool* osb = (ResStringPool*)token;
+    ResStringPool* osb = reinterpret_cast<ResStringPool*>(token);
     if (osb == NULL) {
         jniThrowNullPointerException(env, NULL);
         return NULL;
@@ -138,9 +139,9 @@ static jintArray android_content_StringBlock_nativeGetStyle(JNIEnv* env, jobject
 }
 
 static void android_content_StringBlock_nativeDestroy(JNIEnv* env, jobject clazz,
-                                                   jint token)
+                                                   jlong token)
 {
-    ResStringPool* osb = (ResStringPool*)token;
+    ResStringPool* osb = reinterpret_cast<ResStringPool*>(token);
     if (osb == NULL) {
         jniThrowNullPointerException(env, NULL);
         return;
@@ -156,21 +157,21 @@ static void android_content_StringBlock_nativeDestroy(JNIEnv* env, jobject clazz
  */
 static JNINativeMethod gStringBlockMethods[] = {
     /* name, signature, funcPtr */
-    { "nativeCreate",      "([BII)I",
+    { "nativeCreate",      "([BII)J",
             (void*) android_content_StringBlock_nativeCreate },
-    { "nativeGetSize",      "(I)I",
+    { "nativeGetSize",      "(J)I",
             (void*) android_content_StringBlock_nativeGetSize },
-    { "nativeGetString",    "(II)Ljava/lang/String;",
+    { "nativeGetString",    "(JI)Ljava/lang/String;",
             (void*) android_content_StringBlock_nativeGetString },
-    { "nativeGetStyle",    "(II)[I",
+    { "nativeGetStyle",    "(JI)[I",
             (void*) android_content_StringBlock_nativeGetStyle },
-    { "nativeDestroy",      "(I)V",
+    { "nativeDestroy",      "(J)V",
             (void*) android_content_StringBlock_nativeDestroy },
 };
 
 int register_android_content_StringBlock(JNIEnv* env)
 {
-    return AndroidRuntime::registerNativeMethods(env,
+    return RegisterMethodsOrDie(env,
             "android/content/res/StringBlock", gStringBlockMethods, NELEM(gStringBlockMethods));
 }
 

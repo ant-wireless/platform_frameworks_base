@@ -167,6 +167,7 @@ import android.util.SparseArray;
  */
 public final class MotionEvent extends InputEvent implements Parcelable {
     private static final long NS_PER_MS = 1000000;
+    private static final String LABEL_PREFIX = "AXIS_";
 
     /**
      * An invalid pointer id.
@@ -399,6 +400,23 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * @see #setTainted
      */
     public static final int FLAG_TAINTED = 0x80000000;
+
+    /**
+     * Private flag indicating that this event was synthesized by the system and
+     * should be delivered to the accessibility focused view first. When being
+     * dispatched such an event is not handled by predecessors of the accessibility
+     * focused view and after the event reaches that view the flag is cleared and
+     * normal event dispatch is performed. This ensures that the platform can click
+     * on any view that has accessibility focus which is semantically equivalent to
+     * asking the view to perform a click accessibility action but more generic as
+     * views not implementing click action correctly can still be activated.
+     *
+     * @hide
+     * @see #isTargetAccessibilityFocus()
+     * @see #setTargetAccessibilityFocus(boolean)
+     */
+    public static final int FLAG_TARGET_ACCESSIBILITY_FOCUS = 0x40000000;
+
 
     /**
      * Flag indicating the motion event intersected the top edge of the screen.
@@ -1311,63 +1329,66 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     // Pointer to the native MotionEvent object that contains the actual data.
-    private int mNativePtr;
+    private long mNativePtr;
 
     private MotionEvent mNext;
 
-    private static native int nativeInitialize(int nativePtr,
+    private static native long nativeInitialize(long nativePtr,
             int deviceId, int source, int action, int flags, int edgeFlags,
             int metaState, int buttonState,
             float xOffset, float yOffset, float xPrecision, float yPrecision,
             long downTimeNanos, long eventTimeNanos,
             int pointerCount, PointerProperties[] pointerIds, PointerCoords[] pointerCoords);
-    private static native int nativeCopy(int destNativePtr, int sourceNativePtr,
+    private static native long nativeCopy(long destNativePtr, long sourceNativePtr,
             boolean keepHistory);
-    private static native void nativeDispose(int nativePtr);
-    private static native void nativeAddBatch(int nativePtr, long eventTimeNanos,
+    private static native void nativeDispose(long nativePtr);
+    private static native void nativeAddBatch(long nativePtr, long eventTimeNanos,
             PointerCoords[] pointerCoords, int metaState);
 
-    private static native int nativeGetDeviceId(int nativePtr);
-    private static native int nativeGetSource(int nativePtr);
-    private static native int nativeSetSource(int nativePtr, int source);
-    private static native int nativeGetAction(int nativePtr);
-    private static native void nativeSetAction(int nativePtr, int action);
-    private static native boolean nativeIsTouchEvent(int nativePtr);
-    private static native int nativeGetFlags(int nativePtr);
-    private static native void nativeSetFlags(int nativePtr, int flags);
-    private static native int nativeGetEdgeFlags(int nativePtr);
-    private static native void nativeSetEdgeFlags(int nativePtr, int action);
-    private static native int nativeGetMetaState(int nativePtr);
-    private static native int nativeGetButtonState(int nativePtr);
-    private static native void nativeOffsetLocation(int nativePtr, float deltaX, float deltaY);
-    private static native float nativeGetXOffset(int nativePtr);
-    private static native float nativeGetYOffset(int nativePtr);
-    private static native float nativeGetXPrecision(int nativePtr);
-    private static native float nativeGetYPrecision(int nativePtr);
-    private static native long nativeGetDownTimeNanos(int nativePtr);
-    private static native void nativeSetDownTimeNanos(int nativePtr, long downTime);
+    private static native int nativeGetDeviceId(long nativePtr);
+    private static native int nativeGetSource(long nativePtr);
+    private static native int nativeSetSource(long nativePtr, int source);
+    private static native int nativeGetAction(long nativePtr);
+    private static native void nativeSetAction(long nativePtr, int action);
+    private static native boolean nativeIsTouchEvent(long nativePtr);
+    private static native int nativeGetFlags(long nativePtr);
+    private static native void nativeSetFlags(long nativePtr, int flags);
+    private static native int nativeGetEdgeFlags(long nativePtr);
+    private static native void nativeSetEdgeFlags(long nativePtr, int action);
+    private static native int nativeGetMetaState(long nativePtr);
+    private static native int nativeGetButtonState(long nativePtr);
+    private static native void nativeOffsetLocation(long nativePtr, float deltaX, float deltaY);
+    private static native float nativeGetXOffset(long nativePtr);
+    private static native float nativeGetYOffset(long nativePtr);
+    private static native float nativeGetXPrecision(long nativePtr);
+    private static native float nativeGetYPrecision(long nativePtr);
+    private static native long nativeGetDownTimeNanos(long nativePtr);
+    private static native void nativeSetDownTimeNanos(long nativePtr, long downTime);
 
-    private static native int nativeGetPointerCount(int nativePtr);
-    private static native int nativeGetPointerId(int nativePtr, int pointerIndex);
-    private static native int nativeGetToolType(int nativePtr, int pointerIndex);
-    private static native int nativeFindPointerIndex(int nativePtr, int pointerId);
+    private static native int nativeGetPointerCount(long nativePtr);
+    private static native int nativeGetPointerId(long nativePtr, int pointerIndex);
+    private static native int nativeGetToolType(long nativePtr, int pointerIndex);
+    private static native int nativeFindPointerIndex(long nativePtr, int pointerId);
 
-    private static native int nativeGetHistorySize(int nativePtr);
-    private static native long nativeGetEventTimeNanos(int nativePtr, int historyPos);
-    private static native float nativeGetRawAxisValue(int nativePtr,
+    private static native int nativeGetHistorySize(long nativePtr);
+    private static native long nativeGetEventTimeNanos(long nativePtr, int historyPos);
+    private static native float nativeGetRawAxisValue(long nativePtr,
             int axis, int pointerIndex, int historyPos);
-    private static native float nativeGetAxisValue(int nativePtr,
+    private static native float nativeGetAxisValue(long nativePtr,
             int axis, int pointerIndex, int historyPos);
-    private static native void nativeGetPointerCoords(int nativePtr,
+    private static native void nativeGetPointerCoords(long nativePtr,
             int pointerIndex, int historyPos, PointerCoords outPointerCoords);
-    private static native void nativeGetPointerProperties(int nativePtr,
+    private static native void nativeGetPointerProperties(long nativePtr,
             int pointerIndex, PointerProperties outPointerProperties);
 
-    private static native void nativeScale(int nativePtr, float scale);
-    private static native void nativeTransform(int nativePtr, Matrix matrix);
+    private static native void nativeScale(long nativePtr, float scale);
+    private static native void nativeTransform(long nativePtr, Matrix matrix);
 
-    private static native int nativeReadFromParcel(int nativePtr, Parcel parcel);
-    private static native void nativeWriteToParcel(int nativePtr, Parcel parcel);
+    private static native long nativeReadFromParcel(long nativePtr, Parcel parcel);
+    private static native void nativeWriteToParcel(long nativePtr, Parcel parcel);
+
+    private static native String nativeAxisToString(int axis);
+    private static native int nativeAxisFromString(String label);
 
     private MotionEvent() {
     }
@@ -1762,6 +1783,20 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         nativeSetFlags(mNativePtr, tainted ? flags | FLAG_TAINTED : flags & ~FLAG_TAINTED);
     }
 
+    /** @hide */
+    public final boolean isTargetAccessibilityFocus() {
+        final int flags = getFlags();
+        return (flags & FLAG_TARGET_ACCESSIBILITY_FOCUS) != 0;
+    }
+
+    /** @hide */
+    public final void setTargetAccessibilityFocus(boolean targetsFocus) {
+        final int flags = getFlags();
+        nativeSetFlags(mNativePtr, targetsFocus
+                ? flags | FLAG_TARGET_ACCESSIBILITY_FOCUS
+                : flags & ~FLAG_TARGET_ACCESSIBILITY_FOCUS);
+    }
+
     /**
      * Returns the time (in ms) when the user originally pressed down to start
      * a stream of position events.
@@ -1947,8 +1982,6 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * @see #TOOL_TYPE_FINGER
      * @see #TOOL_TYPE_STYLUS
      * @see #TOOL_TYPE_MOUSE
-     * @see #TOOL_TYPE_INDIRECT_FINGER
-     * @see #TOOL_TYPE_INDIRECT_STYLUS
      */
     public final int getToolType(int pointerIndex) {
         return nativeGetToolType(mNativePtr, pointerIndex);
@@ -2190,7 +2223,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * on the screen, before it had been adjusted for the containing window
      * and views.
      *
-     * @see getX()
+     * @see #getX(int)
      * @see #AXIS_X
      */
     public final float getRawX() {
@@ -2203,7 +2236,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * on the screen, before it had been adjusted for the containing window
      * and views.
      *
-     * @see getY()
+     * @see #getY(int)
      * @see #AXIS_Y
      */
     public final float getRawY() {
@@ -3005,13 +3038,13 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns a string that represents the symbolic name of the specified action
+     * Returns a string that represents the symbolic name of the specified unmasked action
      * such as "ACTION_DOWN", "ACTION_POINTER_DOWN(3)" or an equivalent numeric constant
      * such as "35" if unknown.
      *
-     * @param action The action.
+     * @param action The unmasked action.
      * @return The symbolic name of the specified action.
-     * @hide
+     * @see #getAction()
      */
     public static String actionToString(int action) {
         switch (action) {
@@ -3049,12 +3082,12 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * Returns a string that represents the symbolic name of the specified axis
      * such as "AXIS_X" or an equivalent numeric constant such as "42" if unknown.
      *
-     * @param axis The axis
+     * @param axis The axis.
      * @return The symbolic name of the specified axis.
      */
     public static String axisToString(int axis) {
-        String symbolicName = AXIS_SYMBOLIC_NAMES.get(axis);
-        return symbolicName != null ? symbolicName : Integer.toString(axis);
+        String symbolicName = nativeAxisToString(axis);
+        return symbolicName != null ? LABEL_PREFIX + symbolicName : Integer.toString(axis);
     }
 
     /**
@@ -3063,20 +3096,16 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      *
      * @param symbolicName The symbolic name of the axis.
      * @return The axis or -1 if not found.
-     * @see #keycodeToString
+     * @see KeyEvent#keyCodeToString(int)
      */
     public static int axisFromString(String symbolicName) {
-        if (symbolicName == null) {
-            throw new IllegalArgumentException("symbolicName must not be null");
-        }
-
-        final int count = AXIS_SYMBOLIC_NAMES.size();
-        for (int i = 0; i < count; i++) {
-            if (symbolicName.equals(AXIS_SYMBOLIC_NAMES.valueAt(i))) {
-                return i;
+        if (symbolicName.startsWith(LABEL_PREFIX)) {
+            symbolicName = symbolicName.substring(LABEL_PREFIX.length());
+            int axis = nativeAxisFromString(symbolicName);
+            if (axis >= 0) {
+                return axis;
             }
         }
-
         try {
             return Integer.parseInt(symbolicName, 10);
         } catch (NumberFormatException ex) {
@@ -3133,6 +3162,24 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         return symbolicName != null ? symbolicName : Integer.toString(toolType);
     }
 
+    /**
+     * Checks if a mouse or stylus button (or combination of buttons) is pressed.
+     * @param button Button (or combination of buttons).
+     * @return True if specified buttons are pressed.
+     *
+     * @see #BUTTON_PRIMARY
+     * @see #BUTTON_SECONDARY
+     * @see #BUTTON_TERTIARY
+     * @see #BUTTON_FORWARD
+     * @see #BUTTON_BACK
+     */
+    public final boolean isButtonPressed(int button) {
+        if (button == 0) {
+            return false;
+        }
+        return (getButtonState() & button) == button;
+    }
+
     public static final Parcelable.Creator<MotionEvent> CREATOR
             = new Parcelable.Creator<MotionEvent>() {
         public MotionEvent createFromParcel(Parcel in) {
@@ -3150,6 +3197,12 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         MotionEvent ev = obtain();
         ev.mNativePtr = nativeReadFromParcel(ev.mNativePtr, in);
         return ev;
+    }
+
+    /** @hide */
+    @Override
+    public final void cancel() {
+        setAction(ACTION_CANCEL);
     }
 
     public void writeToParcel(Parcel out, int flags) {
@@ -3374,11 +3427,11 @@ public final class MotionEvent extends InputEvent implements Parcelable {
                         throw new IllegalArgumentException("Axis out of range.");
                     }
                     final long bits = mPackedAxisBits;
-                    final long axisBit = 1L << axis;
+                    final long axisBit = 0x8000000000000000L >>> axis;
                     if ((bits & axisBit) == 0) {
                         return 0;
                     }
-                    final int index = Long.bitCount(bits & (axisBit - 1L));
+                    final int index = Long.bitCount(bits & ~(0xFFFFFFFFFFFFFFFFL >>> axis));
                     return mPackedAxisValues[index];
                 }
             }
@@ -3427,8 +3480,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
                         throw new IllegalArgumentException("Axis out of range.");
                     }
                     final long bits = mPackedAxisBits;
-                    final long axisBit = 1L << axis;
-                    final int index = Long.bitCount(bits & (axisBit - 1L));
+                    final long axisBit = 0x8000000000000000L >>> axis;
+                    final int index = Long.bitCount(bits & ~(0xFFFFFFFFFFFFFFFFL >>> axis));
                     float[] values = mPackedAxisValues;
                     if ((bits & axisBit) == 0) {
                         if (values == null) {

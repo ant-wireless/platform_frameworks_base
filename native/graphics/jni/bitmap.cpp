@@ -15,7 +15,11 @@
  */
 
 #include <android/bitmap.h>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <GraphicsJNI.h>
+#pragma GCC diagnostic pop
 
 int AndroidBitmap_getInfo(JNIEnv* env, jobject jbitmap,
                           AndroidBitmapInfo* info) {
@@ -34,17 +38,17 @@ int AndroidBitmap_getInfo(JNIEnv* env, jobject jbitmap,
         info->stride    = bm->rowBytes();
         info->flags     = 0;
 
-        switch (bm->config()) {
-            case SkBitmap::kARGB_8888_Config:
+        switch (bm->colorType()) {
+            case kN32_SkColorType:
                 info->format = ANDROID_BITMAP_FORMAT_RGBA_8888;
                 break;
-            case SkBitmap::kRGB_565_Config:
+            case kRGB_565_SkColorType:
                 info->format = ANDROID_BITMAP_FORMAT_RGB_565;
                 break;
-            case SkBitmap::kARGB_4444_Config:
+            case kARGB_4444_SkColorType:
                 info->format = ANDROID_BITMAP_FORMAT_RGBA_4444;
                 break;
-            case SkBitmap::kA8_Config:
+            case kAlpha_8_SkColorType:
                 info->format = ANDROID_BITMAP_FORMAT_A_8;
                 break;
             default:
@@ -52,7 +56,7 @@ int AndroidBitmap_getInfo(JNIEnv* env, jobject jbitmap,
                 break;
         }
     }
-    return ANDROID_BITMAP_RESUT_SUCCESS;
+    return ANDROID_BITMAP_RESULT_SUCCESS;
 }
 
 int AndroidBitmap_lockPixels(JNIEnv* env, jobject jbitmap, void** addrPtr) {
@@ -75,7 +79,7 @@ int AndroidBitmap_lockPixels(JNIEnv* env, jobject jbitmap, void** addrPtr) {
     if (addrPtr) {
         *addrPtr = addr;
     }
-    return ANDROID_BITMAP_RESUT_SUCCESS;
+    return ANDROID_BITMAP_RESULT_SUCCESS;
 }
 
 int AndroidBitmap_unlockPixels(JNIEnv* env, jobject jbitmap) {
@@ -95,6 +99,6 @@ int AndroidBitmap_unlockPixels(JNIEnv* env, jobject jbitmap) {
     bm->notifyPixelsChanged();
 
     bm->unlockPixels();
-    return ANDROID_BITMAP_RESUT_SUCCESS;
+    return ANDROID_BITMAP_RESULT_SUCCESS;
 }
 

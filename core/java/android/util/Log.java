@@ -17,6 +17,7 @@
 package android.util;
 
 import com.android.internal.os.RuntimeInit;
+import com.android.internal.util.FastPrintWriter;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -83,24 +84,24 @@ public final class Log {
     public static final int ASSERT = 7;
 
     /**
-     * Exception class used to capture a stack trace in {@link #wtf()}.
+     * Exception class used to capture a stack trace in {@link #wtf}.
      */
     private static class TerribleFailure extends Exception {
         TerribleFailure(String msg, Throwable cause) { super(msg, cause); }
     }
 
     /**
-     * Interface to handle terrible failures from {@link #wtf()}.
+     * Interface to handle terrible failures from {@link #wtf}.
      *
      * @hide
      */
     public interface TerribleFailureHandler {
-        void onTerribleFailure(String tag, TerribleFailure what);
+        void onTerribleFailure(String tag, TerribleFailure what, boolean system);
     }
 
     private static TerribleFailureHandler sWtfHandler = new TerribleFailureHandler() {
-            public void onTerribleFailure(String tag, TerribleFailure what) {
-                RuntimeInit.wtf(tag, what);
+            public void onTerribleFailure(String tag, TerribleFailure what, boolean system) {
+                RuntimeInit.wtf(tag, what, system);
             }
         };
 
@@ -252,7 +253,16 @@ public final class Log {
      * @param msg The message you would like logged.
      */
     public static int wtf(String tag, String msg) {
-        return wtf(tag, msg, null);
+        return wtf(LOG_ID_MAIN, tag, msg, null, false, false);
+    }
+
+    /**
+     * Like {@link #wtf(String, String)}, but also writes to the log the full
+     * call stack.
+     * @hide
+     */
+    public static int wtfStack(String tag, String msg) {
+        return wtf(LOG_ID_MAIN, tag, msg, null, true, false);
     }
 
     /**
@@ -262,7 +272,7 @@ public final class Log {
      * @param tr An exception to log.
      */
     public static int wtf(String tag, Throwable tr) {
-        return wtf(tag, tr.getMessage(), tr);
+        return wtf(LOG_ID_MAIN, tag, tr.getMessage(), tr, false, false);
     }
 
     /**
@@ -273,10 +283,21 @@ public final class Log {
      * @param tr An exception to log.  May be null.
      */
     public static int wtf(String tag, String msg, Throwable tr) {
+        return wtf(LOG_ID_MAIN, tag, msg, tr, false, false);
+    }
+
+    static int wtf(int logId, String tag, String msg, Throwable tr, boolean localStack,
+            boolean system) {
         TerribleFailure what = new TerribleFailure(msg, tr);
-        int bytes = println_native(LOG_ID_MAIN, ASSERT, tag, msg + '\n' + getStackTraceString(tr));
-        sWtfHandler.onTerribleFailure(tag, what);
+        int bytes = println_native(logId, ASSERT, tag, msg + '\n'
+                + getStackTraceString(localStack ? what : tr));
+        sWtfHandler.onTerribleFailure(tag, what, system);
         return bytes;
+    }
+
+    static void wtfQuiet(int logId, String tag, String msg, boolean system) {
+        TerribleFailure what = new TerribleFailure(msg, null);
+        sWtfHandler.onTerribleFailure(tag, what, system);
     }
 
     /**
@@ -315,8 +336,9 @@ public final class Log {
         }
 
         StringWriter sw = new StringWriter();
-        PrintWriter pw = new PrintWriter(sw);
+        PrintWriter pw = new FastPrintWriter(sw, false, 256);
         tr.printStackTrace(pw);
+        pw.flush();
         return sw.toString();
     }
 
@@ -336,6 +358,7 @@ public final class Log {
     /** @hide */ public static final int LOG_ID_RADIO = 1;
     /** @hide */ public static final int LOG_ID_EVENTS = 2;
     /** @hide */ public static final int LOG_ID_SYSTEM = 3;
+    /** @hide */ public static final int LOG_ID_CRASH = 4;
 
     /** @hide */ public static native int println_native(int bufID,
             int priority, String tag, String msg);

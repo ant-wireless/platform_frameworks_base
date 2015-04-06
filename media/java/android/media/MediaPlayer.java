@@ -16,31 +16,61 @@
 
 package android.media;
 
+import android.app.ActivityThread;
+import android.app.AppOpsManager;
+import android.app.Application;
+import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.AssetFileDescriptor;
 import android.net.Uri;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.os.ParcelFileDescriptor;
+import android.os.Process;
 import android.os.PowerManager;
+import android.os.RemoteException;
+import android.os.ServiceManager;
+import android.provider.Settings;
+import android.system.ErrnoException;
+import android.system.OsConstants;
 import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
-import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.media.AudioManager;
+import android.media.MediaFormat;
+import android.media.MediaTimeProvider;
+import android.media.SubtitleController;
+import android.media.SubtitleController.Anchor;
+import android.media.SubtitleData;
+import android.media.SubtitleTrack.RenderingWidget;
 
+import com.android.internal.app.IAppOpsService;
+
+import libcore.io.IoBridge;
+import libcore.io.Libcore;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.lang.Runnable;
 import java.net.InetSocketAddress;
 import java.util.Map;
+import java.util.Scanner;
 import java.util.Set;
+import java.util.Vector;
 import java.lang.ref.WeakReference;
 
 /**
@@ -328,8 +358,8 @@ import java.lang.ref.WeakReference;
  *         the state. Calling this method in an invalid state transfers the
  *         object to the <em>Error</em> state. </p></td></tr>
  * <tr><td>pause </p></td>
- *     <td>{Started, Paused}</p></td>
- *     <td>{Idle, Initialized, Prepared, Stopped, PlaybackCompleted, Error}</p></td>
+ *     <td>{Started, Paused, PlaybackCompleted}</p></td>
+ *     <td>{Idle, Initialized, Prepared, Stopped, Error}</p></td>
  *     <td>Successful invoke of this method in a valid state transfers the
  *         object to the <em>Paused</em> state. Calling this method in an
  *         invalid state transfers the object to the <em>Error</em> state.</p></td></tr>
@@ -360,6 +390,13 @@ import java.lang.ref.WeakReference;
  *     <td>Successful invoke of this method in a valid state does not change
  *         the state. Calling this method in an invalid state transfers the
  *         object to the <em>Error</em> state. </p></td></tr>
+ * <tr><td>setAudioAttributes </p></td>
+ *     <td>{Idle, Initialized, Stopped, Prepared, Started, Paused,
+ *          PlaybackCompleted}</p></td>
+ *     <td>{Error}</p></td>
+ *     <td>Successful invoke of this method does not change the state. In order for the
+ *         target audio attributes type to become effective, this method must be called before
+ *         prepare() or prepareAsync().</p></td></tr>
  * <tr><td>setAudioSessionId </p></td>
  *     <td>{Idle} </p></td>
  *     <td>{Initialized, Prepared, Started, Paused, Stopped, PlaybackCompleted,
@@ -510,7 +547,7 @@ import java.lang.ref.WeakReference;
  * thread by default has a Looper running).
  *
  */
-public class MediaPlayer
+public class MediaPlayer implements SubtitleController.Listener
 {
     /**
        Constant to retrieve only the new metadata since the last
@@ -556,14 +593,17 @@ public class MediaPlayer
     // macro invocation in IMediaPlayer.cpp
     private final static String IMEDIA_PLAYER = "android.media.IMediaPlayer";
 
-    private int mNativeContext; // accessed by native methods
-    private int mNativeSurfaceTexture;  // accessed by native methods
+    private long mNativeContext; // accessed by native methods
+    private long mNativeSurfaceTexture;  // accessed by native methods
     private int mListenerContext; // accessed by native methods
     private SurfaceHolder mSurfaceHolder;
     private EventHandler mEventHandler;
     private PowerManager.WakeLock mWakeLock = null;
     private boolean mScreenOnWhilePlaying;
     private boolean mStayAwake;
+    private final IAppOpsService mAppOps;
+    private int mStreamType = AudioManager.USE_DEFAULT_STREAM_TYPE;
+    private int mUsage = -1;
 
     /**
      * Default constructor. Consider using one of the create() methods for
@@ -582,6 +622,13 @@ public class MediaPlayer
         } else {
             mEventHandler = null;
         }
+
+        mTimeProvider = new TimeProvider(this);
+        mOutOfBandSubtitleTracks = new Vector<SubtitleTrack>();
+        mOpenSubtitleSources = new Vector<InputStream>();
+        mInbandSubtitleTracks = new SubtitleTrack[0];
+        IBinder b = ServiceManager.getService(Context.APP_OPS_SERVICE);
+        mAppOps = IAppOpsService.Stub.asInterface(b);
 
         /* Native setup requires a weak reference to our object.
          * It's easier to create it here than in C++.
@@ -604,6 +651,7 @@ public class MediaPlayer
     private static final int INVOKE_ID_SELECT_TRACK = 4;
     private static final int INVOKE_ID_DESELECT_TRACK = 5;
     private static final int INVOKE_ID_SET_VIDEO_SCALE_MODE = 6;
+    private static final int INVOKE_ID_GET_SELECTED_TRACK = 7;
 
     /**
      * Create a request parcel which can be routed to the native media
@@ -634,7 +682,6 @@ public class MediaPlayer
      *
      * @param reply Output parcel with the data returned by the
      * native player.
-     *
      * {@hide}
      */
     public void invoke(Parcel request, Parcel reply) {
@@ -760,6 +807,10 @@ public class MediaPlayer
      * <p>When done with the MediaPlayer, you should call  {@link #release()},
      * to free the resources. If not released, too many MediaPlayer instances will
      * result in an exception.</p>
+     * <p>Note that since {@link #prepare()} is called automatically in this method,
+     * you cannot change the audio stream type (see {@link #setAudioStreamType(int)}), audio
+     * session ID (see {@link #setAudioSessionId(int)}) or audio attributes
+     * (see {@link #setAudioAttributes(AudioAttributes)} of the new MediaPlayer.</p>
      *
      * @param context the Context to use
      * @param uri the Uri from which to get the datasource
@@ -775,6 +826,10 @@ public class MediaPlayer
      * <p>When done with the MediaPlayer, you should call  {@link #release()},
      * to free the resources. If not released, too many MediaPlayer instances will
      * result in an exception.</p>
+     * <p>Note that since {@link #prepare()} is called automatically in this method,
+     * you cannot change the audio stream type (see {@link #setAudioStreamType(int)}), audio
+     * session ID (see {@link #setAudioSessionId(int)}) or audio attributes
+     * (see {@link #setAudioAttributes(AudioAttributes)} of the new MediaPlayer.</p>
      *
      * @param context the Context to use
      * @param uri the Uri from which to get the datasource
@@ -782,9 +837,30 @@ public class MediaPlayer
      * @return a MediaPlayer object, or null if creation failed
      */
     public static MediaPlayer create(Context context, Uri uri, SurfaceHolder holder) {
+        int s = AudioSystem.newAudioSessionId();
+        return create(context, uri, holder, null, s > 0 ? s : 0);
+    }
+
+    /**
+     * Same factory method as {@link #create(Context, Uri, SurfaceHolder)} but that lets you specify
+     * the audio attributes and session ID to be used by the new MediaPlayer instance.
+     * @param context the Context to use
+     * @param uri the Uri from which to get the datasource
+     * @param holder the SurfaceHolder to use for displaying the video, may be null.
+     * @param audioAttributes the {@link AudioAttributes} to be used by the media player.
+     * @param audioSessionId the audio session ID to be used by the media player,
+     *     see {@link AudioManager#generateAudioSessionId()} to obtain a new session.
+     * @return a MediaPlayer object, or null if creation failed
+     */
+    public static MediaPlayer create(Context context, Uri uri, SurfaceHolder holder,
+            AudioAttributes audioAttributes, int audioSessionId) {
 
         try {
             MediaPlayer mp = new MediaPlayer();
+            final AudioAttributes aa = audioAttributes != null ? audioAttributes :
+                new AudioAttributes.Builder().build();
+            mp.setAudioAttributes(aa);
+            mp.setAudioSessionId(audioSessionId);
             mp.setDataSource(context, uri);
             if (holder != null) {
                 mp.setDisplay(holder);
@@ -813,6 +889,10 @@ public class MediaPlayer
      * <p>When done with the MediaPlayer, you should call  {@link #release()},
      * to free the resources. If not released, too many MediaPlayer instances will
      * result in an exception.</p>
+     * <p>Note that since {@link #prepare()} is called automatically in this method,
+     * you cannot change the audio stream type (see {@link #setAudioStreamType(int)}), audio
+     * session ID (see {@link #setAudioSessionId(int)}) or audio attributes
+     * (see {@link #setAudioAttributes(AudioAttributes)} of the new MediaPlayer.</p>
      *
      * @param context the Context to use
      * @param resid the raw resource id (<var>R.raw.&lt;something></var>) for
@@ -820,11 +900,34 @@ public class MediaPlayer
      * @return a MediaPlayer object, or null if creation failed
      */
     public static MediaPlayer create(Context context, int resid) {
+        int s = AudioSystem.newAudioSessionId();
+        return create(context, resid, null, s > 0 ? s : 0);
+    }
+
+    /**
+     * Same factory method as {@link #create(Context, int)} but that lets you specify the audio
+     * attributes and session ID to be used by the new MediaPlayer instance.
+     * @param context the Context to use
+     * @param resid the raw resource id (<var>R.raw.&lt;something></var>) for
+     *              the resource to use as the datasource
+     * @param audioAttributes the {@link AudioAttributes} to be used by the media player.
+     * @param audioSessionId the audio session ID to be used by the media player,
+     *     see {@link AudioManager#generateAudioSessionId()} to obtain a new session.
+     * @return a MediaPlayer object, or null if creation failed
+     */
+    public static MediaPlayer create(Context context, int resid,
+            AudioAttributes audioAttributes, int audioSessionId) {
         try {
             AssetFileDescriptor afd = context.getResources().openRawResourceFd(resid);
             if (afd == null) return null;
 
             MediaPlayer mp = new MediaPlayer();
+
+            final AudioAttributes aa = audioAttributes != null ? audioAttributes :
+                new AudioAttributes.Builder().build();
+            mp.setAudioAttributes(aa);
+            mp.setAudioSessionId(audioSessionId);
+
             mp.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
             afd.close();
             mp.prepare();
@@ -860,15 +963,26 @@ public class MediaPlayer
      * @param context the Context to use when resolving the Uri
      * @param uri the Content URI of the data you want to play
      * @param headers the headers to be sent together with the request for the data
+     *                Note that the cross domain redirection is allowed by default, but that can be
+     *                changed with key/value pairs through the headers parameter with
+     *                "android-allow-cross-domain-redirect" as the key and "0" or "1" as the value
+     *                to disallow or allow cross domain redirection.
      * @throws IllegalStateException if it is called in an invalid state
      */
     public void setDataSource(Context context, Uri uri, Map<String, String> headers)
-        throws IOException, IllegalArgumentException, SecurityException, IllegalStateException {
-
-        String scheme = uri.getScheme();
-        if(scheme == null || scheme.equals("file")) {
+            throws IOException, IllegalArgumentException, SecurityException, IllegalStateException {
+        final String scheme = uri.getScheme();
+        if (ContentResolver.SCHEME_FILE.equals(scheme)) {
             setDataSource(uri.getPath());
             return;
+        } else if (ContentResolver.SCHEME_CONTENT.equals(scheme)
+                && Settings.AUTHORITY.equals(uri.getAuthority())) {
+            // Redirect ringtones to go directly to underlying provider
+            uri = RingtoneManager.getActualDefaultRingtoneUri(context,
+                    RingtoneManager.getDefaultType(uri));
+            if (uri == null) {
+                throw new FileNotFoundException("Failed to resolve default ringtone");
+            }
         }
 
         AssetFileDescriptor fd = null;
@@ -896,8 +1010,8 @@ public class MediaPlayer
         }
 
         Log.d(TAG, "Couldn't open file on client side, trying server side");
+
         setDataSource(uri.toString(), headers);
-        return;
     }
 
     /**
@@ -948,19 +1062,33 @@ public class MediaPlayer
 
     private void setDataSource(String path, String[] keys, String[] values)
             throws IOException, IllegalArgumentException, SecurityException, IllegalStateException {
-        File file = new File(path);
+        final Uri uri = Uri.parse(path);
+        final String scheme = uri.getScheme();
+        if ("file".equals(scheme)) {
+            path = uri.getPath();
+        } else if (scheme != null) {
+            // handle non-file sources
+            nativeSetDataSource(
+                MediaHTTPService.createHttpServiceBinderIfNecessary(path),
+                path,
+                keys,
+                values);
+            return;
+        }
+
+        final File file = new File(path);
         if (file.exists()) {
             FileInputStream is = new FileInputStream(file);
             FileDescriptor fd = is.getFD();
             setDataSource(fd);
             is.close();
         } else {
-            _setDataSource(path, keys, values);
+            throw new IOException("setDataSource failed.");
         }
     }
 
-    private native void _setDataSource(
-        String path, String[] keys, String[] values)
+    private native void nativeSetDataSource(
+        IBinder httpServiceBinder, String path, String[] keys, String[] values)
         throws IOException, IllegalArgumentException, SecurityException, IllegalStateException;
 
     /**
@@ -986,7 +1114,12 @@ public class MediaPlayer
      * @param length the length in bytes of the data to be played
      * @throws IllegalStateException if it is called in an invalid state
      */
-    public native void setDataSource(FileDescriptor fd, long offset, long length)
+    public void setDataSource(FileDescriptor fd, long offset, long length)
+            throws IOException, IllegalArgumentException, IllegalStateException {
+        _setDataSource(fd, offset, length);
+    }
+
+    private native void _setDataSource(FileDescriptor fd, long offset, long length)
             throws IOException, IllegalArgumentException, IllegalStateException;
 
     /**
@@ -998,7 +1131,12 @@ public class MediaPlayer
      *
      * @throws IllegalStateException if it is called in an invalid state
      */
-    public native void prepare() throws IOException, IllegalStateException;
+    public void prepare() throws IOException, IllegalStateException {
+        _prepare();
+        scanInternalSubtitleTracks();
+    }
+
+    private native void _prepare() throws IOException, IllegalStateException;
 
     /**
      * Prepares the player for playback, asynchronously.
@@ -1020,12 +1158,36 @@ public class MediaPlayer
      *
      * @throws IllegalStateException if it is called in an invalid state
      */
-    public  void start() throws IllegalStateException {
+    public void start() throws IllegalStateException {
+        if (isRestricted()) {
+            _setVolume(0, 0);
+        }
         stayAwake(true);
         _start();
     }
 
     private native void _start() throws IllegalStateException;
+
+    private boolean isRestricted() {
+        try {
+            final int usage = mUsage != -1 ? mUsage
+                    : AudioAttributes.usageForLegacyStreamType(getAudioStreamType());
+            final int mode = mAppOps.checkAudioOperation(AppOpsManager.OP_PLAY_AUDIO, usage,
+                    Process.myUid(), ActivityThread.currentPackageName());
+            return mode != AppOpsManager.MODE_ALLOWED;
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    private int getAudioStreamType() {
+        if (mStreamType == AudioManager.USE_DEFAULT_STREAM_TYPE) {
+            mStreamType = _getAudioStreamType();
+        }
+        return mStreamType;
+    }
+
+    private native int _getAudioStreamType() throws IllegalStateException;
 
     /**
      * Stops playback after playback has been stopped or paused.
@@ -1176,7 +1338,8 @@ public class MediaPlayer
     /**
      * Gets the duration of the file.
      *
-     * @return the duration in milliseconds
+     * @return the duration in milliseconds, if no duration is available
+     *         (for example, if streaming live content), -1 is returned.
      */
     public native int getDuration();
 
@@ -1311,6 +1474,11 @@ public class MediaPlayer
         mOnInfoListener = null;
         mOnVideoSizeChangedListener = null;
         mOnTimedTextListener = null;
+        if (mTimeProvider != null) {
+            mTimeProvider.close();
+            mTimeProvider = null;
+        }
+        mOnSubtitleDataListener = null;
         _release();
     }
 
@@ -1322,10 +1490,32 @@ public class MediaPlayer
      * data source and calling prepare().
      */
     public void reset() {
+        mSelectedSubtitleTrackIndex = -1;
+        synchronized(mOpenSubtitleSources) {
+            for (final InputStream is: mOpenSubtitleSources) {
+                try {
+                    is.close();
+                } catch (IOException e) {
+                }
+            }
+            mOpenSubtitleSources.clear();
+        }
+        mOutOfBandSubtitleTracks.clear();
+        mInbandSubtitleTracks = new SubtitleTrack[0];
+        if (mSubtitleController != null) {
+            mSubtitleController.reset();
+        }
+        if (mTimeProvider != null) {
+            mTimeProvider.close();
+            mTimeProvider = null;
+        }
+
         stayAwake(false);
         _reset();
         // make sure none of the listeners get called anymore
-        mEventHandler.removeCallbacksAndMessages(null);
+        if (mEventHandler != null) {
+            mEventHandler.removeCallbacksAndMessages(null);
+        }
     }
 
     private native void _reset();
@@ -1339,7 +1529,42 @@ public class MediaPlayer
      * @param streamtype the audio stream type
      * @see android.media.AudioManager
      */
-    public native void setAudioStreamType(int streamtype);
+    public void setAudioStreamType(int streamtype) {
+        _setAudioStreamType(streamtype);
+        mStreamType = streamtype;
+    }
+
+    private native void _setAudioStreamType(int streamtype);
+
+    // Keep KEY_PARAMETER_* in sync with include/media/mediaplayer.h
+    private final static int KEY_PARAMETER_AUDIO_ATTRIBUTES = 1400;
+    /**
+     * Sets the parameter indicated by key.
+     * @param key key indicates the parameter to be set.
+     * @param value value of the parameter to be set.
+     * @return true if the parameter is set successfully, false otherwise
+     * {@hide}
+     */
+    private native boolean setParameter(int key, Parcel value);
+
+    /**
+     * Sets the audio attributes for this MediaPlayer.
+     * See {@link AudioAttributes} for how to build and configure an instance of this class.
+     * You must call this method before {@link #prepare()} or {@link #prepareAsync()} in order
+     * for the audio attributes to become effective thereafter.
+     * @param attributes a non-null set of audio attributes
+     */
+    public void setAudioAttributes(AudioAttributes attributes) throws IllegalArgumentException {
+        if (attributes == null) {
+            final String msg = "Cannot set AudioAttributes to null";
+            throw new IllegalArgumentException(msg);
+        }
+        mUsage = attributes.getUsage();
+        Parcel pattributes = Parcel.obtain();
+        attributes.writeToParcel(pattributes, AudioAttributes.FLATTEN_TAGS);
+        setParameter(KEY_PARAMETER_AUDIO_ATTRIBUTES, pattributes);
+        pattributes.recycle();
+    }
 
     /**
      * Sets the player to be looping or non-looping.
@@ -1361,20 +1586,33 @@ public class MediaPlayer
      * within an application. Unless you are writing an application to
      * control user settings, this API should be used in preference to
      * {@link AudioManager#setStreamVolume(int, int, int)} which sets the volume of ALL streams of
-     * a particular type. Note that the passed volume values are raw scalars.
+     * a particular type. Note that the passed volume values are raw scalars in range 0.0 to 1.0.
      * UI controls should be scaled logarithmically.
      *
      * @param leftVolume left volume scalar
      * @param rightVolume right volume scalar
      */
-    public native void setVolume(float leftVolume, float rightVolume);
+    /*
+     * FIXME: Merge this into javadoc comment above when setVolume(float) is not @hide.
+     * The single parameter form below is preferred if the channel volumes don't need
+     * to be set independently.
+     */
+    public void setVolume(float leftVolume, float rightVolume) {
+        if (isRestricted()) {
+            return;
+        }
+        _setVolume(leftVolume, rightVolume);
+    }
+
+    private native void _setVolume(float leftVolume, float rightVolume);
 
     /**
-     * Currently not implemented, returns null.
-     * @deprecated
+     * Similar, excepts sets volume of all channels to same value.
      * @hide
      */
-    public native Bitmap getFrameAt(int msec) throws IllegalStateException;
+    public void setVolume(float volume) {
+        setVolume(volume, volume);
+    }
 
     /**
      * Sets the audio session ID.
@@ -1406,7 +1644,7 @@ public class MediaPlayer
      * Attaches an auxiliary effect to the player. A typical auxiliary effect is a reverberation
      * effect which can be applied on any sound source that directs a certain amount of its
      * energy to this effect. This amount is defined by setAuxEffectSendLevel().
-     * {@see #setAuxEffectSendLevel(float)}.
+     * See {@link #setAuxEffectSendLevel(float)}.
      * <p>After creating an auxiliary effect (e.g.
      * {@link android.media.audiofx.EnvironmentalReverb}), retrieve its ID with
      * {@link android.media.audiofx.AudioEffect#getId()} and use it when calling this method
@@ -1418,104 +1656,10 @@ public class MediaPlayer
      */
     public native void attachAuxEffect(int effectId);
 
-    /* Do not change these values (starting with KEY_PARAMETER) without updating
-     * their counterparts in include/media/mediaplayer.h!
-     */
-
-    // There are currently no defined keys usable from Java with get*Parameter.
-    // But if any keys are defined, the order must be kept in sync with include/media/mediaplayer.h.
-    // private static final int KEY_PARAMETER_... = ...;
 
     /**
-     * Sets the parameter indicated by key.
-     * @param key key indicates the parameter to be set.
-     * @param value value of the parameter to be set.
-     * @return true if the parameter is set successfully, false otherwise
-     * {@hide}
-     */
-    public native boolean setParameter(int key, Parcel value);
-
-    /**
-     * Sets the parameter indicated by key.
-     * @param key key indicates the parameter to be set.
-     * @param value value of the parameter to be set.
-     * @return true if the parameter is set successfully, false otherwise
-     * {@hide}
-     */
-    public boolean setParameter(int key, String value) {
-        Parcel p = Parcel.obtain();
-        p.writeString(value);
-        boolean ret = setParameter(key, p);
-        p.recycle();
-        return ret;
-    }
-
-    /**
-     * Sets the parameter indicated by key.
-     * @param key key indicates the parameter to be set.
-     * @param value value of the parameter to be set.
-     * @return true if the parameter is set successfully, false otherwise
-     * {@hide}
-     */
-    public boolean setParameter(int key, int value) {
-        Parcel p = Parcel.obtain();
-        p.writeInt(value);
-        boolean ret = setParameter(key, p);
-        p.recycle();
-        return ret;
-    }
-
-    /*
-     * Gets the value of the parameter indicated by key.
-     * @param key key indicates the parameter to get.
-     * @param reply value of the parameter to get.
-     */
-    private native void getParameter(int key, Parcel reply);
-
-    /**
-     * Gets the value of the parameter indicated by key.
-     * The caller is responsible for recycling the returned parcel.
-     * @param key key indicates the parameter to get.
-     * @return value of the parameter.
-     * {@hide}
-     */
-    public Parcel getParcelParameter(int key) {
-        Parcel p = Parcel.obtain();
-        getParameter(key, p);
-        return p;
-    }
-
-    /**
-     * Gets the value of the parameter indicated by key.
-     * @param key key indicates the parameter to get.
-     * @return value of the parameter.
-     * {@hide}
-     */
-    public String getStringParameter(int key) {
-        Parcel p = Parcel.obtain();
-        getParameter(key, p);
-        String ret = p.readString();
-        p.recycle();
-        return ret;
-    }
-
-    /**
-     * Gets the value of the parameter indicated by key.
-     * @param key key indicates the parameter to get.
-     * @return value of the parameter.
-     * {@hide}
-     */
-    public int getIntParameter(int key) {
-        Parcel p = Parcel.obtain();
-        getParameter(key, p);
-        int ret = p.readInt();
-        p.recycle();
-        return ret;
-    }
-
-    /**
-     * Sets the send level of the player to the attached auxiliary effect
-     * {@see #attachAuxEffect(int)}. The level value range is 0 to 1.0.
+     * Sets the send level of the player to the attached auxiliary effect.
+     * See {@link #attachAuxEffect(int)}. The level value range is 0 to 1.0.
      * <p>By default the send level is 0, so even if an effect is attached to the player
      * this method must be called for the effect to be applied.
      * <p>Note that the passed level value is a raw scalar. UI controls should be scaled
@@ -1525,7 +1669,14 @@ public class MediaPlayer
      * 0 < x <= R -> level = 10^(72*(x-R)/20/R)
      * @param level send level scalar
      */
-    public native void setAuxEffectSendLevel(float level);
+    public void setAuxEffectSendLevel(float level) {
+        if (isRestricted()) {
+            return;
+        }
+        _setAuxEffectSendLevel(level);
+    }
+
+    private native void _setAuxEffectSendLevel(float level);
 
     /*
      * @param request Parcel destinated to the media player. The
@@ -1588,20 +1739,55 @@ public class MediaPlayer
          * ISO-639-2 language code, "und", is returned.
          */
         public String getLanguage() {
-            return mLanguage;
+            String language = mFormat.getString(MediaFormat.KEY_LANGUAGE);
+            return language == null ? "und" : language;
+        }
+
+        /**
+         * Gets the {@link MediaFormat} of the track.  If the format is
+         * unknown or could not be determined, null is returned.
+         */
+        public MediaFormat getFormat() {
+            if (mTrackType == MEDIA_TRACK_TYPE_TIMEDTEXT
+                    || mTrackType == MEDIA_TRACK_TYPE_SUBTITLE) {
+                return mFormat;
+            }
+            return null;
         }
 
         public static final int MEDIA_TRACK_TYPE_UNKNOWN = 0;
         public static final int MEDIA_TRACK_TYPE_VIDEO = 1;
         public static final int MEDIA_TRACK_TYPE_AUDIO = 2;
         public static final int MEDIA_TRACK_TYPE_TIMEDTEXT = 3;
+        public static final int MEDIA_TRACK_TYPE_SUBTITLE = 4;
 
         final int mTrackType;
-        final String mLanguage;
+        final MediaFormat mFormat;
 
         TrackInfo(Parcel in) {
             mTrackType = in.readInt();
-            mLanguage = in.readString();
+            // TODO: parcel in the full MediaFormat
+            String language = in.readString();
+
+            if (mTrackType == MEDIA_TRACK_TYPE_TIMEDTEXT) {
+                mFormat = MediaFormat.createSubtitleFormat(
+                    MEDIA_MIMETYPE_TEXT_SUBRIP, language);
+            } else if (mTrackType == MEDIA_TRACK_TYPE_SUBTITLE) {
+                String mime = in.readString();
+                mFormat = MediaFormat.createSubtitleFormat(mime, language);
+                mFormat.setInteger(MediaFormat.KEY_IS_AUTOSELECT, in.readInt());
+                mFormat.setInteger(MediaFormat.KEY_IS_DEFAULT, in.readInt());
+                mFormat.setInteger(MediaFormat.KEY_IS_FORCED_SUBTITLE, in.readInt());
+            } else {
+                mFormat = new MediaFormat();
+                mFormat.setString(MediaFormat.KEY_LANGUAGE, language);
+            }
+        }
+
+        /** @hide */
+        TrackInfo(int type, MediaFormat format) {
+            mTrackType = type;
+            mFormat = format;
         }
 
         /**
@@ -1618,7 +1804,41 @@ public class MediaPlayer
         @Override
         public void writeToParcel(Parcel dest, int flags) {
             dest.writeInt(mTrackType);
-            dest.writeString(mLanguage);
+            dest.writeString(getLanguage());
+
+            if (mTrackType == MEDIA_TRACK_TYPE_SUBTITLE) {
+                dest.writeString(mFormat.getString(MediaFormat.KEY_MIME));
+                dest.writeInt(mFormat.getInteger(MediaFormat.KEY_IS_AUTOSELECT));
+                dest.writeInt(mFormat.getInteger(MediaFormat.KEY_IS_DEFAULT));
+                dest.writeInt(mFormat.getInteger(MediaFormat.KEY_IS_FORCED_SUBTITLE));
+            }
+        }
+
+        @Override
+        public String toString() {
+            StringBuilder out = new StringBuilder(128);
+            out.append(getClass().getName());
+            out.append('{');
+            switch (mTrackType) {
+            case MEDIA_TRACK_TYPE_VIDEO:
+                out.append("VIDEO");
+                break;
+            case MEDIA_TRACK_TYPE_AUDIO:
+                out.append("AUDIO");
+                break;
+            case MEDIA_TRACK_TYPE_TIMEDTEXT:
+                out.append("TIMEDTEXT");
+                break;
+            case MEDIA_TRACK_TYPE_SUBTITLE:
+                out.append("SUBTITLE");
+                break;
+            default:
+                out.append("UNKNOWN");
+                break;
+            }
+            out.append(", " + mFormat.toString());
+            out.append("}");
+            return out.toString();
         }
 
         /**
@@ -1648,6 +1868,22 @@ public class MediaPlayer
      * @throws IllegalStateException if it is called in an invalid state.
      */
     public TrackInfo[] getTrackInfo() throws IllegalStateException {
+        TrackInfo trackInfo[] = getInbandTrackInfo();
+        // add out-of-band tracks
+        TrackInfo allTrackInfo[] = new TrackInfo[trackInfo.length + mOutOfBandSubtitleTracks.size()];
+        System.arraycopy(trackInfo, 0, allTrackInfo, 0, trackInfo.length);
+        int i = trackInfo.length;
+        for (SubtitleTrack track: mOutOfBandSubtitleTracks) {
+            int type = track.isTimedText()
+                    ? TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT
+                    : TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE;
+            allTrackInfo[i] = new TrackInfo(type, track.getFormat());
+            ++i;
+        }
+        return allTrackInfo;
+    }
+
+    private TrackInfo[] getInbandTrackInfo() throws IllegalStateException {
         Parcel request = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
@@ -1670,14 +1906,163 @@ public class MediaPlayer
      */
     public static final String MEDIA_MIMETYPE_TEXT_SUBRIP = "application/x-subrip";
 
+    /**
+     * MIME type for WebVTT subtitle data.
+     * @hide
+     */
+    public static final String MEDIA_MIMETYPE_TEXT_VTT = "text/vtt";
+
+    /**
+     * MIME type for CEA-608 closed caption data.
+     * @hide
+     */
+    public static final String MEDIA_MIMETYPE_TEXT_CEA_608 = "text/cea-608";
+
     /*
      * A helper function to check if the mime type is supported by media framework.
      */
     private static boolean availableMimeTypeForExternalSource(String mimeType) {
-        if (mimeType == MEDIA_MIMETYPE_TEXT_SUBRIP) {
+        if (MEDIA_MIMETYPE_TEXT_SUBRIP.equals(mimeType)) {
             return true;
         }
         return false;
+    }
+
+    private SubtitleController mSubtitleController;
+
+    /** @hide */
+    public void setSubtitleAnchor(
+            SubtitleController controller,
+            SubtitleController.Anchor anchor) {
+        // TODO: create SubtitleController in MediaPlayer
+        mSubtitleController = controller;
+        mSubtitleController.setAnchor(anchor);
+    }
+
+    private final Object mInbandSubtitleLock = new Object();
+    private SubtitleTrack[] mInbandSubtitleTracks;
+    private int mSelectedSubtitleTrackIndex = -1;
+    private Vector<SubtitleTrack> mOutOfBandSubtitleTracks;
+    private Vector<InputStream> mOpenSubtitleSources;
+
+    private OnSubtitleDataListener mSubtitleDataListener = new OnSubtitleDataListener() {
+        @Override
+        public void onSubtitleData(MediaPlayer mp, SubtitleData data) {
+            int index = data.getTrackIndex();
+            if (index >= mInbandSubtitleTracks.length) {
+                return;
+            }
+            SubtitleTrack track = mInbandSubtitleTracks[index];
+            if (track != null) {
+                track.onData(data);
+            }
+        }
+    };
+
+    /** @hide */
+    @Override
+    public void onSubtitleTrackSelected(SubtitleTrack track) {
+        if (mSelectedSubtitleTrackIndex >= 0) {
+            try {
+                selectOrDeselectInbandTrack(mSelectedSubtitleTrackIndex, false);
+            } catch (IllegalStateException e) {
+            }
+            mSelectedSubtitleTrackIndex = -1;
+        }
+        setOnSubtitleDataListener(null);
+        if (track == null) {
+            return;
+        }
+        for (int i = 0; i < mInbandSubtitleTracks.length; i++) {
+            if (mInbandSubtitleTracks[i] == track) {
+                Log.v(TAG, "Selecting subtitle track " + i);
+                mSelectedSubtitleTrackIndex = i;
+                try {
+                    selectOrDeselectInbandTrack(mSelectedSubtitleTrackIndex, true);
+                } catch (IllegalStateException e) {
+                }
+                setOnSubtitleDataListener(mSubtitleDataListener);
+                break;
+            }
+        }
+        // no need to select out-of-band tracks
+    }
+
+    /** @hide */
+    public void addSubtitleSource(InputStream is, MediaFormat format)
+            throws IllegalStateException
+    {
+        final InputStream fIs = is;
+        final MediaFormat fFormat = format;
+
+        // Ensure all input streams are closed.  It is also a handy
+        // way to implement timeouts in the future.
+        synchronized(mOpenSubtitleSources) {
+            mOpenSubtitleSources.add(is);
+        }
+
+        // process each subtitle in its own thread
+        final HandlerThread thread = new HandlerThread("SubtitleReadThread",
+              Process.THREAD_PRIORITY_BACKGROUND + Process.THREAD_PRIORITY_MORE_FAVORABLE);
+        thread.start();
+        Handler handler = new Handler(thread.getLooper());
+        handler.post(new Runnable() {
+            private int addTrack() {
+                if (fIs == null || mSubtitleController == null) {
+                    return MEDIA_INFO_UNSUPPORTED_SUBTITLE;
+                }
+
+                SubtitleTrack track = mSubtitleController.addTrack(fFormat);
+                if (track == null) {
+                    return MEDIA_INFO_UNSUPPORTED_SUBTITLE;
+                }
+
+                // TODO: do the conversion in the subtitle track
+                Scanner scanner = new Scanner(fIs, "UTF-8");
+                String contents = scanner.useDelimiter("\\A").next();
+                synchronized(mOpenSubtitleSources) {
+                    mOpenSubtitleSources.remove(fIs);
+                }
+                scanner.close();
+                mOutOfBandSubtitleTracks.add(track);
+                track.onData(contents.getBytes(), true /* eos */, ~0 /* runID: keep forever */);
+                return MEDIA_INFO_EXTERNAL_METADATA_UPDATE;
+            }
+
+            public void run() {
+                int res = addTrack();
+                if (mEventHandler != null) {
+                    Message m = mEventHandler.obtainMessage(MEDIA_INFO, res, 0, null);
+                    mEventHandler.sendMessage(m);
+                }
+                thread.getLooper().quitSafely();
+            }
+        });
+    }
+
+    private void scanInternalSubtitleTracks() {
+        if (mSubtitleController == null) {
+            Log.e(TAG, "Should have subtitle controller already set");
+            return;
+        }
+
+        TrackInfo[] tracks = getInbandTrackInfo();
+        synchronized (mInbandSubtitleLock) {
+            SubtitleTrack[] inbandTracks = new SubtitleTrack[tracks.length];
+            for (int i=0; i < tracks.length; i++) {
+                if (tracks[i].getTrackType() == TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE) {
+                    if (i < mInbandSubtitleTracks.length) {
+                        inbandTracks[i] = mInbandSubtitleTracks[i];
+                    } else {
+                        SubtitleTrack track = mSubtitleController.addTrack(
+                                tracks[i].getFormat());
+                        inbandTracks[i] = track;
+                    }
+                }
+            }
+            mInbandSubtitleTracks = inbandTracks;
+        }
+        mSubtitleController.selectDefaultTrack();
     }
 
     /* TODO: Limit the total number of external timed text source to a reasonable number.
@@ -1792,26 +2177,140 @@ public class MediaPlayer
      * @param fd the FileDescriptor for the file you want to play
      * @param offset the offset into the file where the data to be played starts, in bytes
      * @param length the length in bytes of the data to be played
-     * @param mimeType The mime type of the file. Must be one of the mime types listed above.
+     * @param mime The mime type of the file. Must be one of the mime types listed above.
      * @throws IllegalArgumentException if the mimeType is not supported.
      * @throws IllegalStateException if called in an invalid state.
      */
-    public void addTimedTextSource(FileDescriptor fd, long offset, long length, String mimeType)
+    public void addTimedTextSource(FileDescriptor fd, long offset, long length, String mime)
             throws IllegalArgumentException, IllegalStateException {
-        if (!availableMimeTypeForExternalSource(mimeType)) {
-            throw new IllegalArgumentException("Illegal mimeType for timed text source: " + mimeType);
+        if (!availableMimeTypeForExternalSource(mime)) {
+            throw new IllegalArgumentException("Illegal mimeType for timed text source: " + mime);
+        }
+
+        FileDescriptor fd2;
+        try {
+            fd2 = Libcore.os.dup(fd);
+        } catch (ErrnoException ex) {
+            Log.e(TAG, ex.getMessage(), ex);
+            throw new RuntimeException(ex);
+        }
+
+        final MediaFormat fFormat = new MediaFormat();
+        fFormat.setString(MediaFormat.KEY_MIME, mime);
+        fFormat.setInteger(MediaFormat.KEY_IS_TIMED_TEXT, 1);
+
+        Context context = ActivityThread.currentApplication();
+        // A MediaPlayer created by a VideoView should already have its mSubtitleController set.
+        if (mSubtitleController == null) {
+            mSubtitleController = new SubtitleController(context, mTimeProvider, this);
+            mSubtitleController.setAnchor(new Anchor() {
+                @Override
+                public void setSubtitleWidget(RenderingWidget subtitleWidget) {
+                }
+
+                @Override
+                public Looper getSubtitleLooper() {
+                    return Looper.getMainLooper();
+                }
+            });
+        }
+
+        if (!mSubtitleController.hasRendererFor(fFormat)) {
+            // test and add not atomic
+            mSubtitleController.registerRenderer(new SRTRenderer(context, mEventHandler));
+        }
+        final SubtitleTrack track = mSubtitleController.addTrack(fFormat);
+        mOutOfBandSubtitleTracks.add(track);
+
+        final FileDescriptor fd3 = fd2;
+        final long offset2 = offset;
+        final long length2 = length;
+        final HandlerThread thread = new HandlerThread(
+                "TimedTextReadThread",
+                Process.THREAD_PRIORITY_BACKGROUND + Process.THREAD_PRIORITY_MORE_FAVORABLE);
+        thread.start();
+        Handler handler = new Handler(thread.getLooper());
+        handler.post(new Runnable() {
+            private int addTrack() {
+                InputStream is = null;
+                final ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                try {
+                    Libcore.os.lseek(fd3, offset2, OsConstants.SEEK_SET);
+                    byte[] buffer = new byte[4096];
+                    for (long total = 0; total < length2;) {
+                        int bytesToRead = (int) Math.min(buffer.length, length2 - total);
+                        int bytes = IoBridge.read(fd3, buffer, 0, bytesToRead);
+                        if (bytes < 0) {
+                            break;
+                        } else {
+                            bos.write(buffer, 0, bytes);
+                            total += bytes;
+                        }
+                    }
+                    track.onData(bos.toByteArray(), true /* eos */, ~0 /* runID: keep forever */);
+                    return MEDIA_INFO_EXTERNAL_METADATA_UPDATE;
+                } catch (Exception e) {
+                    Log.e(TAG, e.getMessage(), e);
+                    return MEDIA_INFO_TIMED_TEXT_ERROR;
+                } finally {
+                    if (is != null) {
+                        try {
+                            is.close();
+                        } catch (IOException e) {
+                            Log.e(TAG, e.getMessage(), e);
+                        }
+                    }
+                }
+            }
+
+            public void run() {
+                int res = addTrack();
+                if (mEventHandler != null) {
+                    Message m = mEventHandler.obtainMessage(MEDIA_INFO, res, 0, null);
+                    mEventHandler.sendMessage(m);
+                }
+                thread.getLooper().quitSafely();
+            }
+        });
+    }
+
+    /**
+     * Returns the index of the audio, video, or subtitle track currently selected for playback,
+     * The return value is an index into the array returned by {@link #getTrackInfo()}, and can
+     * be used in calls to {@link #selectTrack(int)} or {@link #deselectTrack(int)}.
+     *
+     * @param trackType should be one of {@link TrackInfo#MEDIA_TRACK_TYPE_VIDEO},
+     * {@link TrackInfo#MEDIA_TRACK_TYPE_AUDIO}, or
+     * {@link TrackInfo#MEDIA_TRACK_TYPE_SUBTITLE}
+     * @return index of the audio, video, or subtitle track currently selected for playback;
+     * a negative integer is returned when there is no selected track for {@code trackType} or
+     * when {@code trackType} is not one of audio, video, or subtitle.
+     * @throws IllegalStateException if called after {@link #release()}
+     *
+     * @see #getTrackInfo()
+     * @see #selectTrack(int)
+     * @see #deselectTrack(int)
+     */
+    public int getSelectedTrack(int trackType) throws IllegalStateException {
+        if (trackType == TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE && mSubtitleController != null) {
+            SubtitleTrack subtitleTrack = mSubtitleController.getSelectedTrack();
+            if (subtitleTrack != null) {
+                int index = mOutOfBandSubtitleTracks.indexOf(subtitleTrack);
+                if (index >= 0) {
+                    return mInbandSubtitleTracks.length + index;
+                }
+            }
         }
 
         Parcel request = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             request.writeInterfaceToken(IMEDIA_PLAYER);
-            request.writeInt(INVOKE_ID_ADD_EXTERNAL_SOURCE_FD);
-            request.writeFileDescriptor(fd);
-            request.writeLong(offset);
-            request.writeLong(length);
-            request.writeString(mimeType);
+            request.writeInt(INVOKE_ID_GET_SELECTED_TRACK);
+            request.writeInt(trackType);
             invoke(request, reply);
+            int selectedTrack = reply.readInt();
+            return selectedTrack;
         } finally {
             request.recycle();
             reply.recycle();
@@ -1869,6 +2368,49 @@ public class MediaPlayer
     }
 
     private void selectOrDeselectTrack(int index, boolean select)
+            throws IllegalStateException {
+        // handle subtitle track through subtitle controller
+        SubtitleTrack track = null;
+        synchronized (mInbandSubtitleLock) {
+            if (mInbandSubtitleTracks.length == 0) {
+                TrackInfo[] tracks = getInbandTrackInfo();
+                mInbandSubtitleTracks = new SubtitleTrack[tracks.length];
+                for (int i=0; i < tracks.length; i++) {
+                    if (tracks[i].getTrackType() == TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE) {
+                        mInbandSubtitleTracks[i] = mSubtitleController.addTrack(tracks[i].getFormat());
+                    }
+                }
+            }
+        }
+
+        if (index < mInbandSubtitleTracks.length) {
+            track = mInbandSubtitleTracks[index];
+        } else if (index < mInbandSubtitleTracks.length + mOutOfBandSubtitleTracks.size()) {
+            track = mOutOfBandSubtitleTracks.get(index - mInbandSubtitleTracks.length);
+        }
+
+        if (mSubtitleController != null && track != null) {
+            if (select) {
+                if (track.isTimedText()) {
+                    int ttIndex = getSelectedTrack(TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT);
+                    if (ttIndex >= 0 && ttIndex < mInbandSubtitleTracks.length) {
+                        // deselect inband counterpart
+                        selectOrDeselectInbandTrack(ttIndex, false);
+                    }
+                }
+                mSubtitleController.selectTrack(track);
+            } else if (mSubtitleController.getSelectedTrack() == track) {
+                mSubtitleController.selectTrack(null);
+            } else {
+                Log.w(TAG, "trying to deselect track that was not selected");
+            }
+            return;
+        }
+
+        selectOrDeselectInbandTrack(index, select);
+    }
+
+    private void selectOrDeselectInbandTrack(int index, boolean select)
             throws IllegalStateException {
         Parcel request = Parcel.obtain();
         Parcel reply = Parcel.obtain();
@@ -1950,9 +2492,24 @@ public class MediaPlayer
     private static final int MEDIA_BUFFERING_UPDATE = 3;
     private static final int MEDIA_SEEK_COMPLETE = 4;
     private static final int MEDIA_SET_VIDEO_SIZE = 5;
+    private static final int MEDIA_STARTED = 6;
+    private static final int MEDIA_PAUSED = 7;
+    private static final int MEDIA_STOPPED = 8;
+    private static final int MEDIA_SKIPPED = 9;
     private static final int MEDIA_TIMED_TEXT = 99;
     private static final int MEDIA_ERROR = 100;
     private static final int MEDIA_INFO = 200;
+    private static final int MEDIA_SUBTITLE_DATA = 201;
+
+    private TimeProvider mTimeProvider;
+
+    /** @hide */
+    public MediaTimeProvider getMediaTimeProvider() {
+        if (mTimeProvider == null) {
+            mTimeProvider = new TimeProvider(this);
+        }
+        return mTimeProvider;
+    }
 
     private class EventHandler extends Handler
     {
@@ -1971,6 +2528,7 @@ public class MediaPlayer
             }
             switch(msg.what) {
             case MEDIA_PREPARED:
+                scanInternalSubtitleTracks();
                 if (mOnPreparedListener != null)
                     mOnPreparedListener.onPrepared(mMediaPlayer);
                 return;
@@ -1981,14 +2539,34 @@ public class MediaPlayer
                 stayAwake(false);
                 return;
 
+            case MEDIA_STOPPED:
+                if (mTimeProvider != null) {
+                    mTimeProvider.onStopped();
+                }
+                break;
+
+            case MEDIA_STARTED:
+            case MEDIA_PAUSED:
+                if (mTimeProvider != null) {
+                    mTimeProvider.onPaused(msg.what == MEDIA_PAUSED);
+                }
+                break;
+
             case MEDIA_BUFFERING_UPDATE:
                 if (mOnBufferingUpdateListener != null)
                     mOnBufferingUpdateListener.onBufferingUpdate(mMediaPlayer, msg.arg1);
                 return;
 
             case MEDIA_SEEK_COMPLETE:
-              if (mOnSeekCompleteListener != null)
+              if (mOnSeekCompleteListener != null) {
                   mOnSeekCompleteListener.onSeekComplete(mMediaPlayer);
+              }
+              // fall through
+
+            case MEDIA_SKIPPED:
+              if (mTimeProvider != null) {
+                  mTimeProvider.onSeekComplete(mMediaPlayer);
+              }
               return;
 
             case MEDIA_SET_VIDEO_SIZE:
@@ -2009,9 +2587,23 @@ public class MediaPlayer
                 return;
 
             case MEDIA_INFO:
-                if (msg.arg1 != MEDIA_INFO_VIDEO_TRACK_LAGGING) {
+                switch (msg.arg1) {
+                case MEDIA_INFO_VIDEO_TRACK_LAGGING:
                     Log.i(TAG, "Info (" + msg.arg1 + "," + msg.arg2 + ")");
+                    break;
+                case MEDIA_INFO_METADATA_UPDATE:
+                    scanInternalSubtitleTracks();
+                    // fall through
+
+                case MEDIA_INFO_EXTERNAL_METADATA_UPDATE:
+                    msg.arg1 = MEDIA_INFO_METADATA_UPDATE;
+                    // update default track selection
+                    if (mSubtitleController != null) {
+                        mSubtitleController.selectDefaultTrack();
+                    }
+                    break;
                 }
+
                 if (mOnInfoListener != null) {
                     mOnInfoListener.onInfo(mMediaPlayer, msg.arg1, msg.arg2);
                 }
@@ -2029,6 +2621,18 @@ public class MediaPlayer
                         parcel.recycle();
                         mOnTimedTextListener.onTimedText(mMediaPlayer, text);
                     }
+                }
+                return;
+
+            case MEDIA_SUBTITLE_DATA:
+                if (mOnSubtitleDataListener == null) {
+                    return;
+                }
+                if (msg.obj instanceof Parcel) {
+                    Parcel parcel = (Parcel) msg.obj;
+                    SubtitleData data = new SubtitleData(parcel);
+                    parcel.recycle();
+                    mOnSubtitleDataListener.onSubtitleData(mMediaPlayer, data);
                 }
                 return;
 
@@ -2243,6 +2847,30 @@ public class MediaPlayer
 
     private OnTimedTextListener mOnTimedTextListener;
 
+    /**
+     * Interface definition of a callback to be invoked when a
+     * track has data available.
+     *
+     * @hide
+     */
+    public interface OnSubtitleDataListener
+    {
+        public void onSubtitleData(MediaPlayer mp, SubtitleData data);
+    }
+
+    /**
+     * Register a callback to be invoked when a track has data available.
+     *
+     * @param listener the callback that will be run
+     *
+     * @hide
+     */
+    public void setOnSubtitleDataListener(OnSubtitleDataListener listener)
+    {
+        mOnSubtitleDataListener = listener;
+    }
+
+    private OnSubtitleDataListener mOnSubtitleDataListener;
 
     /* Do not change these values without updating their counterparts
      * in include/media/mediaplayer.h!
@@ -2265,6 +2893,16 @@ public class MediaPlayer
      */
     public static final int MEDIA_ERROR_NOT_VALID_FOR_PROGRESSIVE_PLAYBACK = 200;
 
+    /** File or network related operation errors. */
+    public static final int MEDIA_ERROR_IO = -1004;
+    /** Bitstream is not conforming to the related coding standard or file spec. */
+    public static final int MEDIA_ERROR_MALFORMED = -1007;
+    /** Bitstream is conforming to the related coding standard or file spec, but
+     * the media framework does not support the feature. */
+    public static final int MEDIA_ERROR_UNSUPPORTED = -1010;
+    /** Some operation takes too long to complete, usually more than 3-5 seconds. */
+    public static final int MEDIA_ERROR_TIMED_OUT = -110;
+
     /**
      * Interface definition of a callback to be invoked when there
      * has been an error during an asynchronous operation (other errors
@@ -2282,7 +2920,13 @@ public class MediaPlayer
          * <li>{@link #MEDIA_ERROR_SERVER_DIED}
          * </ul>
          * @param extra an extra code, specific to the error. Typically
-         * implementation dependant.
+         * implementation dependent.
+         * <ul>
+         * <li>{@link #MEDIA_ERROR_IO}
+         * <li>{@link #MEDIA_ERROR_MALFORMED}
+         * <li>{@link #MEDIA_ERROR_UNSUPPORTED}
+         * <li>{@link #MEDIA_ERROR_TIMED_OUT}
+         * </ul>
          * @return True if the method handled the error, false if it didn't.
          * Returning false, or not having an OnErrorListener at all, will
          * cause the OnCompletionListener to be called.
@@ -2319,6 +2963,11 @@ public class MediaPlayer
      */
     public static final int MEDIA_INFO_STARTED_AS_NEXT = 2;
 
+    /** The player just pushed the very first video frame for rendering.
+     * @see android.media.MediaPlayer.OnInfoListener
+     */
+    public static final int MEDIA_INFO_VIDEO_RENDERING_START = 3;
+
     /** The video is too complex for the decoder: it can't decode frames fast
      *  enough. Possibly only the audio plays fine at this stage.
      * @see android.media.MediaPlayer.OnInfoListener
@@ -2353,12 +3002,28 @@ public class MediaPlayer
      */
     public static final int MEDIA_INFO_METADATA_UPDATE = 802;
 
+    /** A new set of external-only metadata is available.  Used by
+     *  JAVA framework to avoid triggering track scanning.
+     * @hide
+     */
+    public static final int MEDIA_INFO_EXTERNAL_METADATA_UPDATE = 803;
+
     /** Failed to handle timed text track properly.
      * @see android.media.MediaPlayer.OnInfoListener
      *
      * {@hide}
      */
     public static final int MEDIA_INFO_TIMED_TEXT_ERROR = 900;
+
+    /** Subtitle track was not supported by the media framework.
+     * @see android.media.MediaPlayer.OnInfoListener
+     */
+    public static final int MEDIA_INFO_UNSUPPORTED_SUBTITLE = 901;
+
+    /** Reading the subtitle track takes too long.
+     * @see android.media.MediaPlayer.OnInfoListener
+     */
+    public static final int MEDIA_INFO_SUBTITLE_TIMED_OUT = 902;
 
     /**
      * Interface definition of a callback to be invoked to communicate some
@@ -2374,14 +3039,17 @@ public class MediaPlayer
          * <ul>
          * <li>{@link #MEDIA_INFO_UNKNOWN}
          * <li>{@link #MEDIA_INFO_VIDEO_TRACK_LAGGING}
+         * <li>{@link #MEDIA_INFO_VIDEO_RENDERING_START}
          * <li>{@link #MEDIA_INFO_BUFFERING_START}
          * <li>{@link #MEDIA_INFO_BUFFERING_END}
          * <li>{@link #MEDIA_INFO_BAD_INTERLEAVING}
          * <li>{@link #MEDIA_INFO_NOT_SEEKABLE}
          * <li>{@link #MEDIA_INFO_METADATA_UPDATE}
+         * <li>{@link #MEDIA_INFO_UNSUPPORTED_SUBTITLE}
+         * <li>{@link #MEDIA_INFO_SUBTITLE_TIMED_OUT}
          * </ul>
          * @param extra an extra code, specific to the info. Typically
-         * implementation dependant.
+         * implementation dependent.
          * @return True if the method handled the info, false if it didn't.
          * Returning false, or not having an OnErrorListener at all, will
          * cause the info to be discarded.
@@ -2407,5 +3075,398 @@ public class MediaPlayer
     private boolean isVideoScalingModeSupported(int mode) {
         return (mode == VIDEO_SCALING_MODE_SCALE_TO_FIT ||
                 mode == VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING);
+    }
+
+    /** @hide */
+    static class TimeProvider implements MediaPlayer.OnSeekCompleteListener,
+            MediaTimeProvider {
+        private static final String TAG = "MTP";
+        private static final long MAX_NS_WITHOUT_POSITION_CHECK = 5000000000L;
+        private static final long MAX_EARLY_CALLBACK_US = 1000;
+        private static final long TIME_ADJUSTMENT_RATE = 2;  /* meaning 1/2 */
+        private long mLastTimeUs = 0;
+        private MediaPlayer mPlayer;
+        private boolean mPaused = true;
+        private boolean mStopped = true;
+        private long mLastReportedTime;
+        private long mTimeAdjustment;
+        // since we are expecting only a handful listeners per stream, there is
+        // no need for log(N) search performance
+        private MediaTimeProvider.OnMediaTimeListener mListeners[];
+        private long mTimes[];
+        private long mLastNanoTime;
+        private Handler mEventHandler;
+        private boolean mRefresh = false;
+        private boolean mPausing = false;
+        private boolean mSeeking = false;
+        private static final int NOTIFY = 1;
+        private static final int NOTIFY_TIME = 0;
+        private static final int REFRESH_AND_NOTIFY_TIME = 1;
+        private static final int NOTIFY_STOP = 2;
+        private static final int NOTIFY_SEEK = 3;
+        private HandlerThread mHandlerThread;
+
+        /** @hide */
+        public boolean DEBUG = false;
+
+        public TimeProvider(MediaPlayer mp) {
+            mPlayer = mp;
+            try {
+                getCurrentTimeUs(true, false);
+            } catch (IllegalStateException e) {
+                // we assume starting position
+                mRefresh = true;
+            }
+
+            Looper looper;
+            if ((looper = Looper.myLooper()) == null &&
+                (looper = Looper.getMainLooper()) == null) {
+                // Create our own looper here in case MP was created without one
+                mHandlerThread = new HandlerThread("MediaPlayerMTPEventThread",
+                      Process.THREAD_PRIORITY_FOREGROUND);
+                mHandlerThread.start();
+                looper = mHandlerThread.getLooper();
+            }
+            mEventHandler = new EventHandler(looper);
+
+            mListeners = new MediaTimeProvider.OnMediaTimeListener[0];
+            mTimes = new long[0];
+            mLastTimeUs = 0;
+            mTimeAdjustment = 0;
+        }
+
+        private void scheduleNotification(int type, long delayUs) {
+            // ignore time notifications until seek is handled
+            if (mSeeking &&
+                    (type == NOTIFY_TIME || type == REFRESH_AND_NOTIFY_TIME)) {
+                return;
+            }
+
+            if (DEBUG) Log.v(TAG, "scheduleNotification " + type + " in " + delayUs);
+            mEventHandler.removeMessages(NOTIFY);
+            Message msg = mEventHandler.obtainMessage(NOTIFY, type, 0);
+            mEventHandler.sendMessageDelayed(msg, (int) (delayUs / 1000));
+        }
+
+        /** @hide */
+        public void close() {
+            mEventHandler.removeMessages(NOTIFY);
+            if (mHandlerThread != null) {
+                mHandlerThread.quitSafely();
+                mHandlerThread = null;
+            }
+        }
+
+        /** @hide */
+        protected void finalize() {
+            if (mHandlerThread != null) {
+                mHandlerThread.quitSafely();
+            }
+        }
+
+        /** @hide */
+        public void onPaused(boolean paused) {
+            synchronized(this) {
+                if (DEBUG) Log.d(TAG, "onPaused: " + paused);
+                if (mStopped) { // handle as seek if we were stopped
+                    mStopped = false;
+                    mSeeking = true;
+                    scheduleNotification(NOTIFY_SEEK, 0 /* delay */);
+                } else {
+                    mPausing = paused;  // special handling if player disappeared
+                    mSeeking = false;
+                    scheduleNotification(REFRESH_AND_NOTIFY_TIME, 0 /* delay */);
+                }
+            }
+        }
+
+        /** @hide */
+        public void onStopped() {
+            synchronized(this) {
+                if (DEBUG) Log.d(TAG, "onStopped");
+                mPaused = true;
+                mStopped = true;
+                mSeeking = false;
+                scheduleNotification(NOTIFY_STOP, 0 /* delay */);
+            }
+        }
+
+        /** @hide */
+        @Override
+        public void onSeekComplete(MediaPlayer mp) {
+            synchronized(this) {
+                mStopped = false;
+                mSeeking = true;
+                scheduleNotification(NOTIFY_SEEK, 0 /* delay */);
+            }
+        }
+
+        /** @hide */
+        public void onNewPlayer() {
+            if (mRefresh) {
+                synchronized(this) {
+                    mStopped = false;
+                    mSeeking = true;
+                    scheduleNotification(NOTIFY_SEEK, 0 /* delay */);
+                }
+            }
+        }
+
+        private synchronized void notifySeek() {
+            mSeeking = false;
+            try {
+                long timeUs = getCurrentTimeUs(true, false);
+                if (DEBUG) Log.d(TAG, "onSeekComplete at " + timeUs);
+
+                for (MediaTimeProvider.OnMediaTimeListener listener: mListeners) {
+                    if (listener == null) {
+                        break;
+                    }
+                    listener.onSeek(timeUs);
+                }
+            } catch (IllegalStateException e) {
+                // we should not be there, but at least signal pause
+                if (DEBUG) Log.d(TAG, "onSeekComplete but no player");
+                mPausing = true;  // special handling if player disappeared
+                notifyTimedEvent(false /* refreshTime */);
+            }
+        }
+
+        private synchronized void notifyStop() {
+            for (MediaTimeProvider.OnMediaTimeListener listener: mListeners) {
+                if (listener == null) {
+                    break;
+                }
+                listener.onStop();
+            }
+        }
+
+        private int registerListener(MediaTimeProvider.OnMediaTimeListener listener) {
+            int i = 0;
+            for (; i < mListeners.length; i++) {
+                if (mListeners[i] == listener || mListeners[i] == null) {
+                    break;
+                }
+            }
+
+            // new listener
+            if (i >= mListeners.length) {
+                MediaTimeProvider.OnMediaTimeListener[] newListeners =
+                    new MediaTimeProvider.OnMediaTimeListener[i + 1];
+                long[] newTimes = new long[i + 1];
+                System.arraycopy(mListeners, 0, newListeners, 0, mListeners.length);
+                System.arraycopy(mTimes, 0, newTimes, 0, mTimes.length);
+                mListeners = newListeners;
+                mTimes = newTimes;
+            }
+
+            if (mListeners[i] == null) {
+                mListeners[i] = listener;
+                mTimes[i] = MediaTimeProvider.NO_TIME;
+            }
+            return i;
+        }
+
+        public void notifyAt(
+                long timeUs, MediaTimeProvider.OnMediaTimeListener listener) {
+            synchronized(this) {
+                if (DEBUG) Log.d(TAG, "notifyAt " + timeUs);
+                mTimes[registerListener(listener)] = timeUs;
+                scheduleNotification(NOTIFY_TIME, 0 /* delay */);
+            }
+        }
+
+        public void scheduleUpdate(MediaTimeProvider.OnMediaTimeListener listener) {
+            synchronized(this) {
+                if (DEBUG) Log.d(TAG, "scheduleUpdate");
+                int i = registerListener(listener);
+
+                if (!mStopped) {
+                    mTimes[i] = 0;
+                    scheduleNotification(NOTIFY_TIME, 0 /* delay */);
+                }
+            }
+        }
+
+        public void cancelNotifications(
+                MediaTimeProvider.OnMediaTimeListener listener) {
+            synchronized(this) {
+                int i = 0;
+                for (; i < mListeners.length; i++) {
+                    if (mListeners[i] == listener) {
+                        System.arraycopy(mListeners, i + 1,
+                                mListeners, i, mListeners.length - i - 1);
+                        System.arraycopy(mTimes, i + 1,
+                                mTimes, i, mTimes.length - i - 1);
+                        mListeners[mListeners.length - 1] = null;
+                        mTimes[mTimes.length - 1] = NO_TIME;
+                        break;
+                    } else if (mListeners[i] == null) {
+                        break;
+                    }
+                }
+
+                scheduleNotification(NOTIFY_TIME, 0 /* delay */);
+            }
+        }
+
+        private synchronized void notifyTimedEvent(boolean refreshTime) {
+            // figure out next callback
+            long nowUs;
+            try {
+                nowUs = getCurrentTimeUs(refreshTime, true);
+            } catch (IllegalStateException e) {
+                // assume we paused until new player arrives
+                mRefresh = true;
+                mPausing = true; // this ensures that call succeeds
+                nowUs = getCurrentTimeUs(refreshTime, true);
+            }
+            long nextTimeUs = nowUs;
+
+            if (mSeeking) {
+                // skip timed-event notifications until seek is complete
+                return;
+            }
+
+            if (DEBUG) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("notifyTimedEvent(").append(mLastTimeUs).append(" -> ")
+                        .append(nowUs).append(") from {");
+                boolean first = true;
+                for (long time: mTimes) {
+                    if (time == NO_TIME) {
+                        continue;
+                    }
+                    if (!first) sb.append(", ");
+                    sb.append(time);
+                    first = false;
+                }
+                sb.append("}");
+                Log.d(TAG, sb.toString());
+            }
+
+            Vector<MediaTimeProvider.OnMediaTimeListener> activatedListeners =
+                new Vector<MediaTimeProvider.OnMediaTimeListener>();
+            for (int ix = 0; ix < mTimes.length; ix++) {
+                if (mListeners[ix] == null) {
+                    break;
+                }
+                if (mTimes[ix] <= NO_TIME) {
+                    // ignore, unless we were stopped
+                } else if (mTimes[ix] <= nowUs + MAX_EARLY_CALLBACK_US) {
+                    activatedListeners.add(mListeners[ix]);
+                    if (DEBUG) Log.d(TAG, "removed");
+                    mTimes[ix] = NO_TIME;
+                } else if (nextTimeUs == nowUs || mTimes[ix] < nextTimeUs) {
+                    nextTimeUs = mTimes[ix];
+                }
+            }
+
+            if (nextTimeUs > nowUs && !mPaused) {
+                // schedule callback at nextTimeUs
+                if (DEBUG) Log.d(TAG, "scheduling for " + nextTimeUs + " and " + nowUs);
+                scheduleNotification(NOTIFY_TIME, nextTimeUs - nowUs);
+            } else {
+                mEventHandler.removeMessages(NOTIFY);
+                // no more callbacks
+            }
+
+            for (MediaTimeProvider.OnMediaTimeListener listener: activatedListeners) {
+                listener.onTimedEvent(nowUs);
+            }
+        }
+
+        private long getEstimatedTime(long nanoTime, boolean monotonic) {
+            if (mPaused) {
+                mLastReportedTime = mLastTimeUs + mTimeAdjustment;
+            } else {
+                long timeSinceRead = (nanoTime - mLastNanoTime) / 1000;
+                mLastReportedTime = mLastTimeUs + timeSinceRead;
+                if (mTimeAdjustment > 0) {
+                    long adjustment =
+                        mTimeAdjustment - timeSinceRead / TIME_ADJUSTMENT_RATE;
+                    if (adjustment <= 0) {
+                        mTimeAdjustment = 0;
+                    } else {
+                        mLastReportedTime += adjustment;
+                    }
+                }
+            }
+            return mLastReportedTime;
+        }
+
+        public long getCurrentTimeUs(boolean refreshTime, boolean monotonic)
+                throws IllegalStateException {
+            synchronized (this) {
+                // we always refresh the time when the paused-state changes, because
+                // we expect to have received the pause-change event delayed.
+                if (mPaused && !refreshTime) {
+                    return mLastReportedTime;
+                }
+
+                long nanoTime = System.nanoTime();
+                if (refreshTime ||
+                        nanoTime >= mLastNanoTime + MAX_NS_WITHOUT_POSITION_CHECK) {
+                    try {
+                        mLastTimeUs = mPlayer.getCurrentPosition() * 1000L;
+                        mPaused = !mPlayer.isPlaying();
+                        if (DEBUG) Log.v(TAG, (mPaused ? "paused" : "playing") + " at " + mLastTimeUs);
+                    } catch (IllegalStateException e) {
+                        if (mPausing) {
+                            // if we were pausing, get last estimated timestamp
+                            mPausing = false;
+                            getEstimatedTime(nanoTime, monotonic);
+                            mPaused = true;
+                            if (DEBUG) Log.d(TAG, "illegal state, but pausing: estimating at " + mLastReportedTime);
+                            return mLastReportedTime;
+                        }
+                        // TODO get time when prepared
+                        throw e;
+                    }
+                    mLastNanoTime = nanoTime;
+                    if (monotonic && mLastTimeUs < mLastReportedTime) {
+                        /* have to adjust time */
+                        mTimeAdjustment = mLastReportedTime - mLastTimeUs;
+                        if (mTimeAdjustment > 1000000) {
+                            // schedule seeked event if time jumped significantly
+                            // TODO: do this properly by introducing an exception
+                            mStopped = false;
+                            mSeeking = true;
+                            scheduleNotification(NOTIFY_SEEK, 0 /* delay */);
+                        }
+                    } else {
+                        mTimeAdjustment = 0;
+                    }
+                }
+
+                return getEstimatedTime(nanoTime, monotonic);
+            }
+        }
+
+        private class EventHandler extends Handler {
+            public EventHandler(Looper looper) {
+                super(looper);
+            }
+
+            @Override
+            public void handleMessage(Message msg) {
+                if (msg.what == NOTIFY) {
+                    switch (msg.arg1) {
+                    case NOTIFY_TIME:
+                        notifyTimedEvent(false /* refreshTime */);
+                        break;
+                    case REFRESH_AND_NOTIFY_TIME:
+                        notifyTimedEvent(true /* refreshTime */);
+                        break;
+                    case NOTIFY_STOP:
+                        notifyStop();
+                        break;
+                    case NOTIFY_SEEK:
+                        notifySeek();
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

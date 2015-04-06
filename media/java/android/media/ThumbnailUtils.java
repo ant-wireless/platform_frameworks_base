@@ -17,9 +17,6 @@
 package android.media;
 
 import android.content.ContentResolver;
-import android.content.ContentUris;
-import android.content.ContentValues;
-import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -29,15 +26,12 @@ import android.media.MediaMetadataRetriever;
 import android.media.MediaFile.MediaFileType;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
-import android.provider.BaseColumns;
 import android.provider.MediaStore.Images;
-import android.provider.MediaStore.Images.Thumbnails;
 import android.util.Log;
 
 import java.io.FileInputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
-import java.io.OutputStream;
 
 /**
  * Thumbnail generation routines for media provider.
@@ -48,7 +42,7 @@ public class ThumbnailUtils {
 
     /* Maximum pixels size for created bitmap. */
     private static final int MAX_NUM_PIXELS_THUMBNAIL = 512 * 384;
-    private static final int MAX_NUM_PIXELS_MICRO_THUMBNAIL = 128 * 128;
+    private static final int MAX_NUM_PIXELS_MICRO_THUMBNAIL = 160 * 120;
     private static final int UNCONSTRAINED = -1;
 
     /* Options used internally. */

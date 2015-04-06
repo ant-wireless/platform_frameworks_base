@@ -16,27 +16,30 @@
 
 package android.mtp;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.ContentValues;
 import android.content.IContentProvider;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.media.MediaScanner;
 import android.net.Uri;
-import android.os.Environment;
+import android.os.BatteryManager;
+import android.os.BatteryStats;
 import android.os.RemoteException;
 import android.provider.MediaStore;
 import android.provider.MediaStore.Audio;
 import android.provider.MediaStore.Files;
-import android.provider.MediaStore.Images;
 import android.provider.MediaStore.MediaColumns;
 import android.util.Log;
 import android.view.Display;
 import android.view.WindowManager;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Locale;
 
@@ -48,6 +51,7 @@ public class MtpDatabase {
     private static final String TAG = "MtpDatabase";
 
     private final Context mContext;
+    private final String mPackageName;
     private final IContentProvider mMediaProvider;
     private final String mVolumeName;
     private final Uri mObjectsUri;
@@ -84,11 +88,14 @@ public class MtpDatabase {
             Files.FileColumns._ID, // 0
             Files.FileColumns.DATA, // 1
     };
-    private static final String[] PATH_SIZE_FORMAT_PROJECTION = new String[] {
+    private static final String[] FORMAT_PROJECTION = new String[] {
+            Files.FileColumns._ID, // 0
+            Files.FileColumns.FORMAT, // 1
+    };
+    private static final String[] PATH_FORMAT_PROJECTION = new String[] {
             Files.FileColumns._ID, // 0
             Files.FileColumns.DATA, // 1
-            Files.FileColumns.SIZE, // 2
-            Files.FileColumns.FORMAT, // 3
+            Files.FileColumns.FORMAT, // 2
     };
     private static final String[] OBJECT_INFO_PROJECTION = new String[] {
             Files.FileColumns._ID, // 0
@@ -96,15 +103,15 @@ public class MtpDatabase {
             Files.FileColumns.FORMAT, // 2
             Files.FileColumns.PARENT, // 3
             Files.FileColumns.DATA, // 4
-            Files.FileColumns.SIZE, // 5
+            Files.FileColumns.DATE_ADDED, // 5
             Files.FileColumns.DATE_MODIFIED, // 6
     };
     private static final String ID_WHERE = Files.FileColumns._ID + "=?";
     private static final String PATH_WHERE = Files.FileColumns.DATA + "=?";
 
     private static final String STORAGE_WHERE = Files.FileColumns.STORAGE_ID + "=?";
-    private static final String FORMAT_WHERE = Files.FileColumns.PARENT + "=?";
-    private static final String PARENT_WHERE = Files.FileColumns.FORMAT + "=?";
+    private static final String FORMAT_WHERE = Files.FileColumns.FORMAT + "=?";
+    private static final String PARENT_WHERE = Files.FileColumns.PARENT + "=?";
     private static final String STORAGE_FORMAT_WHERE = STORAGE_WHERE + " AND "
                                             + Files.FileColumns.FORMAT + "=?";
     private static final String STORAGE_PARENT_WHERE = STORAGE_WHERE + " AND "
@@ -115,16 +122,41 @@ public class MtpDatabase {
                                             + Files.FileColumns.PARENT + "=?";
 
     private final MediaScanner mMediaScanner;
+    private MtpServer mServer;
+
+    // read from native code
+    private int mBatteryLevel;
+    private int mBatteryScale;
 
     static {
         System.loadLibrary("media_jni");
     }
+
+    private BroadcastReceiver mBatteryReceiver = new BroadcastReceiver() {
+          @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (action.equals(Intent.ACTION_BATTERY_CHANGED)) {
+                mBatteryScale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 0);
+                int newLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 0);
+                if (newLevel != mBatteryLevel) {
+                    mBatteryLevel = newLevel;
+                    if (mServer != null) {
+                        // send device property changed event
+                        mServer.sendDevicePropertyChanged(
+                                MtpConstants.DEVICE_PROPERTY_BATTERY_LEVEL);
+                    }
+                }
+            }
+        }
+    };
 
     public MtpDatabase(Context context, String volumeName, String storagePath,
             String[] subDirectories) {
         native_setup();
 
         mContext = context;
+        mPackageName = context.getPackageName();
         mMediaProvider = context.getContentResolver().acquireProvider("media");
         mVolumeName = volumeName;
         mMediaStoragePath = storagePath;
@@ -170,6 +202,23 @@ public class MtpDatabase {
             }
         }
         initDeviceProperties(context);
+    }
+
+    public void setServer(MtpServer server) {
+        mServer = server;
+
+        // always unregister before registering
+        try {
+            mContext.unregisterReceiver(mBatteryReceiver);
+        } catch (IllegalArgumentException e) {
+            // wasn't previously registered, ignore
+        }
+
+        // register for battery notifications when we are connected
+        if (server != null) {
+            mContext.registerReceiver(mBatteryReceiver,
+                    new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        }
     }
 
     @Override
@@ -220,7 +269,7 @@ public class MtpDatabase {
                 if (c != null) c.close();
                 if (db != null) db.close();
             }
-            databaseFile.delete();
+            context.deleteDatabase(devicePropertiesName);
         }
     }
 
@@ -256,8 +305,29 @@ public class MtpDatabase {
         return false;
     }
 
+    // returns true if the path is in the storage root
+    private boolean inStorageRoot(String path) {
+        try {
+            File f = new File(path);
+            String canonical = f.getCanonicalPath();
+            for (String root: mStorageMap.keySet()) {
+                if (canonical.startsWith(root)) {
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            // ignore
+        }
+        return false;
+    }
+
     private int beginSendObject(String path, int format, int parent,
                          int storageId, long size, long modified) {
+        // if the path is outside of the storage root, do not allow access
+        if (!inStorageRoot(path)) {
+            Log.e(TAG, "attempt to put file outside of storage area: " + path);
+            return -1;
+        }
         // if mSubDirectories is not null, do not allow copying files to any other locations
         if (!inStorageSubDirectory(path)) return -1;
 
@@ -265,7 +335,7 @@ public class MtpDatabase {
         if (path != null) {
             Cursor c = null;
             try {
-                c = mMediaProvider.query(mObjectsUri, ID_PROJECTION, PATH_WHERE,
+                c = mMediaProvider.query(mPackageName, mObjectsUri, ID_PROJECTION, PATH_WHERE,
                         new String[] { path }, null, null);
                 if (c != null && c.getCount() > 0) {
                     Log.w(TAG, "file already exists in beginSendObject: " + path);
@@ -290,7 +360,7 @@ public class MtpDatabase {
         values.put(Files.FileColumns.DATE_MODIFIED, modified);
 
         try {
-            Uri uri = mMediaProvider.insert(mObjectsUri, values);
+            Uri uri = mMediaProvider.insert(mPackageName, mObjectsUri, values);
             if (uri != null) {
                 return Integer.parseInt(uri.getPathSegments().get(2));
             } else {
@@ -325,7 +395,8 @@ public class MtpDatabase {
                 values.put(Files.FileColumns.DATE_MODIFIED, System.currentTimeMillis() / 1000);
                 values.put(MediaColumns.MEDIA_SCANNER_NEW_OBJECT_ID, handle);
                 try {
-                    Uri uri = mMediaProvider.insert(Audio.Playlists.EXTERNAL_CONTENT_URI, values);
+                    Uri uri = mMediaProvider.insert(mPackageName,
+                            Audio.Playlists.EXTERNAL_CONTENT_URI, values);
                 } catch (RemoteException e) {
                     Log.e(TAG, "RemoteException in endSendObject", e);
                 }
@@ -433,7 +504,8 @@ public class MtpDatabase {
             }
         }
 
-        return mMediaProvider.query(mObjectsUri, ID_PROJECTION, where, whereArgs, null, null);
+        return mMediaProvider.query(mPackageName, mObjectsUri, ID_PROJECTION, where,
+                whereArgs, null, null);
     }
 
     private int[] getObjectList(int storageID, int format, int parent) {
@@ -529,6 +601,7 @@ public class MtpDatabase {
             MtpConstants.PROPERTY_PARENT_OBJECT,
             MtpConstants.PROPERTY_PERSISTENT_UID,
             MtpConstants.PROPERTY_NAME,
+            MtpConstants.PROPERTY_DISPLAY_NAME,
             MtpConstants.PROPERTY_DATE_ADDED,
     };
 
@@ -555,6 +628,11 @@ public class MtpDatabase {
             MtpConstants.PROPERTY_DURATION,
             MtpConstants.PROPERTY_GENRE,
             MtpConstants.PROPERTY_COMPOSER,
+            MtpConstants.PROPERTY_AUDIO_WAVE_CODEC,
+            MtpConstants.PROPERTY_BITRATE_TYPE,
+            MtpConstants.PROPERTY_AUDIO_BITRATE,
+            MtpConstants.PROPERTY_NUMBER_OF_CHANNELS,
+            MtpConstants.PROPERTY_SAMPLE_RATE,
     };
 
     static final int[] VIDEO_PROPERTIES = {
@@ -596,43 +674,6 @@ public class MtpDatabase {
             MtpConstants.PROPERTY_DESCRIPTION,
     };
 
-    static final int[] ALL_PROPERTIES = {
-            // NOTE must match FILE_PROPERTIES above
-            MtpConstants.PROPERTY_STORAGE_ID,
-            MtpConstants.PROPERTY_OBJECT_FORMAT,
-            MtpConstants.PROPERTY_PROTECTION_STATUS,
-            MtpConstants.PROPERTY_OBJECT_SIZE,
-            MtpConstants.PROPERTY_OBJECT_FILE_NAME,
-            MtpConstants.PROPERTY_DATE_MODIFIED,
-            MtpConstants.PROPERTY_PARENT_OBJECT,
-            MtpConstants.PROPERTY_PERSISTENT_UID,
-            MtpConstants.PROPERTY_NAME,
-            MtpConstants.PROPERTY_DISPLAY_NAME,
-            MtpConstants.PROPERTY_DATE_ADDED,
-
-            // image specific properties
-            MtpConstants.PROPERTY_DESCRIPTION,
-
-            // audio specific properties
-            MtpConstants.PROPERTY_ARTIST,
-            MtpConstants.PROPERTY_ALBUM_NAME,
-            MtpConstants.PROPERTY_ALBUM_ARTIST,
-            MtpConstants.PROPERTY_TRACK,
-            MtpConstants.PROPERTY_ORIGINAL_RELEASE_DATE,
-            MtpConstants.PROPERTY_DURATION,
-            MtpConstants.PROPERTY_GENRE,
-            MtpConstants.PROPERTY_COMPOSER,
-
-            // video specific properties
-            MtpConstants.PROPERTY_ARTIST,
-            MtpConstants.PROPERTY_ALBUM_NAME,
-            MtpConstants.PROPERTY_DURATION,
-            MtpConstants.PROPERTY_DESCRIPTION,
-
-            // image specific properties
-            MtpConstants.PROPERTY_DESCRIPTION,
-    };
-
     private int[] getSupportedObjectProperties(int format) {
         switch (format) {
             case MtpConstants.FORMAT_MP3:
@@ -650,8 +691,6 @@ public class MtpDatabase {
             case MtpConstants.FORMAT_PNG:
             case MtpConstants.FORMAT_BMP:
                 return IMAGE_PROPERTIES;
-            case 0:
-                return ALL_PROPERTIES;
             default:
                 return FILE_PROPERTIES;
         }
@@ -662,6 +701,7 @@ public class MtpDatabase {
             MtpConstants.DEVICE_PROPERTY_SYNCHRONIZATION_PARTNER,
             MtpConstants.DEVICE_PROPERTY_DEVICE_FRIENDLY_NAME,
             MtpConstants.DEVICE_PROPERTY_IMAGE_SIZE,
+            MtpConstants.DEVICE_PROPERTY_BATTERY_LEVEL,
         };
     }
 
@@ -675,17 +715,23 @@ public class MtpDatabase {
 
         MtpPropertyGroup propertyGroup;
         if (property == 0xFFFFFFFFL) {
+            if (format == 0 && handle > 0) {
+                // return properties based on the object's format
+                format = getObjectFormat((int)handle);
+            }
              propertyGroup = mPropertyGroupsByFormat.get(format);
              if (propertyGroup == null) {
                 int[] propertyList = getSupportedObjectProperties(format);
-                propertyGroup = new MtpPropertyGroup(this, mMediaProvider, mVolumeName, propertyList);
+                propertyGroup = new MtpPropertyGroup(this, mMediaProvider, mPackageName,
+                        mVolumeName, propertyList);
                 mPropertyGroupsByFormat.put(new Integer(format), propertyGroup);
             }
         } else {
               propertyGroup = mPropertyGroupsByProperty.get(property);
              if (propertyGroup == null) {
                 int[] propertyList = new int[] { (int)property };
-                propertyGroup = new MtpPropertyGroup(this, mMediaProvider, mVolumeName, propertyList);
+                propertyGroup = new MtpPropertyGroup(this, mMediaProvider, mPackageName,
+                        mVolumeName, propertyList);
                 mPropertyGroupsByProperty.put(new Integer((int)property), propertyGroup);
             }
         }
@@ -700,7 +746,8 @@ public class MtpDatabase {
         String path = null;
         String[] whereArgs = new String[] {  Integer.toString(handle) };
         try {
-            c = mMediaProvider.query(mObjectsUri, PATH_PROJECTION, ID_WHERE, whereArgs, null, null);
+            c = mMediaProvider.query(mPackageName, mObjectsUri, PATH_PROJECTION, ID_WHERE,
+                    whereArgs, null, null);
             if (c != null && c.moveToNext()) {
                 path = c.getString(1);
             }
@@ -742,7 +789,7 @@ public class MtpDatabase {
         try {
             // note - we are relying on a special case in MediaProvider.update() to update
             // the paths for all children in the case where this is a directory.
-            updated = mMediaProvider.update(mObjectsUri, values, ID_WHERE, whereArgs);
+            updated = mMediaProvider.update(mPackageName, mObjectsUri, values, ID_WHERE, whereArgs);
         } catch (RemoteException e) {
             Log.e(TAG, "RemoteException in mMediaProvider.update", e);
         }
@@ -759,7 +806,7 @@ public class MtpDatabase {
             if (oldFile.getName().startsWith(".") && !newPath.startsWith(".")) {
                 // directory was unhidden
                 try {
-                    mMediaProvider.call(MediaStore.UNHIDE_CALL, newPath, null);
+                    mMediaProvider.call(mPackageName, MediaStore.UNHIDE_CALL, newPath, null);
                 } catch (RemoteException e) {
                     Log.e(TAG, "failed to unhide/rescan for " + newPath);
                 }
@@ -769,7 +816,7 @@ public class MtpDatabase {
             if (oldFile.getName().toLowerCase(Locale.US).equals(".nomedia")
                     && !newPath.toLowerCase(Locale.US).equals(".nomedia")) {
                 try {
-                    mMediaProvider.call(MediaStore.UNHIDE_CALL, oldFile.getParent(), null);
+                    mMediaProvider.call(mPackageName, MediaStore.UNHIDE_CALL, oldFile.getParent(), null);
                 } catch (RemoteException e) {
                     Log.e(TAG, "failed to unhide/rescan for " + newPath);
                 }
@@ -815,6 +862,8 @@ public class MtpDatabase {
                 outStringValue[imageSize.length()] = 0;
                 return MtpConstants.RESPONSE_OK;
 
+            // DEVICE_PROPERTY_BATTERY_LEVEL is implemented in the JNI code
+
             default:
                 return MtpConstants.RESPONSE_DEVICE_PROP_NOT_SUPPORTED;
         }
@@ -835,10 +884,10 @@ public class MtpDatabase {
     }
 
     private boolean getObjectInfo(int handle, int[] outStorageFormatParent,
-                        char[] outName, long[] outSizeModified) {
+                        char[] outName, long[] outCreatedModified) {
         Cursor c = null;
         try {
-            c = mMediaProvider.query(mObjectsUri, OBJECT_INFO_PROJECTION,
+            c = mMediaProvider.query(mPackageName, mObjectsUri, OBJECT_INFO_PROJECTION,
                             ID_WHERE, new String[] {  Integer.toString(handle) }, null, null);
             if (c != null && c.moveToNext()) {
                 outStorageFormatParent[0] = c.getInt(1);
@@ -856,8 +905,12 @@ public class MtpDatabase {
                 path.getChars(start, end, outName, 0);
                 outName[end - start] = 0;
 
-                outSizeModified[0] = c.getLong(5);
-                outSizeModified[1] = c.getLong(6);
+                outCreatedModified[0] = c.getLong(5);
+                outCreatedModified[1] = c.getLong(6);
+                // use modification date as creation date if date added is not set
+                if (outCreatedModified[0] == 0) {
+                    outCreatedModified[0] = outCreatedModified[1];
+                }
                 return true;
             }
         } catch (RemoteException e) {
@@ -881,14 +934,16 @@ public class MtpDatabase {
         }
         Cursor c = null;
         try {
-            c = mMediaProvider.query(mObjectsUri, PATH_SIZE_FORMAT_PROJECTION,
+            c = mMediaProvider.query(mPackageName, mObjectsUri, PATH_FORMAT_PROJECTION,
                             ID_WHERE, new String[] {  Integer.toString(handle) }, null, null);
             if (c != null && c.moveToNext()) {
                 String path = c.getString(1);
                 path.getChars(0, path.length(), outFilePath, 0);
                 outFilePath[path.length()] = 0;
-                outFileLengthFormat[0] = c.getLong(2);
-                outFileLengthFormat[1] = c.getLong(3);
+                // File transfers from device to host will likely fail if the size is incorrect.
+                // So to be safe, use the actual file size here.
+                outFileLengthFormat[0] = new File(path).length();
+                outFileLengthFormat[1] = c.getLong(2);
                 return MtpConstants.RESPONSE_OK;
             } else {
                 return MtpConstants.RESPONSE_INVALID_OBJECT_HANDLE;
@@ -903,6 +958,26 @@ public class MtpDatabase {
         }
     }
 
+    private int getObjectFormat(int handle) {
+        Cursor c = null;
+        try {
+            c = mMediaProvider.query(mPackageName, mObjectsUri, FORMAT_PROJECTION,
+                            ID_WHERE, new String[] {  Integer.toString(handle) }, null, null);
+            if (c != null && c.moveToNext()) {
+                return c.getInt(1);
+            } else {
+                return -1;
+            }
+        } catch (RemoteException e) {
+            Log.e(TAG, "RemoteException in getObjectFilePath", e);
+            return -1;
+        } finally {
+            if (c != null) {
+                c.close();
+            }
+        }
+    }
+
     private int deleteFile(int handle) {
         mDatabaseModified = true;
         String path = null;
@@ -910,13 +985,13 @@ public class MtpDatabase {
 
         Cursor c = null;
         try {
-            c = mMediaProvider.query(mObjectsUri, PATH_SIZE_FORMAT_PROJECTION,
+            c = mMediaProvider.query(mPackageName, mObjectsUri, PATH_FORMAT_PROJECTION,
                             ID_WHERE, new String[] {  Integer.toString(handle) }, null, null);
             if (c != null && c.moveToNext()) {
                 // don't convert to media path here, since we will be matching
                 // against paths in the database matching /data/media
                 path = c.getString(1);
-                format = c.getInt(3);
+                format = c.getInt(2);
             } else {
                 return MtpConstants.RESPONSE_INVALID_OBJECT_HANDLE;
             }
@@ -933,7 +1008,7 @@ public class MtpDatabase {
             if (format == MtpConstants.FORMAT_ASSOCIATION) {
                 // recursive case - delete all children first
                 Uri uri = Files.getMtpObjectsUri(mVolumeName);
-                int count = mMediaProvider.delete(uri,
+                int count = mMediaProvider.delete(mPackageName, uri,
                     // the 'like' makes it use the index, the 'lower()' makes it correct
                     // when the path contains sqlite wildcard characters
                     "_data LIKE ?1 AND lower(substr(_data,1,?2))=lower(?3)",
@@ -941,12 +1016,12 @@ public class MtpDatabase {
             }
 
             Uri uri = Files.getMtpObjectsUri(mVolumeName, handle);
-            if (mMediaProvider.delete(uri, null, null) > 0) {
+            if (mMediaProvider.delete(mPackageName, uri, null, null) > 0) {
                 if (format != MtpConstants.FORMAT_ASSOCIATION
                         && path.toLowerCase(Locale.US).endsWith("/.nomedia")) {
                     try {
                         String parentPath = path.substring(0, path.lastIndexOf("/"));
-                        mMediaProvider.call(MediaStore.UNHIDE_CALL, parentPath, null);
+                        mMediaProvider.call(mPackageName, MediaStore.UNHIDE_CALL, parentPath, null);
                     } catch (RemoteException e) {
                         Log.e(TAG, "failed to unhide/rescan for " + path);
                     }
@@ -969,7 +1044,7 @@ public class MtpDatabase {
         Uri uri = Files.getMtpReferencesUri(mVolumeName, handle);
         Cursor c = null;
         try {
-            c = mMediaProvider.query(uri, ID_PROJECTION, null, null, null, null);
+            c = mMediaProvider.query(mPackageName, uri, ID_PROJECTION, null, null, null, null);
             if (c == null) {
                 return null;
             }
@@ -1003,7 +1078,7 @@ public class MtpDatabase {
             valuesList[i] = values;
         }
         try {
-            if (mMediaProvider.bulkInsert(uri, valuesList) > 0) {
+            if (mMediaProvider.bulkInsert(mPackageName, uri, valuesList) > 0) {
                 return MtpConstants.RESPONSE_OK;
             }
         } catch (RemoteException e) {
@@ -1024,7 +1099,7 @@ public class MtpDatabase {
     }
 
     // used by the JNI code
-    private int mNativeContext;
+    private long mNativeContext;
 
     private native final void native_setup();
     private native final void native_finalize();

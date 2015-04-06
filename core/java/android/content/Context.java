@@ -16,9 +16,15 @@
 
 package android.content;
 
+import android.annotation.IntDef;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.annotation.StringDef;
+import android.annotation.SystemApi;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.database.DatabaseErrorHandler;
@@ -29,9 +35,19 @@ import android.graphics.drawable.Drawable;
 import android.media.MediaScannerConnection.OnScanCompletedListener;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
+import android.os.StatFs;
+import android.os.UserHandle;
+import android.os.UserManager;
+import android.provider.MediaStore;
 import android.util.AttributeSet;
+import android.view.DisplayAdjustments;
+import android.view.Display;
+import android.view.ViewDebug;
+import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -39,6 +55,8 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
  * Interface to global information about an application environment.  This is
@@ -58,18 +76,34 @@ public abstract class Context {
      */
     public static final int MODE_PRIVATE = 0x0000;
     /**
+     * @deprecated Creating world-readable files is very dangerous, and likely
+     * to cause security holes in applications.  It is strongly discouraged;
+     * instead, applications should use more formal mechanism for interactions
+     * such as {@link ContentProvider}, {@link BroadcastReceiver}, and
+     * {@link android.app.Service}.  There are no guarantees that this
+     * access mode will remain on a file, such as when it goes through a
+     * backup and restore.
      * File creation mode: allow all other applications to have read access
      * to the created file.
      * @see #MODE_PRIVATE
      * @see #MODE_WORLD_WRITEABLE
      */
+    @Deprecated
     public static final int MODE_WORLD_READABLE = 0x0001;
     /**
+     * @deprecated Creating world-writable files is very dangerous, and likely
+     * to cause security holes in applications.  It is strongly discouraged;
+     * instead, applications should use more formal mechanism for interactions
+     * such as {@link ContentProvider}, {@link BroadcastReceiver}, and
+     * {@link android.app.Service}.  There are no guarantees that this
+     * access mode will remain on a file, such as when it goes through a
+     * backup and restore.
      * File creation mode: allow all other applications to have write access
      * to the created file.
      * @see #MODE_PRIVATE
      * @see #MODE_WORLD_READABLE
      */
+    @Deprecated
     public static final int MODE_WORLD_WRITEABLE = 0x0002;
     /**
      * File creation mode: for use with {@link #openFileOutput}, if the file
@@ -107,6 +141,20 @@ public abstract class Context {
      * @see SQLiteDatabase#enableWriteAheadLogging
      */
     public static final int MODE_ENABLE_WRITE_AHEAD_LOGGING = 0x0008;
+
+    /** @hide */
+    @IntDef(flag = true,
+            value = {
+                BIND_AUTO_CREATE,
+                BIND_AUTO_CREATE,
+                BIND_DEBUG_UNBIND,
+                BIND_NOT_FOREGROUND,
+                BIND_ABOVE_CLIENT,
+                BIND_ALLOW_OOM_MANAGEMENT,
+                BIND_WAIVE_PRIORITY
+            })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface BindServiceFlags {}
 
     /**
      * Flag for {@link #bindService}: automatically create the service as long
@@ -157,7 +205,7 @@ public abstract class Context {
      * Flag for {@link #bindService}: indicates that the client application
      * binding to this service considers the service to be more important than
      * the app itself.  When set, the platform will try to have the out of
-     * memory kill the app before it kills the service it is bound to, though
+     * memory killer kill the app before it kills the service it is bound to, though
      * this is not guaranteed to be the case.
      */
     public static final int BIND_ABOVE_CLIENT = 0x0008;
@@ -198,6 +246,37 @@ public abstract class Context {
     public static final int BIND_ADJUST_WITH_ACTIVITY = 0x0080;
 
     /**
+     * @hide Flag for {@link #bindService}: Treat the binding as hosting
+     * an activity, an unbinding as the activity going in the background.
+     * That is, when unbinding, the process when empty will go on the activity
+     * LRU list instead of the regular one, keeping it around more aggressively
+     * than it otherwise would be.  This is intended for use with IMEs to try
+     * to keep IME processes around for faster keyboard switching.
+     */
+    public static final int BIND_TREAT_LIKE_ACTIVITY = 0x08000000;
+
+    /**
+     * @hide An idea that is not yet implemented.
+     * Flag for {@link #bindService}: If binding from an activity, consider
+     * this service to be visible like the binding activity is.  That is,
+     * it will be treated as something more important to keep around than
+     * invisible background activities.  This will impact the number of
+     * recent activities the user can switch between without having them
+     * restart.  There is no guarantee this will be respected, as the system
+     * tries to balance such requests from one app vs. the importantance of
+     * keeping other apps around.
+     */
+    public static final int BIND_VISIBLE = 0x10000000;
+
+    /**
+     * @hide
+     * Flag for {@link #bindService}: Consider this binding to be causing the target
+     * process to be showing UI, so it will be do a UI_HIDDEN memory trim when it goes
+     * away.
+     */
+    public static final int BIND_SHOWING_UI = 0x20000000;
+
+    /**
      * Flag for {@link #bindService}: Don't consider the bound service to be
      * visible, even if the caller is visible.
      * @hide
@@ -220,6 +299,12 @@ public abstract class Context {
      * Return the Looper for the main thread of the current process.  This is
      * the thread used to dispatch calls to application components (activities,
      * services, etc).
+     * <p>
+     * By definition, this method returns the same result as would be obtained
+     * by calling {@link Looper#getMainLooper() Looper.getMainLooper()}.
+     * </p>
+     *
+     * @return The main looper.
      */
     public abstract Looper getMainLooper();
 
@@ -265,7 +350,7 @@ public abstract class Context {
     }
 
     /**
-     * Remove a {@link ComponentCallbacks} objec that was previously registered
+     * Remove a {@link ComponentCallbacks} object that was previously registered
      * with {@link #registerComponentCallbacks(ComponentCallbacks)}.
      */
     public void unregisterComponentCallbacks(ComponentCallbacks callback) {
@@ -305,6 +390,19 @@ public abstract class Context {
         return getResources().getString(resId, formatArgs);
     }
 
+    /**
+     * Return a drawable object associated with a particular resource ID and
+     * styled for the current theme.
+     *
+     * @param id The desired resource identifier, as generated by the aapt
+     *           tool. This integer encodes the package, type, and resource
+     *           entry. The value 0 is an invalid identifier.
+     * @return Drawable An object that can be used to draw this resource.
+     */
+    public final Drawable getDrawable(int id) {
+        return getResources().getDrawable(id, getTheme());
+    }
+
      /**
      * Set the base theme for this context.  Note that this should be called
      * before any views are instantiated in the Context (for example before
@@ -324,6 +422,7 @@ public abstract class Context {
     /**
      * Return the Theme object associated with this Context.
      */
+    @ViewDebug.ExportedProperty(deepExport = true)
     public abstract Resources.Theme getTheme();
 
     /**
@@ -383,6 +482,16 @@ public abstract class Context {
     /** Return the name of this application's package. */
     public abstract String getPackageName();
 
+    /** @hide Return the name of the base context this context is derived from. */
+    public abstract String getBasePackageName();
+
+    /** @hide Return the package name that should be used for app ops calls from
+     * this context.  This is the same as {@link #getBasePackageName()} except in
+     * cases where system components are loaded into other app processes, in which
+     * case this will be the name of the primary package in that process (so that app
+     * ops uid verification will work with the name). */
+    public abstract String getOpPackageName();
+
     /** Return the full application info for this context's package. */
     public abstract ApplicationInfo getApplicationInfo();
 
@@ -434,10 +543,10 @@ public abstract class Context {
      * and {@link #MODE_WORLD_WRITEABLE} to control permissions.  The bit
      * {@link #MODE_MULTI_PROCESS} can also be used if multiple processes
      * are mutating the same SharedPreferences file.  {@link #MODE_MULTI_PROCESS}
-     * is always on in apps targetting Gingerbread (Android 2.3) and below, and
+     * is always on in apps targeting Gingerbread (Android 2.3) and below, and
      * off by default in later versions.
      *
-     * @return Returns the single SharedPreferences instance that can be used
+     * @return The single {@link SharedPreferences} instance that can be used
      *         to retrieve and modify the preference values.
      *
      * @see #MODE_PRIVATE
@@ -455,7 +564,7 @@ public abstract class Context {
      * @param name The name of the file to open; can not contain path
      *             separators.
      *
-     * @return FileInputStream Resulting input stream.
+     * @return The resulting {@link FileInputStream}.
      *
      * @see #openFileOutput
      * @see #fileList
@@ -469,6 +578,9 @@ public abstract class Context {
      * Open a private file associated with this Context's application package
      * for writing.  Creates the file if it doesn't already exist.
      *
+     * <p>No permissions are required to invoke this method, since it uses internal
+     * storage.
+     *
      * @param name The name of the file to open; can not contain path
      *             separators.
      * @param mode Operating mode.  Use 0 or {@link #MODE_PRIVATE} for the
@@ -476,7 +588,7 @@ public abstract class Context {
      * {@link #MODE_WORLD_READABLE} and {@link #MODE_WORLD_WRITEABLE} to control
      * permissions.
      *
-     * @return FileOutputStream Resulting output stream.
+     * @return The resulting {@link FileOutputStream}.
      *
      * @see #MODE_APPEND
      * @see #MODE_PRIVATE
@@ -497,8 +609,8 @@ public abstract class Context {
      * @param name The name of the file to delete; can not contain path
      *             separators.
      *
-     * @return True if the file was successfully deleted; else
-     *         false.
+     * @return {@code true} if the file was successfully deleted; else
+     *         {@code false}.
      *
      * @see #openFileInput
      * @see #openFileOutput
@@ -514,7 +626,7 @@ public abstract class Context {
      * @param name The name of the file for which you would like to get
      *          its path.
      *
-     * @return Returns an absolute path to the given file.
+     * @return An absolute path to the given file.
      *
      * @see #openFileOutput
      * @see #getFilesDir
@@ -526,7 +638,10 @@ public abstract class Context {
      * Returns the absolute path to the directory on the filesystem where
      * files created with {@link #openFileOutput} are stored.
      *
-     * @return Returns the path of the directory holding application files.
+     * <p>No permissions are required to read or write to the returned path, since this
+     * path is internal storage.
+     *
+     * @return The path of the directory holding application files.
      *
      * @see #openFileOutput
      * @see #getFileStreamPath
@@ -535,10 +650,30 @@ public abstract class Context {
     public abstract File getFilesDir();
 
     /**
-     * Returns the absolute path to the directory on the external filesystem
+     * Returns the absolute path to the directory on the filesystem similar to
+     * {@link #getFilesDir()}.  The difference is that files placed under this
+     * directory will be excluded from automatic backup to remote storage.  See
+     * {@link android.app.backup.BackupAgent BackupAgent} for a full discussion
+     * of the automatic backup mechanism in Android.
+     *
+     * <p>No permissions are required to read or write to the returned path, since this
+     * path is internal storage.
+     *
+     * @return The path of the directory holding application files that will not be
+     *         automatically backed up to remote storage.
+     *
+     * @see #openFileOutput
+     * @see #getFileStreamPath
+     * @see #getDir
+     * @see android.app.backup.BackupAgent
+     */
+    public abstract File getNoBackupFilesDir();
+
+    /**
+     * Returns the absolute path to the directory on the primary external filesystem
      * (that is somewhere on {@link android.os.Environment#getExternalStorageDirectory()
      * Environment.getExternalStorageDirectory()}) where the application can
-     * place persistent files it owns.  These files are private to the
+     * place persistent files it owns.  These files are internal to the
      * applications, and not typically visible to the user as media.
      *
      * <p>This is like {@link #getFilesDir()} in that these
@@ -549,9 +684,21 @@ public abstract class Context {
      * <li>External files are not always available: they will disappear if the
      * user mounts the external storage on a computer or removes it.  See the
      * APIs on {@link android.os.Environment} for information in the storage state.
-     * <li>There is no security enforced with these files.  All applications
-     * can read and write files placed here.
+     * <li>There is no security enforced with these files.  For example, any application
+     * holding {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE} can write to
+     * these files.
      * </ul>
+     *
+     * <p>Starting in {@link android.os.Build.VERSION_CODES#KITKAT}, no permissions
+     * are required to read or write to the returned path; it's always
+     * accessible to the calling app.  This only applies to paths generated for
+     * package name of the calling application.  To access paths belonging
+     * to other packages, {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE}
+     * and/or {@link android.Manifest.permission#READ_EXTERNAL_STORAGE} are required.
+     *
+     * <p>On devices with multiple users (as described by {@link UserManager}),
+     * each user has their own isolated external storage. Applications only
+     * have access to the external storage for the user they're running as.</p>
      *
      * <p>Here is an example of typical code to manipulate a file in
      * an application's private storage:</p>
@@ -593,7 +740,7 @@ public abstract class Context {
      * {@link android.os.Environment#DIRECTORY_PICTURES}, or
      * {@link android.os.Environment#DIRECTORY_MOVIES}.
      *
-     * @return Returns the path of the directory holding application files
+     * @return The path of the directory holding application files
      * on external storage.  Returns null if external storage is not currently
      * mounted so it could not ensure the path exists; you will need to call
      * this method again when it is available.
@@ -601,14 +748,107 @@ public abstract class Context {
      * @see #getFilesDir
      * @see android.os.Environment#getExternalStoragePublicDirectory
      */
-    public abstract File getExternalFilesDir(String type);
+    @Nullable
+    public abstract File getExternalFilesDir(@Nullable String type);
 
     /**
-     * Return the directory where this application's OBB files (if there
-     * are any) can be found.  Note if the application does not have any OBB
-     * files, this directory may not exist.
+     * Returns absolute paths to application-specific directories on all
+     * external storage devices where the application can place persistent files
+     * it owns. These files are internal to the application, and not typically
+     * visible to the user as media.
+     * <p>
+     * This is like {@link #getFilesDir()} in that these files will be deleted when
+     * the application is uninstalled, however there are some important differences:
+     * <ul>
+     * <li>External files are not always available: they will disappear if the
+     * user mounts the external storage on a computer or removes it.
+     * <li>There is no security enforced with these files.
+     * </ul>
+     * <p>
+     * External storage devices returned here are considered a permanent part of
+     * the device, including both emulated external storage and physical media
+     * slots, such as SD cards in a battery compartment. The returned paths do
+     * not include transient devices, such as USB flash drives.
+     * <p>
+     * An application may store data on any or all of the returned devices.  For
+     * example, an app may choose to store large files on the device with the
+     * most available space, as measured by {@link StatFs}.
+     * <p>
+     * No permissions are required to read or write to the returned paths; they
+     * are always accessible to the calling app.  Write access outside of these
+     * paths on secondary external storage devices is not available.
+     * <p>
+     * The first path returned is the same as {@link #getExternalFilesDir(String)}.
+     * Returned paths may be {@code null} if a storage device is unavailable.
+     *
+     * @see #getExternalFilesDir(String)
+     * @see Environment#getExternalStorageState(File)
+     */
+    public abstract File[] getExternalFilesDirs(String type);
+
+    /**
+     * Return the primary external storage directory where this application's OBB
+     * files (if there are any) can be found. Note if the application does not have
+     * any OBB files, this directory may not exist.
+     * <p>
+     * This is like {@link #getFilesDir()} in that these files will be deleted when
+     * the application is uninstalled, however there are some important differences:
+     * <ul>
+     * <li>External files are not always available: they will disappear if the
+     * user mounts the external storage on a computer or removes it.
+     * <li>There is no security enforced with these files.  For example, any application
+     * holding {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE} can write to
+     * these files.
+     * </ul>
+     * <p>
+     * Starting in {@link android.os.Build.VERSION_CODES#KITKAT}, no permissions
+     * are required to read or write to the returned path; it's always
+     * accessible to the calling app.  This only applies to paths generated for
+     * package name of the calling application.  To access paths belonging
+     * to other packages, {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE}
+     * and/or {@link android.Manifest.permission#READ_EXTERNAL_STORAGE} are required.
+     * <p>
+     * On devices with multiple users (as described by {@link UserManager}),
+     * multiple users may share the same OBB storage location. Applications
+     * should ensure that multiple instances running under different users don't
+     * interfere with each other.
      */
     public abstract File getObbDir();
+
+    /**
+     * Returns absolute paths to application-specific directories on all
+     * external storage devices where the application's OBB files (if there are
+     * any) can be found. Note if the application does not have any OBB files,
+     * these directories may not exist.
+     * <p>
+     * This is like {@link #getFilesDir()} in that these files will be deleted when
+     * the application is uninstalled, however there are some important differences:
+     * <ul>
+     * <li>External files are not always available: they will disappear if the
+     * user mounts the external storage on a computer or removes it.
+     * <li>There is no security enforced with these files.
+     * </ul>
+     * <p>
+     * External storage devices returned here are considered a permanent part of
+     * the device, including both emulated external storage and physical media
+     * slots, such as SD cards in a battery compartment. The returned paths do
+     * not include transient devices, such as USB flash drives.
+     * <p>
+     * An application may store data on any or all of the returned devices.  For
+     * example, an app may choose to store large files on the device with the
+     * most available space, as measured by {@link StatFs}.
+     * <p>
+     * No permissions are required to read or write to the returned paths; they
+     * are always accessible to the calling app.  Write access outside of these
+     * paths on secondary external storage devices is not available.
+     * <p>
+     * The first path returned is the same as {@link #getObbDir()}.
+     * Returned paths may be {@code null} if a storage device is unavailable.
+     *
+     * @see #getObbDir()
+     * @see Environment#getExternalStorageState(File)
+     */
+    public abstract File[] getObbDirs();
 
     /**
      * Returns the absolute path to the application specific cache directory
@@ -621,7 +861,7 @@ public abstract class Context {
      * for the amount of space you consume with cache files, and prune those
      * files when exceeding that space.</strong>
      *
-     * @return Returns the path of the directory holding application cache files.
+     * @return The path of the directory holding application cache files.
      *
      * @see #openFileOutput
      * @see #getFileStreamPath
@@ -630,35 +870,138 @@ public abstract class Context {
     public abstract File getCacheDir();
 
     /**
-     * Returns the absolute path to the directory on the external filesystem
+     * Returns the absolute path to the application specific cache directory on
+     * the filesystem designed for storing cached code. The system will delete
+     * any files stored in this location both when your specific application is
+     * upgraded, and when the entire platform is upgraded.
+     * <p>
+     * This location is optimal for storing compiled or optimized code generated
+     * by your application at runtime.
+     * <p>
+     * Apps require no extra permissions to read or write to the returned path,
+     * since this path lives in their private storage.
+     *
+     * @return The path of the directory holding application code cache files.
+     */
+    public abstract File getCodeCacheDir();
+
+    /**
+     * Returns the absolute path to the directory on the primary external filesystem
      * (that is somewhere on {@link android.os.Environment#getExternalStorageDirectory()
      * Environment.getExternalStorageDirectory()} where the application can
-     * place cache files it owns.
+     * place cache files it owns. These files are internal to the application, and
+     * not typically visible to the user as media.
      *
      * <p>This is like {@link #getCacheDir()} in that these
      * files will be deleted when the application is uninstalled, however there
      * are some important differences:
      *
      * <ul>
-     * <li>The platform does not monitor the space available in external storage,
-     * and thus will not automatically delete these files.  Note that you should
+     * <li>The platform does not always monitor the space available in external
+     * storage, and thus may not automatically delete these files.  Currently
+     * the only time files here will be deleted by the platform is when running
+     * on {@link android.os.Build.VERSION_CODES#JELLY_BEAN_MR1} or later and
+     * {@link android.os.Environment#isExternalStorageEmulated()
+     * Environment.isExternalStorageEmulated()} returns true.  Note that you should
      * be managing the maximum space you will use for these anyway, just like
      * with {@link #getCacheDir()}.
      * <li>External files are not always available: they will disappear if the
      * user mounts the external storage on a computer or removes it.  See the
      * APIs on {@link android.os.Environment} for information in the storage state.
-     * <li>There is no security enforced with these files.  All applications
-     * can read and write files placed here.
+     * <li>There is no security enforced with these files.  For example, any application
+     * holding {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE} can write to
+     * these files.
      * </ul>
      *
-     * @return Returns the path of the directory holding application cache files
+     * <p>Starting in {@link android.os.Build.VERSION_CODES#KITKAT}, no permissions
+     * are required to read or write to the returned path; it's always
+     * accessible to the calling app.  This only applies to paths generated for
+     * package name of the calling application.  To access paths belonging
+     * to other packages, {@link android.Manifest.permission#WRITE_EXTERNAL_STORAGE}
+     * and/or {@link android.Manifest.permission#READ_EXTERNAL_STORAGE} are required.
+     *
+     * <p>On devices with multiple users (as described by {@link UserManager}),
+     * each user has their own isolated external storage. Applications only
+     * have access to the external storage for the user they're running as.</p>
+     *
+     * @return The path of the directory holding application cache files
      * on external storage.  Returns null if external storage is not currently
      * mounted so it could not ensure the path exists; you will need to call
      * this method again when it is available.
      *
      * @see #getCacheDir
      */
+    @Nullable
     public abstract File getExternalCacheDir();
+
+    /**
+     * Returns absolute paths to application-specific directories on all
+     * external storage devices where the application can place cache files it
+     * owns. These files are internal to the application, and not typically
+     * visible to the user as media.
+     * <p>
+     * This is like {@link #getCacheDir()} in that these files will be deleted when
+     * the application is uninstalled, however there are some important differences:
+     * <ul>
+     * <li>External files are not always available: they will disappear if the
+     * user mounts the external storage on a computer or removes it.
+     * <li>There is no security enforced with these files.
+     * </ul>
+     * <p>
+     * External storage devices returned here are considered a permanent part of
+     * the device, including both emulated external storage and physical media
+     * slots, such as SD cards in a battery compartment. The returned paths do
+     * not include transient devices, such as USB flash drives.
+     * <p>
+     * An application may store data on any or all of the returned devices.  For
+     * example, an app may choose to store large files on the device with the
+     * most available space, as measured by {@link StatFs}.
+     * <p>
+     * No permissions are required to read or write to the returned paths; they
+     * are always accessible to the calling app.  Write access outside of these
+     * paths on secondary external storage devices is not available.
+     * <p>
+     * The first path returned is the same as {@link #getExternalCacheDir()}.
+     * Returned paths may be {@code null} if a storage device is unavailable.
+     *
+     * @see #getExternalCacheDir()
+     * @see Environment#getExternalStorageState(File)
+     */
+    public abstract File[] getExternalCacheDirs();
+
+    /**
+     * Returns absolute paths to application-specific directories on all
+     * external storage devices where the application can place media files.
+     * These files are scanned and made available to other apps through
+     * {@link MediaStore}.
+     * <p>
+     * This is like {@link #getExternalFilesDirs} in that these files will be
+     * deleted when the application is uninstalled, however there are some
+     * important differences:
+     * <ul>
+     * <li>External files are not always available: they will disappear if the
+     * user mounts the external storage on a computer or removes it.
+     * <li>There is no security enforced with these files.
+     * </ul>
+     * <p>
+     * External storage devices returned here are considered a permanent part of
+     * the device, including both emulated external storage and physical media
+     * slots, such as SD cards in a battery compartment. The returned paths do
+     * not include transient devices, such as USB flash drives.
+     * <p>
+     * An application may store data on any or all of the returned devices. For
+     * example, an app may choose to store large files on the device with the
+     * most available space, as measured by {@link StatFs}.
+     * <p>
+     * No permissions are required to read or write to the returned paths; they
+     * are always accessible to the calling app. Write access outside of these
+     * paths on secondary external storage devices is not available.
+     * <p>
+     * Returned paths may be {@code null} if a storage device is unavailable.
+     *
+     * @see Environment#getExternalStorageState(File)
+     */
+    public abstract File[] getExternalMediaDirs();
 
     /**
      * Returns an array of strings naming the private files associated with
@@ -686,7 +1029,7 @@ public abstract class Context {
      * default operation, {@link #MODE_WORLD_READABLE} and
      * {@link #MODE_WORLD_WRITEABLE} to control permissions.
      *
-     * @return Returns a File object for the requested directory.  The directory
+     * @return A {@link File} object for the requested directory.  The directory
      * will have been created if it does not already exist.
      *
      * @see #openFileOutput(String, int)
@@ -743,7 +1086,8 @@ public abstract class Context {
      * @see #deleteDatabase
      */
     public abstract SQLiteDatabase openOrCreateDatabase(String name,
-            int mode, CursorFactory factory, DatabaseErrorHandler errorHandler);
+            int mode, CursorFactory factory,
+            @Nullable DatabaseErrorHandler errorHandler);
 
     /**
      * Delete an existing private SQLiteDatabase associated with this Context's
@@ -752,7 +1096,7 @@ public abstract class Context {
      * @param name The name (unique in the application package) of the
      *             database.
      *
-     * @return True if the database was successfully deleted; else false.
+     * @return {@code true} if the database was successfully deleted; else {@code false}.
      *
      * @see #openOrCreateDatabase
      */
@@ -765,7 +1109,7 @@ public abstract class Context {
      * @param name The name of the database for which you would like to get
      *          its path.
      *
-     * @return Returns an absolute path to the given database.
+     * @return An absolute path to the given database.
      *
      * @see #openOrCreateDatabase
      */
@@ -843,12 +1187,26 @@ public abstract class Context {
      *
      * @param intent The description of the activity to start.
      *
-     * @throws ActivityNotFoundException
+     * @throws ActivityNotFoundException &nbsp;
      *
-     * @see {@link #startActivity(Intent, Bundle)}
+     * @see #startActivity(Intent, Bundle)
      * @see PackageManager#resolveActivity
      */
     public abstract void startActivity(Intent intent);
+
+    /**
+     * Version of {@link #startActivity(Intent)} that allows you to specify the
+     * user the activity will be started for.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS_FULL permission.
+     * @param intent The description of the activity to start.
+     * @param user The UserHandle of the user to start this activity for.
+     * @throws ActivityNotFoundException &nbsp;
+     * @hide
+     */
+    public void startActivityAsUser(Intent intent, UserHandle user) {
+        throw new RuntimeException("Not implemented. Must override in a subclass.");
+    }
 
     /**
      * Launch a new activity.  You will not receive any information about when
@@ -870,12 +1228,30 @@ public abstract class Context {
      * for how to build the Bundle supplied here; there are no supported definitions
      * for building it manually.
      *
-     * @throws ActivityNotFoundException
+     * @throws ActivityNotFoundException &nbsp;
      *
      * @see #startActivity(Intent)
      * @see PackageManager#resolveActivity
      */
-    public abstract void startActivity(Intent intent, Bundle options);
+    public abstract void startActivity(Intent intent, @Nullable Bundle options);
+
+    /**
+     * Version of {@link #startActivity(Intent, Bundle)} that allows you to specify the
+     * user the activity will be started for.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS_FULL permission.
+     * @param intent The description of the activity to start.
+     * @param options Additional options for how the Activity should be started.
+     * May be null if there are no options.  See {@link android.app.ActivityOptions}
+     * for how to build the Bundle supplied here; there are no supported definitions
+     * for building it manually.
+     * @param userId The UserHandle of the user to start this activity for.
+     * @throws ActivityNotFoundException &nbsp;
+     * @hide
+     */
+    public void startActivityAsUser(Intent intent, @Nullable Bundle options, UserHandle userId) {
+        throw new RuntimeException("Not implemented. Must override in a subclass.");
+    }
 
     /**
      * Same as {@link #startActivities(Intent[], Bundle)} with no options
@@ -883,9 +1259,9 @@ public abstract class Context {
      *
      * @param intents An array of Intents to be started.
      *
-     * @throws ActivityNotFoundException
+     * @throws ActivityNotFoundException &nbsp;
      *
-     * @see {@link #startActivities(Intent[], Bundle)}
+     * @see #startActivities(Intent[], Bundle)
      * @see PackageManager#resolveActivity
      */
     public abstract void startActivities(Intent[] intents);
@@ -909,12 +1285,42 @@ public abstract class Context {
      * See {@link android.content.Context#startActivity(Intent, Bundle)
      * Context.startActivity(Intent, Bundle)} for more details.
      *
-     * @throws ActivityNotFoundException
+     * @throws ActivityNotFoundException &nbsp;
      *
-     * @see {@link #startActivities(Intent[])}
+     * @see #startActivities(Intent[])
      * @see PackageManager#resolveActivity
      */
     public abstract void startActivities(Intent[] intents, Bundle options);
+
+    /**
+     * @hide
+     * Launch multiple new activities.  This is generally the same as calling
+     * {@link #startActivity(Intent)} for the first Intent in the array,
+     * that activity during its creation calling {@link #startActivity(Intent)}
+     * for the second entry, etc.  Note that unlike that approach, generally
+     * none of the activities except the last in the array will be created
+     * at this point, but rather will be created when the user first visits
+     * them (due to pressing back from the activity on top).
+     *
+     * <p>This method throws {@link ActivityNotFoundException}
+     * if there was no Activity found for <em>any</em> given Intent.  In this
+     * case the state of the activity stack is undefined (some Intents in the
+     * list may be on it, some not), so you probably want to avoid such situations.
+     *
+     * @param intents An array of Intents to be started.
+     * @param options Additional options for how the Activity should be started.
+     * @param userHandle The user for whom to launch the activities
+     * See {@link android.content.Context#startActivity(Intent, Bundle)
+     * Context.startActivity(Intent, Bundle)} for more details.
+     *
+     * @throws ActivityNotFoundException &nbsp;
+     *
+     * @see #startActivities(Intent[])
+     * @see PackageManager#resolveActivity
+     */
+    public void startActivitiesAsUser(Intent[] intents, Bundle options, UserHandle userHandle) {
+        throw new RuntimeException("Not implemented. Must override in a subclass.");
+    }
 
     /**
      * Same as {@link #startIntentSender(IntentSender, Intent, int, int, int, Bundle)}
@@ -962,7 +1368,7 @@ public abstract class Context {
      * @see #startIntentSender(IntentSender, Intent, int, int, int)
      */
     public abstract void startIntentSender(IntentSender intent,
-            Intent fillInIntent, int flagsMask, int flagsValues, int extraFlags,
+            @Nullable Intent fillInIntent, int flagsMask, int flagsValues, int extraFlags,
             Bundle options) throws IntentSender.SendIntentException;
 
     /**
@@ -986,16 +1392,6 @@ public abstract class Context {
      * @see #sendOrderedBroadcast(Intent, String, BroadcastReceiver, Handler, int, String, Bundle)
      */
     public abstract void sendBroadcast(Intent intent);
-
-    /**
-     * Same as #sendBroadcast(Intent intent), but for a specific user. Used by the system only.
-     * @param intent the intent to broadcast
-     * @param userId user to send the intent to
-     * @hide
-     */
-    public void sendBroadcast(Intent intent, int userId) {
-        throw new RuntimeException("Not implemented. Must override in a subclass.");
-    }
 
     /**
      * Broadcast the given intent to all interested BroadcastReceivers, allowing
@@ -1022,7 +1418,15 @@ public abstract class Context {
      * @see #sendOrderedBroadcast(Intent, String, BroadcastReceiver, Handler, int, String, Bundle)
      */
     public abstract void sendBroadcast(Intent intent,
-            String receiverPermission);
+            @Nullable String receiverPermission);
+
+    /**
+     * Like {@link #sendBroadcast(Intent, String)}, but also allows specification
+     * of an associated app op as per {@link android.app.AppOpsManager}.
+     * @hide
+     */
+    public abstract void sendBroadcast(Intent intent,
+            String receiverPermission, int appOp);
 
     /**
      * Broadcast the given intent to all interested BroadcastReceivers, delivering
@@ -1045,7 +1449,7 @@ public abstract class Context {
      * @see #sendOrderedBroadcast(Intent, String, BroadcastReceiver, Handler, int, String, Bundle)
      */
     public abstract void sendOrderedBroadcast(Intent intent,
-            String receiverPermission);
+            @Nullable String receiverPermission);
 
     /**
      * Version of {@link #sendBroadcast(Intent)} that allows you to
@@ -1083,19 +1487,103 @@ public abstract class Context {
      * @see #sendBroadcast(Intent)
      * @see #sendBroadcast(Intent, String)
      * @see #sendOrderedBroadcast(Intent, String)
-     * @see #sendStickyBroadcast(Intent)
-     * @see #sendStickyOrderedBroadcast(Intent, BroadcastReceiver, Handler, int, String, Bundle)
      * @see android.content.BroadcastReceiver
      * @see #registerReceiver
      * @see android.app.Activity#RESULT_OK
      */
+    public abstract void sendOrderedBroadcast(@NonNull Intent intent,
+            @Nullable String receiverPermission, BroadcastReceiver resultReceiver,
+            @Nullable Handler scheduler, int initialCode, @Nullable String initialData,
+            @Nullable Bundle initialExtras);
+
+    /**
+     * Like {@link #sendOrderedBroadcast(Intent, String, BroadcastReceiver, android.os.Handler,
+     * int, String, android.os.Bundle)}, but also allows specification
+     * of an associated app op as per {@link android.app.AppOpsManager}.
+     * @hide
+     */
     public abstract void sendOrderedBroadcast(Intent intent,
-            String receiverPermission, BroadcastReceiver resultReceiver,
+            String receiverPermission, int appOp, BroadcastReceiver resultReceiver,
             Handler scheduler, int initialCode, String initialData,
             Bundle initialExtras);
 
     /**
-     * Perform a {@link #sendBroadcast(Intent)} that is "sticky," meaning the
+     * Version of {@link #sendBroadcast(Intent)} that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     * @param intent The intent to broadcast
+     * @param user UserHandle to send the intent to.
+     * @see #sendBroadcast(Intent)
+     */
+    public abstract void sendBroadcastAsUser(Intent intent, UserHandle user);
+
+    /**
+     * Version of {@link #sendBroadcast(Intent, String)} that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     *
+     * @param intent The Intent to broadcast; all receivers matching this
+     *               Intent will receive the broadcast.
+     * @param user UserHandle to send the intent to.
+     * @param receiverPermission (optional) String naming a permission that
+     *               a receiver must hold in order to receive your broadcast.
+     *               If null, no permission is required.
+     *
+     * @see #sendBroadcast(Intent, String)
+     */
+    public abstract void sendBroadcastAsUser(Intent intent, UserHandle user,
+            @Nullable String receiverPermission);
+
+    /**
+     * Version of
+     * {@link #sendOrderedBroadcast(Intent, String, BroadcastReceiver, Handler, int, String, Bundle)}
+     * that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     *
+     * <p>See {@link BroadcastReceiver} for more information on Intent broadcasts.
+     *
+     * @param intent The Intent to broadcast; all receivers matching this
+     *               Intent will receive the broadcast.
+     * @param user UserHandle to send the intent to.
+     * @param receiverPermission String naming a permissions that
+     *               a receiver must hold in order to receive your broadcast.
+     *               If null, no permission is required.
+     * @param resultReceiver Your own BroadcastReceiver to treat as the final
+     *                       receiver of the broadcast.
+     * @param scheduler A custom Handler with which to schedule the
+     *                  resultReceiver callback; if null it will be
+     *                  scheduled in the Context's main thread.
+     * @param initialCode An initial value for the result code.  Often
+     *                    Activity.RESULT_OK.
+     * @param initialData An initial value for the result data.  Often
+     *                    null.
+     * @param initialExtras An initial value for the result extras.  Often
+     *                      null.
+     *
+     * @see #sendOrderedBroadcast(Intent, String, BroadcastReceiver, Handler, int, String, Bundle)
+     */
+    public abstract void sendOrderedBroadcastAsUser(Intent intent, UserHandle user,
+            @Nullable String receiverPermission, BroadcastReceiver resultReceiver,
+            @Nullable Handler scheduler, int initialCode, @Nullable String initialData,
+            @Nullable  Bundle initialExtras);
+
+    /**
+     * Similar to above but takes an appOp as well, to enforce restrictions.
+     * @see #sendOrderedBroadcastAsUser(Intent, UserHandle, String,
+     *       BroadcastReceiver, Handler, int, String, Bundle)
+     * @hide
+     */
+    public abstract void sendOrderedBroadcastAsUser(Intent intent, UserHandle user,
+            @Nullable String receiverPermission, int appOp, BroadcastReceiver resultReceiver,
+            @Nullable Handler scheduler, int initialCode, @Nullable String initialData,
+            @Nullable  Bundle initialExtras);
+
+    /**
+     * <p>Perform a {@link #sendBroadcast(Intent)} that is "sticky," meaning the
      * Intent you are sending stays around after the broadcast is complete,
      * so that others can quickly retrieve that data through the return
      * value of {@link #registerReceiver(BroadcastReceiver, IntentFilter)}.  In
@@ -1106,6 +1594,12 @@ public abstract class Context {
      * permission in order to use this API.  If you do not hold that
      * permission, {@link SecurityException} will be thrown.
      *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
+     *
      * @param intent The Intent to broadcast; all receivers matching this
      * Intent will receive the broadcast, and the Intent will be held to
      * be re-broadcast to future receivers.
@@ -1113,10 +1607,11 @@ public abstract class Context {
      * @see #sendBroadcast(Intent)
      * @see #sendStickyOrderedBroadcast(Intent, BroadcastReceiver, Handler, int, String, Bundle)
      */
+    @Deprecated
     public abstract void sendStickyBroadcast(Intent intent);
 
     /**
-     * Version of {@link #sendStickyBroadcast} that allows you to
+     * <p>Version of {@link #sendStickyBroadcast} that allows you to
      * receive data back from the broadcast.  This is accomplished by
      * supplying your own BroadcastReceiver when calling, which will be
      * treated as a final receiver at the end of the broadcast -- its
@@ -1132,6 +1627,12 @@ public abstract class Context {
      * the result of any changes made by the receivers.
      *
      * <p>See {@link BroadcastReceiver} for more information on Intent broadcasts.
+     *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
      *
      * @param intent The Intent to broadcast; all receivers matching this
      *               Intent will receive the broadcast.
@@ -1155,25 +1656,117 @@ public abstract class Context {
      * @see #registerReceiver
      * @see android.app.Activity#RESULT_OK
      */
+    @Deprecated
     public abstract void sendStickyOrderedBroadcast(Intent intent,
             BroadcastReceiver resultReceiver,
-            Handler scheduler, int initialCode, String initialData,
-            Bundle initialExtras);
-
+            @Nullable Handler scheduler, int initialCode, @Nullable String initialData,
+            @Nullable Bundle initialExtras);
 
     /**
-     * Remove the data previously sent with {@link #sendStickyBroadcast},
+     * <p>Remove the data previously sent with {@link #sendStickyBroadcast},
      * so that it is as if the sticky broadcast had never happened.
      *
      * <p>You must hold the {@link android.Manifest.permission#BROADCAST_STICKY}
      * permission in order to use this API.  If you do not hold that
      * permission, {@link SecurityException} will be thrown.
      *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
+     *
      * @param intent The Intent that was previously broadcast.
      *
      * @see #sendStickyBroadcast
      */
+    @Deprecated
     public abstract void removeStickyBroadcast(Intent intent);
+
+    /**
+     * <p>Version of {@link #sendStickyBroadcast(Intent)} that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
+     *
+     * @param intent The Intent to broadcast; all receivers matching this
+     * Intent will receive the broadcast, and the Intent will be held to
+     * be re-broadcast to future receivers.
+     * @param user UserHandle to send the intent to.
+     *
+     * @see #sendBroadcast(Intent)
+     */
+    @Deprecated
+    public abstract void sendStickyBroadcastAsUser(Intent intent, UserHandle user);
+
+    /**
+     * <p>Version of
+     * {@link #sendStickyOrderedBroadcast(Intent, BroadcastReceiver, Handler, int, String, Bundle)}
+     * that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     *
+     * <p>See {@link BroadcastReceiver} for more information on Intent broadcasts.
+     *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
+     *
+     * @param intent The Intent to broadcast; all receivers matching this
+     *               Intent will receive the broadcast.
+     * @param user UserHandle to send the intent to.
+     * @param resultReceiver Your own BroadcastReceiver to treat as the final
+     *                       receiver of the broadcast.
+     * @param scheduler A custom Handler with which to schedule the
+     *                  resultReceiver callback; if null it will be
+     *                  scheduled in the Context's main thread.
+     * @param initialCode An initial value for the result code.  Often
+     *                    Activity.RESULT_OK.
+     * @param initialData An initial value for the result data.  Often
+     *                    null.
+     * @param initialExtras An initial value for the result extras.  Often
+     *                      null.
+     *
+     * @see #sendStickyOrderedBroadcast(Intent, BroadcastReceiver, Handler, int, String, Bundle)
+     */
+    @Deprecated
+    public abstract void sendStickyOrderedBroadcastAsUser(Intent intent,
+            UserHandle user, BroadcastReceiver resultReceiver,
+            @Nullable Handler scheduler, int initialCode, @Nullable String initialData,
+            @Nullable Bundle initialExtras);
+
+    /**
+     * <p>Version of {@link #removeStickyBroadcast(Intent)} that allows you to specify the
+     * user the broadcast will be sent to.  This is not available to applications
+     * that are not pre-installed on the system image.  Using it requires holding
+     * the INTERACT_ACROSS_USERS permission.
+     *
+     * <p>You must hold the {@link android.Manifest.permission#BROADCAST_STICKY}
+     * permission in order to use this API.  If you do not hold that
+     * permission, {@link SecurityException} will be thrown.
+     *
+     * @deprecated Sticky broadcasts should not be used.  They provide no security (anyone
+     * can access them), no protection (anyone can modify them), and many other problems.
+     * The recommended pattern is to use a non-sticky broadcast to report that <em>something</em>
+     * has changed, with another mechanism for apps to retrieve the current value whenever
+     * desired.
+     *
+     * @param intent The Intent that was previously broadcast.
+     * @param user UserHandle to remove the sticky broadcast from.
+     *
+     * @see #sendStickyBroadcastAsUser
+     */
+    @Deprecated
+    public abstract void removeStickyBroadcastAsUser(Intent intent, UserHandle user);
 
     /**
      * Register a BroadcastReceiver to be run in the main activity thread.  The
@@ -1223,7 +1816,8 @@ public abstract class Context {
      * @see #sendBroadcast
      * @see #unregisterReceiver
      */
-    public abstract Intent registerReceiver(BroadcastReceiver receiver,
+    @Nullable
+    public abstract Intent registerReceiver(@Nullable BroadcastReceiver receiver,
                                             IntentFilter filter);
 
     /**
@@ -1257,10 +1851,39 @@ public abstract class Context {
      * @see #sendBroadcast
      * @see #unregisterReceiver
      */
+    @Nullable
     public abstract Intent registerReceiver(BroadcastReceiver receiver,
-                                            IntentFilter filter,
-                                            String broadcastPermission,
-                                            Handler scheduler);
+            IntentFilter filter, @Nullable String broadcastPermission,
+            @Nullable Handler scheduler);
+
+    /**
+     * @hide
+     * Same as {@link #registerReceiver(BroadcastReceiver, IntentFilter, String, Handler)
+     * but for a specific user.  This receiver will receiver broadcasts that
+     * are sent to the requested user.  It
+     * requires holding the {@link android.Manifest.permission#INTERACT_ACROSS_USERS_FULL}
+     * permission.
+     *
+     * @param receiver The BroadcastReceiver to handle the broadcast.
+     * @param user UserHandle to send the intent to.
+     * @param filter Selects the Intent broadcasts to be received.
+     * @param broadcastPermission String naming a permissions that a
+     *      broadcaster must hold in order to send an Intent to you.  If null,
+     *      no permission is required.
+     * @param scheduler Handler identifying the thread that will receive
+     *      the Intent.  If null, the main thread of the process will be used.
+     *
+     * @return The first sticky intent found that matches <var>filter</var>,
+     *         or null if there are none.
+     *
+     * @see #registerReceiver(BroadcastReceiver, IntentFilter, String, Handler
+     * @see #sendBroadcast
+     * @see #unregisterReceiver
+     */
+    @Nullable
+    public abstract Intent registerReceiverAsUser(BroadcastReceiver receiver,
+            UserHandle user, IntentFilter filter, @Nullable String broadcastPermission,
+            @Nullable Handler scheduler);
 
     /**
      * Unregister a previously registered BroadcastReceiver.  <em>All</em>
@@ -1275,9 +1898,10 @@ public abstract class Context {
 
     /**
      * Request that a given application service be started.  The Intent
-     * can either contain the complete class name of a specific service
-     * implementation to start, or an abstract definition through the
-     * action and other fields of the kind of service to start.  If this service
+     * should contain either contain the complete class name of a specific service
+     * implementation to start or a specific package name to target.  If the
+     * Intent is less specified, it log a warning about this and which of the
+     * multiple matching services it finds and uses will be undefined.  If this service
      * is not already running, it will be instantiated and started (creating a
      * process for it if needed); if it is running then it remains running.
      *
@@ -1303,10 +1927,9 @@ public abstract class Context {
      * <p>This function will throw {@link SecurityException} if you do not
      * have permission to start the given service.
      *
-     * @param service Identifies the service to be started.  The Intent may
-     *      specify either an explicit component name to start, or a logical
-     *      description (action, category, etc) to match an
-     *      {@link IntentFilter} published by a service.  Additional values
+     * @param service Identifies the service to be started.  The Intent must be either
+     *      fully explicit (supplying a component name) or specify a specific package
+     *      name it is targetted to.  Additional values
      *      may be included in the Intent extras to supply arguments along with
      *      this specific start call.
      *
@@ -1314,11 +1937,12 @@ public abstract class Context {
      * {@link ComponentName} of the actual service that was started is
      * returned; else if the service does not exist null is returned.
      *
-     * @throws SecurityException
+     * @throws SecurityException &nbsp;
      *
      * @see #stopService
      * @see #bindService
      */
+    @Nullable
     public abstract ComponentName startService(Intent service);
 
     /**
@@ -1336,19 +1960,28 @@ public abstract class Context {
      * <p>This function will throw {@link SecurityException} if you do not
      * have permission to stop the given service.
      *
-     * @param service Description of the service to be stopped.  The Intent may
-     *      specify either an explicit component name to start, or a logical
-     *      description (action, category, etc) to match an
-     *      {@link IntentFilter} published by a service.
+     * @param service Description of the service to be stopped.  The Intent must be either
+     *      fully explicit (supplying a component name) or specify a specific package
+     *      name it is targetted to.
      *
      * @return If there is a service matching the given Intent that is already
-     * running, then it is stopped and true is returned; else false is returned.
+     * running, then it is stopped and {@code true} is returned; else {@code false} is returned.
      *
-     * @throws SecurityException
+     * @throws SecurityException &nbsp;
      *
      * @see #startService
      */
     public abstract boolean stopService(Intent service);
+
+    /**
+     * @hide like {@link #startService(Intent)} but for a specific user.
+     */
+    public abstract ComponentName startServiceAsUser(Intent service, UserHandle user);
+
+    /**
+     * @hide like {@link #stopService(Intent)} but for a specific user.
+     */
+    public abstract boolean stopServiceAsUser(Intent service, UserHandle user);
 
     /**
      * Connect to an application service, creating it if needed.  This defines
@@ -1379,16 +2012,17 @@ public abstract class Context {
      *      description (action, category, etc) to match an
      *      {@link IntentFilter} published by a service.
      * @param conn Receives information as the service is started and stopped.
+     *      This must be a valid ServiceConnection object; it must not be null.
      * @param flags Operation options for the binding.  May be 0,
      *          {@link #BIND_AUTO_CREATE}, {@link #BIND_DEBUG_UNBIND},
      *          {@link #BIND_NOT_FOREGROUND}, {@link #BIND_ABOVE_CLIENT},
      *          {@link #BIND_ALLOW_OOM_MANAGEMENT}, or
      *          {@link #BIND_WAIVE_PRIORITY}.
-     * @return If you have successfully bound to the service, true is returned;
-     *         false is returned if the connection is not made so you will not
+     * @return If you have successfully bound to the service, {@code true} is returned;
+     *         {@code false} is returned if the connection is not made so you will not
      *         receive the service object.
      *
-     * @throws SecurityException
+     * @throws SecurityException &nbsp;
      *
      * @see #unbindService
      * @see #startService
@@ -1396,15 +2030,16 @@ public abstract class Context {
      * @see #BIND_DEBUG_UNBIND
      * @see #BIND_NOT_FOREGROUND
      */
-    public abstract boolean bindService(Intent service, ServiceConnection conn,
-            int flags);
+    public abstract boolean bindService(Intent service, @NonNull ServiceConnection conn,
+            @BindServiceFlags int flags);
 
     /**
-     * Same as {@link #bindService(Intent, ServiceConnection, int)}, but with an explicit userId
+     * Same as {@link #bindService(Intent, ServiceConnection, int)}, but with an explicit userHandle
      * argument for use by system server and other multi-user aware code.
      * @hide
      */
-    public boolean bindService(Intent service, ServiceConnection conn, int flags, int userId) {
+    @SystemApi
+    public boolean bindServiceAsUser(Intent service, ServiceConnection conn, int flags, UserHandle user) {
         throw new RuntimeException("Not implemented. Must override in a subclass.");
     }
 
@@ -1414,11 +2049,11 @@ public abstract class Context {
      * stop at any time.
      *
      * @param conn The connection interface previously supplied to
-     *             bindService().
+     *             bindService().  This parameter must not be null.
      *
      * @see #bindService
      */
-    public abstract void unbindService(ServiceConnection conn);
+    public abstract void unbindService(@NonNull ServiceConnection conn);
 
     /**
      * Start executing an {@link android.app.Instrumentation} class.  The given
@@ -1440,11 +2075,77 @@ public abstract class Context {
      * @param arguments Additional optional arguments to pass to the
      * instrumentation, or null.
      *
-     * @return Returns true if the instrumentation was successfully started,
-     * else false if it could not be found.
+     * @return {@code true} if the instrumentation was successfully started,
+     * else {@code false} if it could not be found.
      */
-    public abstract boolean startInstrumentation(ComponentName className,
-            String profileFile, Bundle arguments);
+    public abstract boolean startInstrumentation(@NonNull ComponentName className,
+            @Nullable String profileFile, @Nullable Bundle arguments);
+
+    /** @hide */
+    @StringDef({
+            POWER_SERVICE,
+            WINDOW_SERVICE,
+            LAYOUT_INFLATER_SERVICE,
+            ACCOUNT_SERVICE,
+            ACTIVITY_SERVICE,
+            ALARM_SERVICE,
+            NOTIFICATION_SERVICE,
+            ACCESSIBILITY_SERVICE,
+            CAPTIONING_SERVICE,
+            KEYGUARD_SERVICE,
+            LOCATION_SERVICE,
+            //@hide: COUNTRY_DETECTOR,
+            SEARCH_SERVICE,
+            SENSOR_SERVICE,
+            STORAGE_SERVICE,
+            WALLPAPER_SERVICE,
+            VIBRATOR_SERVICE,
+            //@hide: STATUS_BAR_SERVICE,
+            CONNECTIVITY_SERVICE,
+            //@hide: UPDATE_LOCK_SERVICE,
+            //@hide: NETWORKMANAGEMENT_SERVICE,
+            //@hide: NETWORK_STATS_SERVICE,
+            //@hide: NETWORK_POLICY_SERVICE,
+            WIFI_SERVICE,
+            WIFI_PASSPOINT_SERVICE,
+            WIFI_P2P_SERVICE,
+            WIFI_SCANNING_SERVICE,
+            //@hide: ETHERNET_SERVICE,
+            WIFI_RTT_SERVICE,
+            NSD_SERVICE,
+            AUDIO_SERVICE,
+            MEDIA_ROUTER_SERVICE,
+            TELEPHONY_SERVICE,
+            TELECOM_SERVICE,
+            CLIPBOARD_SERVICE,
+            INPUT_METHOD_SERVICE,
+            TEXT_SERVICES_MANAGER_SERVICE,
+            APPWIDGET_SERVICE,
+            //@hide: BACKUP_SERVICE,
+            DROPBOX_SERVICE,
+            DEVICE_POLICY_SERVICE,
+            UI_MODE_SERVICE,
+            DOWNLOAD_SERVICE,
+            NFC_SERVICE,
+            BLUETOOTH_SERVICE,
+            //@hide: SIP_SERVICE,
+            USB_SERVICE,
+            LAUNCHER_APPS_SERVICE,
+            //@hide: SERIAL_SERVICE,
+            INPUT_SERVICE,
+            DISPLAY_SERVICE,
+            //@hide: SCHEDULING_POLICY_SERVICE,
+            USER_SERVICE,
+            //@hide: APP_OPS_SERVICE
+            CAMERA_SERVICE,
+            PRINT_SERVICE,
+            MEDIA_SESSION_SERVICE,
+            BATTERY_SERVICE,
+            JOB_SCHEDULER_SERVICE,
+            MEDIA_PROJECTION_SERVICE,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface ServiceName {}
 
     /**
      * Return the handle to a system-level service by name. The class of the
@@ -1486,6 +2187,9 @@ public abstract class Context {
      *  <dt> {@link #WIFI_SERVICE} ("wifi")
      *  <dd> A {@link android.net.wifi.WifiManager WifiManager} for management of
      * Wi-Fi connectivity.
+     *  <dt> {@link #WIFI_P2P_SERVICE} ("wifip2p")
+     *  <dd> A {@link android.net.wifi.p2p.WifiP2pManager WifiP2pManager} for management of
+     * Wi-Fi Direct connectivity.
      * <dt> {@link #INPUT_METHOD_SERVICE} ("input_method")
      * <dd> An {@link android.view.inputmethod.InputMethodManager InputMethodManager}
      * for management of input methods.
@@ -1493,6 +2197,10 @@ public abstract class Context {
      * <dd> An {@link android.app.UiModeManager} for controlling UI modes.
      * <dt> {@link #DOWNLOAD_SERVICE} ("download")
      * <dd> A {@link android.app.DownloadManager} for requesting HTTP downloads
+     * <dt> {@link #BATTERY_SERVICE} ("batterymanager")
+     * <dd> A {@link android.os.BatteryManager} for managing battery state
+     * <dt> {@link #JOB_SCHEDULER_SERVICE} ("taskmanager")
+     * <dd>  A {@link android.app.job.JobScheduler} for managing scheduled tasks
      * </dl>
      *
      * <p>Note:  System services obtained via this API may be closely associated with
@@ -1538,14 +2246,20 @@ public abstract class Context {
      * @see android.media.MediaRouter
      * @see #TELEPHONY_SERVICE
      * @see android.telephony.TelephonyManager
+     * @see #TELEPHONY_SUBSCRIPTION_SERVICE
+     * @see android.telephony.SubscriptionManager
      * @see #INPUT_METHOD_SERVICE
      * @see android.view.inputmethod.InputMethodManager
      * @see #UI_MODE_SERVICE
      * @see android.app.UiModeManager
      * @see #DOWNLOAD_SERVICE
      * @see android.app.DownloadManager
+     * @see #BATTERY_SERVICE
+     * @see android.os.BatteryManager
+     * @see #JOB_SCHEDULER_SERVICE
+     * @see android.app.job.JobScheduler
      */
-    public abstract Object getSystemService(String name);
+    public abstract Object getSystemService(@ServiceName @NonNull String name);
 
     /**
      * Use with {@link #getSystemService} to retrieve a
@@ -1624,6 +2338,17 @@ public abstract class Context {
      * @see android.view.accessibility.AccessibilityManager
      */
     public static final String ACCESSIBILITY_SERVICE = "accessibility";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.view.accessibility.CaptioningManager} for obtaining
+     * captioning properties and listening for changes in captioning
+     * preferences.
+     *
+     * @see #getSystemService
+     * @see android.view.accessibility.CaptioningManager
+     */
+    public static final String CAPTIONING_SERVICE = "captioning";
 
     /**
      * Use with {@link #getSystemService} to retrieve a
@@ -1720,17 +2445,6 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
-     * android.net.ThrottleManager} for handling management of
-     * throttling.
-     *
-     * @hide
-     * @see #getSystemService
-     * @see android.net.ThrottleManager
-     */
-    public static final String THROTTLE_SERVICE = "throttle";
-
-    /**
-     * Use with {@link #getSystemService} to retrieve a {@link
      * android.os.IUpdateLock} for managing runtime sequences that
      * must not be interrupted by headless OTA application or similar.
      *
@@ -1741,13 +2455,8 @@ public abstract class Context {
     public static final String UPDATE_LOCK_SERVICE = "updatelock";
 
     /**
-     * Use with {@link #getSystemService} to retrieve a {@link
-     * android.net.NetworkManagementService} for handling management of
-     * system network services
-     *
+     * Constant for the internal network management service, not really a Context service.
      * @hide
-     * @see #getSystemService
-     * @see android.net.NetworkManagementService
      */
     public static final String NETWORKMANAGEMENT_SERVICE = "network_management";
 
@@ -1768,6 +2477,17 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
+     * android.net.wifi.passpoint.WifiPasspointManager} for handling management of
+     * Wi-Fi passpoint access.
+     *
+     * @see #getSystemService
+     * @see android.net.wifi.passpoint.WifiPasspointManager
+     * @hide
+     */
+    public static final String WIFI_PASSPOINT_SERVICE = "wifipasspoint";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
      * android.net.wifi.p2p.WifiP2pManager} for handling management of
      * Wi-Fi peer-to-peer connections.
      *
@@ -1775,6 +2495,40 @@ public abstract class Context {
      * @see android.net.wifi.p2p.WifiP2pManager
      */
     public static final String WIFI_P2P_SERVICE = "wifip2p";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.net.wifi.WifiScanner} for scanning the wifi universe
+     *
+     * @see #getSystemService
+     * @see android.net.wifi.WifiScanner
+     * @hide
+     */
+    @SystemApi
+    public static final String WIFI_SCANNING_SERVICE = "wifiscanner";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.net.wifi.RttManager} for ranging devices with wifi
+     *
+     * @see #getSystemService
+     * @see android.net.wifi.RttManager
+     * @hide
+     */
+    @SystemApi
+    public static final String WIFI_RTT_SERVICE = "rttmanager";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.net.EthernetManager} for handling management of
+     * Ethernet access.
+     *
+     * @see #getSystemService
+     * @see android.net.EthernetManager
+     *
+     * @hide
+     */
+    public static final String ETHERNET_SERVICE = "ethernet";
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
@@ -1798,6 +2552,17 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a
+     * {@link android.service.fingerprint.FingerprintManager} for handling management
+     * of fingerprints.
+     *
+     * @see #getSystemService
+     * @see android.app.FingerprintManager
+     * @hide
+     */
+    public static final String FINGERPRINT_SERVICE = "fingerprint";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
      * {@link android.media.MediaRouter} for controlling and managing
      * routing of media.
      *
@@ -1808,6 +2573,15 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a
+     * {@link android.media.session.MediaSessionManager} for managing media Sessions.
+     *
+     * @see #getSystemService
+     * @see android.media.session.MediaSessionManager
+     */
+    public static final String MEDIA_SESSION_SERVICE = "media_session";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
      * {@link android.telephony.TelephonyManager} for handling management the
      * telephony features of the device.
      *
@@ -1815,6 +2589,26 @@ public abstract class Context {
      * @see android.telephony.TelephonyManager
      */
     public static final String TELEPHONY_SERVICE = "phone";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.telephony.SubscriptionManager} for handling management the
+     * telephony subscriptions of the device.
+     *
+     * @see #getSystemService
+     * @see android.telephony.SubscriptionManager
+     */
+    public static final String TELEPHONY_SUBSCRIPTION_SERVICE = "telephony_subscription_service";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.telecom.TelecomManager} to manage telecom-related features
+     * of the device.
+     *
+     * @see #getSystemService
+     * @see android.telecom.TelecomManager
+     */
+    public static final String TELECOM_SERVICE = "telecom";
 
     /**
      * Use with {@link #getSystemService} to retrieve a
@@ -1848,10 +2642,17 @@ public abstract class Context {
      * Use with {@link #getSystemService} to retrieve a
      * {@link android.appwidget.AppWidgetManager} for accessing AppWidgets.
      *
-     * @hide
      * @see #getSystemService
      */
     public static final String APPWIDGET_SERVICE = "appwidget";
+
+    /**
+     * Official published name of the (internal) voice interaction manager service.
+     *
+     * @hide
+     * @see #getSystemService
+     */
+    public static final String VOICE_INTERACTION_MANAGER_SERVICE = "voiceinteraction";
 
     /**
      * Use with {@link #getSystemService} to retrieve an
@@ -1861,6 +2662,7 @@ public abstract class Context {
      *
      * @see #getSystemService
      */
+    @SystemApi
     public static final String BACKUP_SERVICE = "backup";
 
     /**
@@ -1898,11 +2700,27 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a
+     * {@link android.os.BatteryManager} for managing battery state.
+     *
+     * @see #getSystemService
+     */
+    public static final String BATTERY_SERVICE = "batterymanager";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
      * {@link android.nfc.NfcManager} for using NFC.
      *
      * @see #getSystemService
      */
     public static final String NFC_SERVICE = "nfc";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.bluetooth.BluetoothAdapter} for using Bluetooth.
+     *
+     * @see #getSystemService
+     */
+    public static final String BLUETOOTH_SERVICE = "bluetooth";
 
     /**
      * Use with {@link #getSystemService} to retrieve a
@@ -1919,7 +2737,7 @@ public abstract class Context {
      * and for controlling this device's behavior as a USB device.
      *
      * @see #getSystemService
-     * @see android.harware.usb.UsbManager
+     * @see android.hardware.usb.UsbManager
      */
     public static final String USB_SERVICE = "usb";
 
@@ -1928,11 +2746,23 @@ public abstract class Context {
      * android.hardware.SerialManager} for access to serial ports.
      *
      * @see #getSystemService
-     * @see android.harware.SerialManager
+     * @see android.hardware.SerialManager
      *
      * @hide
      */
     public static final String SERIAL_SERVICE = "serial";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.hardware.hdmi.HdmiControlManager} for controlling and managing
+     * HDMI-CEC protocol.
+     *
+     * @see #getSystemService
+     * @see android.hardware.hdmi.HdmiControlManager
+     * @hide
+     */
+    @SystemApi
+    public static final String HDMI_CONTROL_SERVICE = "hdmi_control";
 
     /**
      * Use with {@link #getSystemService} to retrieve a
@@ -1945,14 +2775,145 @@ public abstract class Context {
 
     /**
      * Use with {@link #getSystemService} to retrieve a
-     * {@link android.os.SchedulingPolicyService} for managing scheduling policy.
+     * {@link android.hardware.display.DisplayManager} for interacting with display devices.
      *
      * @see #getSystemService
-     * @see android.os.SchedulingPolicyService
+     * @see android.hardware.display.DisplayManager
+     */
+    public static final String DISPLAY_SERVICE = "display";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.os.UserManager} for managing users on devices that support multiple users.
      *
+     * @see #getSystemService
+     * @see android.os.UserManager
+     */
+    public static final String USER_SERVICE = "user";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.content.pm.LauncherApps} for querying and monitoring launchable apps across
+     * profiles of a user.
+     *
+     * @see #getSystemService
+     * @see android.content.pm.LauncherApps
+     */
+    public static final String LAUNCHER_APPS_SERVICE = "launcherapps";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.content.RestrictionsManager} for retrieving application restrictions
+     * and requesting permissions for restricted operations.
+     * @see #getSystemService
+     * @see android.content.RestrictionsManager
+     */
+    public static final String RESTRICTIONS_SERVICE = "restrictions";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.app.AppOpsManager} for tracking application operations
+     * on the device.
+     *
+     * @see #getSystemService
+     * @see android.app.AppOpsManager
+     */
+    public static final String APP_OPS_SERVICE = "appops";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.hardware.camera2.CameraManager} for interacting with
+     * camera devices.
+     *
+     * @see #getSystemService
+     * @see android.hardware.camera2.CameraManager
+     */
+    public static final String CAMERA_SERVICE = "camera";
+
+    /**
+     * {@link android.print.PrintManager} for printing and managing
+     * printers and print tasks.
+     *
+     * @see #getSystemService
+     * @see android.print.PrintManager
+     */
+    public static final String PRINT_SERVICE = "print";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.hardware.ConsumerIrManager} for transmitting infrared
+     * signals from the device.
+     *
+     * @see #getSystemService
+     * @see android.hardware.ConsumerIrManager
+     */
+    public static final String CONSUMER_IR_SERVICE = "consumer_ir";
+
+    /**
+     * {@link android.app.trust.TrustManager} for managing trust agents.
+     * @see #getSystemService
+     * @see android.app.trust.TrustManager
      * @hide
      */
-    public static final String SCHEDULING_POLICY_SERVICE = "scheduling_policy";
+    public static final String TRUST_SERVICE = "trust";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.media.tv.TvInputManager} for interacting with TV inputs
+     * on the device.
+     *
+     * @see #getSystemService
+     * @see android.media.tv.TvInputManager
+     */
+    public static final String TV_INPUT_SERVICE = "tv_input";
+
+    /**
+     * {@link android.net.NetworkScoreManager} for managing network scoring.
+     * @see #getSystemService
+     * @see android.net.NetworkScoreManager
+     * @hide
+     */
+    @SystemApi
+    public static final String NETWORK_SCORE_SERVICE = "network_score";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.app.usage.UsageStatsManager} for querying device usage stats.
+     *
+     * @see #getSystemService
+     * @see android.app.usage.UsageStatsManager
+     */
+    public static final String USAGE_STATS_SERVICE = "usagestats";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.app.job.JobScheduler} instance for managing occasional
+     * background tasks.
+     * @see #getSystemService
+     * @see android.app.job.JobScheduler
+     */
+    public static final String JOB_SCHEDULER_SERVICE = "jobscheduler";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.service.persistentdata.PersistentDataBlockManager} instance
+     * for interacting with a storage device that lives across factory resets.
+     *
+     * @see #getSystemService
+     * @see android.service.persistentdata.PersistentDataBlockManager
+     * @hide
+     */
+    @SystemApi
+    public static final String PERSISTENT_DATA_BLOCK_SERVICE = "persistent_data_block";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.media.projection.MediaProjectionManager} instance for managing
+     * media projection sessions.
+     * @see #getSystemService
+     * @see android.media.projection.ProjectionManager
+     */
+    public static final String MEDIA_PROJECTION_SERVICE = "media_projection";
 
     /**
      * Determine whether the given permission is allowed for a particular
@@ -1963,14 +2924,20 @@ public abstract class Context {
      * @param uid The user ID being checked against.  A uid of 0 is the root
      * user, which will pass every permission check.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the given
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the given
      * pid/uid is allowed that permission, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
      * @see PackageManager#checkPermission(String, String)
      * @see #checkCallingPermission
      */
-    public abstract int checkPermission(String permission, int pid, int uid);
+    @PackageManager.PermissionResult
+    public abstract int checkPermission(@NonNull String permission, int pid, int uid);
+
+    /** @hide */
+    @PackageManager.PermissionResult
+    public abstract int checkPermission(@NonNull String permission, int pid, int uid,
+            IBinder callerToken);
 
     /**
      * Determine whether the calling process of an IPC you are handling has been
@@ -1985,7 +2952,7 @@ public abstract class Context {
      *
      * @param permission The name of the permission being checked.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the calling
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the calling
      * pid/uid is allowed that permission, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
@@ -1993,7 +2960,8 @@ public abstract class Context {
      * @see #checkPermission
      * @see #checkCallingOrSelfPermission
      */
-    public abstract int checkCallingPermission(String permission);
+    @PackageManager.PermissionResult
+    public abstract int checkCallingPermission(@NonNull String permission);
 
     /**
      * Determine whether the calling process of an IPC <em>or you</em> have been
@@ -2003,7 +2971,7 @@ public abstract class Context {
      *
      * @param permission The name of the permission being checked.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the calling
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the calling
      * pid/uid is allowed that permission, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
@@ -2011,7 +2979,8 @@ public abstract class Context {
      * @see #checkPermission
      * @see #checkCallingPermission
      */
-    public abstract int checkCallingOrSelfPermission(String permission);
+    @PackageManager.PermissionResult
+    public abstract int checkCallingOrSelfPermission(@NonNull String permission);
 
     /**
      * If the given permission is not allowed for a particular process
@@ -2026,7 +2995,7 @@ public abstract class Context {
      * @see #checkPermission(String, int, int)
      */
     public abstract void enforcePermission(
-            String permission, int pid, int uid, String message);
+            @NonNull String permission, int pid, int uid, @Nullable String message);
 
     /**
      * If the calling process of an IPC you are handling has not been
@@ -2047,7 +3016,7 @@ public abstract class Context {
      * @see #checkCallingPermission(String)
      */
     public abstract void enforceCallingPermission(
-            String permission, String message);
+            @NonNull String permission, @Nullable String message);
 
     /**
      * If neither you nor the calling process of an IPC you are
@@ -2063,7 +3032,7 @@ public abstract class Context {
      * @see #checkCallingOrSelfPermission(String)
      */
     public abstract void enforceCallingOrSelfPermission(
-            String permission, String message);
+            @NonNull String permission, @Nullable String message);
 
     /**
      * Grant permission to access a specific Uri to another package, regardless
@@ -2092,22 +3061,35 @@ public abstract class Context {
      * @param uri The Uri you would like to grant access to.
      * @param modeFlags The desired access modes.  Any combination of
      * {@link Intent#FLAG_GRANT_READ_URI_PERMISSION
-     * Intent.FLAG_GRANT_READ_URI_PERMISSION} or
+     * Intent.FLAG_GRANT_READ_URI_PERMISSION},
      * {@link Intent#FLAG_GRANT_WRITE_URI_PERMISSION
-     * Intent.FLAG_GRANT_WRITE_URI_PERMISSION}.
+     * Intent.FLAG_GRANT_WRITE_URI_PERMISSION},
+     * {@link Intent#FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+     * Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION}, or
+     * {@link Intent#FLAG_GRANT_PREFIX_URI_PERMISSION
+     * Intent.FLAG_GRANT_PREFIX_URI_PERMISSION}.
      *
      * @see #revokeUriPermission
      */
     public abstract void grantUriPermission(String toPackage, Uri uri,
-            int modeFlags);
+            @Intent.GrantUriMode int modeFlags);
 
     /**
      * Remove all permissions to access a particular content provider Uri
      * that were previously added with {@link #grantUriPermission}.  The given
      * Uri will match all previously granted Uris that are the same or a
-     * sub-path of the given Uri.  That is, revoking "content://foo/one" will
+     * sub-path of the given Uri.  That is, revoking "content://foo/target" will
      * revoke both "content://foo/target" and "content://foo/target/sub", but not
-     * "content://foo".
+     * "content://foo".  It will not remove any prefix grants that exist at a
+     * higher level.
+     *
+     * <p>Prior to {@link android.os.Build.VERSION_CODES#LOLLIPOP}, if you did not have
+     * regular permission access to a Uri, but had received access to it through
+     * a specific Uri permission grant, you could not revoke that grant with this
+     * function and a {@link SecurityException} would be thrown.  As of
+     * {@link android.os.Build.VERSION_CODES#LOLLIPOP}, this function will not throw a security exception,
+     * but will remove whatever permission grants to the Uri had been given to the app
+     * (or none).</p>
      *
      * @param uri The Uri you would like to revoke access to.
      * @param modeFlags The desired access modes.  Any combination of
@@ -2118,7 +3100,7 @@ public abstract class Context {
      *
      * @see #grantUriPermission
      */
-    public abstract void revokeUriPermission(Uri uri, int modeFlags);
+    public abstract void revokeUriPermission(Uri uri, @Intent.AccessUriMode int modeFlags);
 
     /**
      * Determine whether a particular process and user ID has been granted
@@ -2135,13 +3117,18 @@ public abstract class Context {
      * {@link Intent#FLAG_GRANT_READ_URI_PERMISSION Intent.FLAG_GRANT_READ_URI_PERMISSION} or
      * {@link Intent#FLAG_GRANT_WRITE_URI_PERMISSION Intent.FLAG_GRANT_WRITE_URI_PERMISSION}.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the given
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the given
      * pid/uid is allowed to access that uri, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
      * @see #checkCallingUriPermission
      */
-    public abstract int checkUriPermission(Uri uri, int pid, int uid, int modeFlags);
+    public abstract int checkUriPermission(Uri uri, int pid, int uid,
+            @Intent.AccessUriMode int modeFlags);
+
+    /** @hide */
+    public abstract int checkUriPermission(Uri uri, int pid, int uid,
+            @Intent.AccessUriMode int modeFlags, IBinder callerToken);
 
     /**
      * Determine whether the calling process and user ID has been
@@ -2158,13 +3145,13 @@ public abstract class Context {
      * {@link Intent#FLAG_GRANT_READ_URI_PERMISSION Intent.FLAG_GRANT_READ_URI_PERMISSION} or
      * {@link Intent#FLAG_GRANT_WRITE_URI_PERMISSION Intent.FLAG_GRANT_WRITE_URI_PERMISSION}.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the caller
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the caller
      * is allowed to access that uri, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
      * @see #checkUriPermission(Uri, int, int, int)
      */
-    public abstract int checkCallingUriPermission(Uri uri, int modeFlags);
+    public abstract int checkCallingUriPermission(Uri uri, @Intent.AccessUriMode int modeFlags);
 
     /**
      * Determine whether the calling process of an IPC <em>or you</em> has been granted
@@ -2177,13 +3164,14 @@ public abstract class Context {
      * {@link Intent#FLAG_GRANT_READ_URI_PERMISSION Intent.FLAG_GRANT_READ_URI_PERMISSION} or
      * {@link Intent#FLAG_GRANT_WRITE_URI_PERMISSION Intent.FLAG_GRANT_WRITE_URI_PERMISSION}.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the caller
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the caller
      * is allowed to access that uri, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      *
      * @see #checkCallingUriPermission
      */
-    public abstract int checkCallingOrSelfUriPermission(Uri uri, int modeFlags);
+    public abstract int checkCallingOrSelfUriPermission(Uri uri,
+            @Intent.AccessUriMode int modeFlags);
 
     /**
      * Check both a Uri and normal permission.  This allows you to perform
@@ -2195,7 +3183,7 @@ public abstract class Context {
      * @param readPermission The permission that provides overall read access,
      * or null to not do this check.
      * @param writePermission The permission that provides overall write
-     * acess, or null to not do this check.
+     * access, or null to not do this check.
      * @param pid The process ID being checked against.  Must be &gt; 0.
      * @param uid The user ID being checked against.  A uid of 0 is the root
      * user, which will pass every permission check.
@@ -2203,12 +3191,13 @@ public abstract class Context {
      * {@link Intent#FLAG_GRANT_READ_URI_PERMISSION Intent.FLAG_GRANT_READ_URI_PERMISSION} or
      * {@link Intent#FLAG_GRANT_WRITE_URI_PERMISSION Intent.FLAG_GRANT_WRITE_URI_PERMISSION}.
      *
-     * @return Returns {@link PackageManager#PERMISSION_GRANTED} if the caller
+     * @return {@link PackageManager#PERMISSION_GRANTED} if the caller
      * is allowed to access that uri or holds one of the given permissions, or
      * {@link PackageManager#PERMISSION_DENIED} if it is not.
      */
-    public abstract int checkUriPermission(Uri uri, String readPermission,
-            String writePermission, int pid, int uid, int modeFlags);
+    public abstract int checkUriPermission(@Nullable Uri uri, @Nullable String readPermission,
+            @Nullable String writePermission, int pid, int uid,
+            @Intent.AccessUriMode int modeFlags);
 
     /**
      * If a particular process and user ID has not been granted
@@ -2230,7 +3219,7 @@ public abstract class Context {
      * @see #checkUriPermission(Uri, int, int, int)
      */
     public abstract void enforceUriPermission(
-            Uri uri, int pid, int uid, int modeFlags, String message);
+            Uri uri, int pid, int uid, @Intent.AccessUriMode int modeFlags, String message);
 
     /**
      * If the calling process and user ID has not been granted
@@ -2252,7 +3241,7 @@ public abstract class Context {
      * @see #checkCallingUriPermission(Uri, int)
      */
     public abstract void enforceCallingUriPermission(
-            Uri uri, int modeFlags, String message);
+            Uri uri, @Intent.AccessUriMode int modeFlags, String message);
 
     /**
      * If the calling process of an IPC <em>or you</em> has not been
@@ -2271,7 +3260,7 @@ public abstract class Context {
      * @see #checkCallingOrSelfUriPermission(Uri, int)
      */
     public abstract void enforceCallingOrSelfUriPermission(
-            Uri uri, int modeFlags, String message);
+            Uri uri, @Intent.AccessUriMode int modeFlags, String message);
 
     /**
      * Enforce both a Uri and normal permission.  This allows you to perform
@@ -2283,7 +3272,7 @@ public abstract class Context {
      * @param readPermission The permission that provides overall read access,
      * or null to not do this check.
      * @param writePermission The permission that provides overall write
-     * acess, or null to not do this check.
+     * access, or null to not do this check.
      * @param pid The process ID being checked against.  Must be &gt; 0.
      * @param uid The user ID being checked against.  A uid of 0 is the root
      * user, which will pass every permission check.
@@ -2295,8 +3284,15 @@ public abstract class Context {
      * @see #checkUriPermission(Uri, String, String, int, int, int)
      */
     public abstract void enforceUriPermission(
-            Uri uri, String readPermission, String writePermission,
-            int pid, int uid, int modeFlags, String message);
+            @Nullable Uri uri, @Nullable String readPermission,
+            @Nullable String writePermission, int pid, int uid, @Intent.AccessUriMode int modeFlags,
+            @Nullable String message);
+
+    /** @hide */
+    @IntDef(flag = true,
+            value = {CONTEXT_INCLUDE_CODE, CONTEXT_IGNORE_SECURITY, CONTEXT_RESTRICTED})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface CreatePackageOptions {}
 
     /**
      * Flag for use with {@link #createPackageContext}: include the application
@@ -2329,6 +3325,12 @@ public abstract class Context {
     public static final int CONTEXT_RESTRICTED = 0x00000004;
 
     /**
+     * @hide Used to indicate we should tell the activity manager about the process
+     * loading this code.
+     */
+    public static final int CONTEXT_REGISTER_PACKAGE = 0x40000000;
+
+    /**
      * Return a new Context object for the given application name.  This
      * Context is the same as what the named application gets when it is
      * launched, containing the same resources and class loader.  Each call to
@@ -2347,19 +3349,95 @@ public abstract class Context {
      * @param flags Option flags, one of {@link #CONTEXT_INCLUDE_CODE}
      *              or {@link #CONTEXT_IGNORE_SECURITY}.
      *
-     * @return A Context for the application.
+     * @return A {@link Context} for the application.
      *
-     * @throws java.lang.SecurityException
+     * @throws SecurityException &nbsp;
      * @throws PackageManager.NameNotFoundException if there is no application with
-     * the given package name
+     * the given package name.
      */
     public abstract Context createPackageContext(String packageName,
+            @CreatePackageOptions int flags) throws PackageManager.NameNotFoundException;
+
+    /**
+     * Similar to {@link #createPackageContext(String, int)}, but with a
+     * different {@link UserHandle}. For example, {@link #getContentResolver()}
+     * will open any {@link Uri} as the given user.
+     *
+     * @hide
+     */
+    public abstract Context createPackageContextAsUser(
+            String packageName, int flags, UserHandle user)
+            throws PackageManager.NameNotFoundException;
+
+    /**
+     * Creates a context given an {@link android.content.pm.ApplicationInfo}.
+     *
+     * @hide
+     */
+    public abstract Context createApplicationContext(ApplicationInfo application,
             int flags) throws PackageManager.NameNotFoundException;
+
+    /**
+     * Get the userId associated with this context
+     * @return user id
+     *
+     * @hide
+     */
+    public abstract int getUserId();
+
+    /**
+     * Return a new Context object for the current Context but whose resources
+     * are adjusted to match the given Configuration.  Each call to this method
+     * returns a new instance of a Context object; Context objects are not
+     * shared, however common state (ClassLoader, other Resources for the
+     * same configuration) may be so the Context itself can be fairly lightweight.
+     *
+     * @param overrideConfiguration A {@link Configuration} specifying what
+     * values to modify in the base Configuration of the original Context's
+     * resources.  If the base configuration changes (such as due to an
+     * orientation change), the resources of this context will also change except
+     * for those that have been explicitly overridden with a value here.
+     *
+     * @return A {@link Context} with the given configuration override.
+     */
+    public abstract Context createConfigurationContext(
+            @NonNull Configuration overrideConfiguration);
+
+    /**
+     * Return a new Context object for the current Context but whose resources
+     * are adjusted to match the metrics of the given Display.  Each call to this method
+     * returns a new instance of a Context object; Context objects are not
+     * shared, however common state (ClassLoader, other Resources for the
+     * same configuration) may be so the Context itself can be fairly lightweight.
+     *
+     * The returned display Context provides a {@link WindowManager}
+     * (see {@link #getSystemService(String)}) that is configured to show windows
+     * on the given display.  The WindowManager's {@link WindowManager#getDefaultDisplay}
+     * method can be used to retrieve the Display from the returned Context.
+     *
+     * @param display A {@link Display} object specifying the display
+     * for whose metrics the Context's resources should be tailored and upon which
+     * new windows should be shown.
+     *
+     * @return A {@link Context} for the display.
+     */
+    public abstract Context createDisplayContext(@NonNull Display display);
+
+    /**
+     * Gets the display adjustments holder for this context.  This information
+     * is provided on a per-application or activity basis and is used to simulate lower density
+     * display metrics for legacy applications and restricted screen sizes.
+     *
+     * @param displayId The display id for which to get compatibility info.
+     * @return The compatibility info holder, or null if not required by the application.
+     * @hide
+     */
+    public abstract DisplayAdjustments getDisplayAdjustments(int displayId);
 
     /**
      * Indicates whether this Context is restricted.
      *
-     * @return True if this Context is restricted, false otherwise.
+     * @return {@code true} if this Context is restricted, {@code false} otherwise.
      *
      * @see #CONTEXT_RESTRICTED
      */

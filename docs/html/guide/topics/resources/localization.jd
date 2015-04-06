@@ -1,53 +1,31 @@
-page.title=Localization
+page.title=Localizing with Resources
 parent.title=Application Resources
+page.tags="localizing","localization","resources", "formats", "l10n"
 parent.link=index.html
 @jd:body
 
 <div id="qv-wrapper">
     <div id="qv">
 
-<h2>Localization quickview</h2>
+<h2>Quickview</h2>
 
 <ul>
-  <li>Android lets you create different resource sets for different locales.</li>
-  <li>When your application runs, Android will load the resource set
-that match the device's locale.</li>
-  <li>If locale-specific resources are not available, Android falls back to
-defaults.</li>
-  <li>The emulator has features for testing localized apps. </li>
+  <li>Use resource sets to create a localized app.</li>
+  <li>Android loads the correct resource set for the user's language and locale.</li>
+  <li>If localized resources are not available, Android loads your default resources.</li>
 </ul>
 
 <h2>In this document</h2>
 <ol>
-  <li><a href="#resource-switching">Overview: Resource-Switching in Android</a>
-
-</li>
-<ol><li><a href="#defaults-r-important">Why Default Resources Are Important</a></li></ol>
-<li><a href="#using-framework">Using Resources for Localization</a>
-  <ol>
-    <li><a href="#creating-defaults">How to Create Default Resources</a></li>
-    <li><a href="#creating-alternatives">How to Create Alternative Resources</a></li>
-    <li><a href="#resource-precedence">Which Resources Take Precedence?</a></li>
-    <li><a href="#referring-to-resources">Referring to Resources in Java</a></li>
-  </ol>
-</li>
-<li><a href="#strategies">Localization Strategies</a></li>
+  <li><a href="#resource-switching">Overview: Resource-Switching in Android</a></li>
+<li><a href="#using-framework">Using Resources for Localization</a></li>
+<li><a href="#strategies">Localization Tips</a></li>
 <li><a href="#testing">Testing Localized Applications</a></li>
-  <ol>
-  <li><a href="#device">Testing on a Device</a></li>
-  <li><a href="#emulator">Testing on an Emulator</a></li>
-  <li><a href="#test-for-default">Testing for Default Resources</a></li>
-  </ol>
-<li><a href="#checklist">Localization Checklists</a></li>
-  <ol>
-  <li><a href="#planning-checklist">Planning and Design Checklist</a></li>
-  <li><a href="#content-checklist">Content Checklist</a></li>
-  <li><a href="#testing-checklist">Testing and Publishing Checklist</a></li>
-  </ol>
 </ol>
 
 <h2>See also</h2>
   <ol>
+    <li><a href="{@docRoot}distribute/tools/localization-checklist.html">Localization Checklist</a></li>
     <li><a href="{@docRoot}guide/topics/resources/providing-resources.html">Providing Resources</a></li>
     <li><a href="{@docRoot}guide/topics/ui/declaring-layout.html">Layouts</a></li>
     <li><a href="{@docRoot}reference/android/app/Activity.html#ActivityLifecycle">Activity Lifecycle</a></li>
@@ -326,7 +304,13 @@ Alternative Resources</a>.</p>
 For more about this, see <a
 href="{@docRoot}guide/topics/resources/accessing-resources.html">Accessing Resources</a>.</p>
 
-<h2 id="strategies">Localization Strategies</h2>
+<h2 id="checklist">Localization Checklist</h2>
+
+<p>For a complete overview of the process of localizing and distributing an Android application,
+see the <a href="{@docRoot}distribute/tools/localization-checklist.html">Localization
+Checklist</a> document.</p>
+
+<h2 id="strategies">Localization Tips</h2>
 
 <h4 id="failing2">Design your application  to work in any locale</h4>
 
@@ -418,8 +402,7 @@ that Android makes available:</p>
 	resolution and density of the device screen may differ, which could affect 
 	the display of strings and drawables in your UI.</p>
 
-<p>To change the locale on a device, use  the Settings application  (Home &gt;
-Menu &gt; Settings &gt; Locale &amp; text &gt; Select locale). </p>
+<p>To change the locale or language on a device, use the Settings application.</p>
 
 <h3 id="emulator">Testing on an Emulator</h3>
 
@@ -450,8 +433,8 @@ application, however, should localize properly.</p>
 <p>To change the locale in the emulator by using the adb shell. </p>
 
 <ol>
-  <li>Pick the locale you want to test and determine its language and region codes, for
-example <code>fr</code> for French and <code>CA</code> for Canada.<br>
+  <li>Pick the locale you want to test and determine its BCP-47 language tag, for
+example, Canadian French would be <code>fr-CA</code>.<br>
   </li>
   <li>Launch an emulator.</li>
   <li>From a command-line shell on the host computer, run the following
@@ -461,16 +444,14 @@ command:<br>
 the <code>-e</code> option:<br>
   <code>adb -e shell</code></li>
   <li>At  the  adb shell prompt (<code>#</code>), run this command: <br>
-    <code>setprop persist.sys.language  [<em>language code</em>];setprop
-persist.sys.country [<em>country  code</em>];stop;sleep 5;start <br>
+    <code>setprop persist.sys.locale [<em>BCP-47 language tag</em>];stop;sleep 5;start <br>
     </code>Replace bracketed sections with the  appropriate codes from Step
 1.</li>
 </ol>
 
 <p>For instance, to test in Canadian French:</p>
 
-<p><code>setprop persist.sys.language  fr;setprop persist.sys.country
-CA;stop;sleep 5;start </code></p>
+<p><code>setprop persist.sys.locale fr-CA;stop;sleep 5;start </code></p>
 
 <p>This will cause the emulator  to restart. (It will look like a full reboot,
 but it is not.) Once the Home screen appears again, re-launch your application (for
@@ -500,120 +481,4 @@ the new locale. </p>
 	portrait orientation and see if the application will run. 
 
 
-<h2 id="checklist">Localization Checklists</h2>
 
-<p>These  checklists summarize the process of localizing an Android application.
-Not everything on these lists will apply to every application.</p>
-
-<h3 id="planning-checklist">Planning and Design Checklist</h3>
-
-<table  width="100%" border="0" cellpadding="5" cellspacing="0">
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Choose a localization strategy. Which countries and which languages will
-your application support? What is your application's default country and
-language? How will your application behave when it does not have specific
-resources available for a given locale?</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td><p>Identify everything in your application   that will need to be
-localized: </p>
-      <ul>
-        <li>Consider  specific details of your application &#8212; text,  images, 
-sounds, music, numbers, money, dates and times. You might not need to localize
-everything. For example, you don't need to localize text that the user never
-sees, or images that are culturally neutral, or icons that convey the same
-meaning in every locale. </li>
-        <li>Consider broad themes. For example, if you hope to sell your
-application in two very culturally different markets, you might want to design
-your UI and present your application in an entirely different way for each
-locale.</li>
-    </ul></td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td><p>Design your Java code to externalize resources wherever possible:</p>
-      <ul>
-        <li>Use <code>R.string</code> and <code>strings.xml</code> files instead
-of hard-coded strings or string constants. </li>
-        <li>Use <code>R.drawable</code> and <code>R.layout</code> instead of 
-hard-coded drawables or layouts. </li>
-    </ul></td>
-  </tr>
-</table>
-<h3 id="content-checklist">Content Checklist</h3>
-<table border="0" cellspacing="0" cellpadding="5"  width="100%">
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Create a full set of default resources in <code>res/values/</code> and
-other <code>res/</code> folders, as described in <a
-href="#creating-defaults">Creating Default Resources</a>.</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Obtain reliable translations of  the static text, including menu text,
-button names, error messages, and help text. Place the translated strings in
-<code>res/values-<em>&lt;qualifiers&gt;</em>/strings.xml</code> files. </td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Make sure that your application correctly formats dynamic text (for
-example numbers and dates) for each supported locale. Make sure that your
-application handles word breaks, punctuation, and alphabetical sorting correctly
-for each supported language.</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>If necessary, create locale-specific versions of your graphics and
-layout, and place them in <code>res/drawable-<em>&lt;qualifiers&gt;</em>/</code> and
-<code>res/layout-<em>&lt;qualifiers&gt;</em>/</code> folders.</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Create any other localized content that your application requires; for
-example, create recordings of sound files for each language, as needed.</td>
-  </tr>
-</table>
-<h3 id="testing-checklist">Testing and Publishing Checklist</h3>
-    <table border="0" cellspacing="0" cellpadding="5" width="100%">
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Test your application for each supported locale. If possible, have a
-person who is native to each locale test your application and give you
-feedback.</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Test the default resources by loading a locale that is not available on 
-    	the device or emulator. For instructions, see <a href="#test-for-default">
-    		Testing for Default Resources</a>.  </td>
-  </tr>
-    <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Test the localized strings in both landscape and portrait display modes.</td>
-  </tr>
-    <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Sign your application and create your final build or builds.</td>
-  </tr>
-  <tr>
-    <td valign="top" align="center"><img src="../../../images/resources/arrow.png" alt="arrow" width="26"
-border="0"></td>
-    <td>Upload your .apk file or files to Google Play, selecting the appropriate
-languages as
-    you upload.</td>
-  </tr>
-</table>

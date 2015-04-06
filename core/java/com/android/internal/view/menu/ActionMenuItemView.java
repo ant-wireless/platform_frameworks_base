@@ -17,6 +17,7 @@
 package com.android.internal.view.menu;
 
 import android.content.Context;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Rect;
@@ -27,8 +28,11 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
+import android.widget.ActionMenuView;
+import android.widget.ListPopupWindow;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.ListPopupWindow.ForwardingListener;
 
 /**
  * @hide
@@ -42,11 +46,16 @@ public class ActionMenuItemView extends TextView
     private CharSequence mTitle;
     private Drawable mIcon;
     private MenuBuilder.ItemInvoker mItemInvoker;
+    private ForwardingListener mForwardingListener;
+    private PopupCallback mPopupCallback;
 
     private boolean mAllowTextWithIcon;
     private boolean mExpandedFormat;
     private int mMinWidth;
     private int mSavedPaddingLeft;
+
+    private static final int MAX_ICON_SIZE = 32; // dp
+    private int mMaxIconSize;
 
     public ActionMenuItemView(Context context) {
         this(context, null);
@@ -56,21 +65,37 @@ public class ActionMenuItemView extends TextView
         this(context, attrs, 0);
     }
 
-    public ActionMenuItemView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public ActionMenuItemView(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public ActionMenuItemView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         final Resources res = context.getResources();
         mAllowTextWithIcon = res.getBoolean(
                 com.android.internal.R.bool.config_allowActionMenuItemTextWithIcon);
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.ActionMenuItemView, 0, 0);
+        final TypedArray a = context.obtainStyledAttributes(attrs,
+                com.android.internal.R.styleable.ActionMenuItemView, defStyleAttr, defStyleRes);
         mMinWidth = a.getDimensionPixelSize(
                 com.android.internal.R.styleable.ActionMenuItemView_minWidth, 0);
         a.recycle();
+
+        final float density = res.getDisplayMetrics().density;
+        mMaxIconSize = (int) (MAX_ICON_SIZE * density + 0.5f);
 
         setOnClickListener(this);
         setOnLongClickListener(this);
 
         mSavedPaddingLeft = -1;
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+
+        mAllowTextWithIcon = getContext().getResources().getBoolean(
+                com.android.internal.R.bool.config_allowActionMenuItemTextWithIcon);
+        updateTextButtonVisibility();
     }
 
     @Override
@@ -83,6 +108,7 @@ public class ActionMenuItemView extends TextView
         return mItemData;
     }
 
+    @Override
     public void initialize(MenuItemImpl itemData, int menuType) {
         mItemData = itemData;
 
@@ -92,8 +118,24 @@ public class ActionMenuItemView extends TextView
 
         setVisibility(itemData.isVisible() ? View.VISIBLE : View.GONE);
         setEnabled(itemData.isEnabled());
+
+        if (itemData.hasSubMenu()) {
+            if (mForwardingListener == null) {
+                mForwardingListener = new ActionMenuItemForwardingListener();
+            }
+        }
     }
 
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        if (mItemData.hasSubMenu() && mForwardingListener != null
+                && mForwardingListener.onTouch(this, e)) {
+            return true;
+        }
+        return super.onTouchEvent(e);
+    }
+
+    @Override
     public void onClick(View v) {
         if (mItemInvoker != null) {
             mItemInvoker.invokeItem(mItemData);
@@ -102,6 +144,10 @@ public class ActionMenuItemView extends TextView
 
     public void setItemInvoker(MenuBuilder.ItemInvoker invoker) {
         mItemInvoker = invoker;
+    }
+
+    public void setPopupCallback(PopupCallback popupCallback) {
+        mPopupCallback = popupCallback;
     }
 
     public boolean prefersCondensedTitle() {
@@ -135,7 +181,22 @@ public class ActionMenuItemView extends TextView
 
     public void setIcon(Drawable icon) {
         mIcon = icon;
-        setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
+        if (icon != null) {
+            int width = icon.getIntrinsicWidth();
+            int height = icon.getIntrinsicHeight();
+            if (width > mMaxIconSize) {
+                final float scale = (float) mMaxIconSize / width;
+                width = mMaxIconSize;
+                height *= scale;
+            }
+            if (height > mMaxIconSize) {
+                final float scale = (float) mMaxIconSize / height;
+                height = mMaxIconSize;
+                width *= scale;
+            }
+            icon.setBounds(0, 0, width, height);
+        }
+        setCompoundDrawables(icon, null, null, null);
 
         updateTextButtonVisibility();
     }
@@ -204,13 +265,15 @@ public class ActionMenuItemView extends TextView
         final int width = getWidth();
         final int height = getHeight();
         final int midy = screenPos[1] + height / 2;
-        final int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
-
+        int referenceX = screenPos[0] + width / 2;
+        if (v.getLayoutDirection() == View.LAYOUT_DIRECTION_LTR) {
+            final int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
+            referenceX = screenWidth - referenceX; // mirror
+        }
         Toast cheatSheet = Toast.makeText(context, mItemData.getTitle(), Toast.LENGTH_SHORT);
         if (midy < displayFrame.height()) {
             // Show along the top; follow action buttons
-            cheatSheet.setGravity(Gravity.TOP | Gravity.RIGHT,
-                    screenWidth - screenPos[0] - width / 2, height);
+            cheatSheet.setGravity(Gravity.TOP | Gravity.END, referenceX, height);
         } else {
             // Show along the bottom center
             cheatSheet.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, height);
@@ -245,8 +308,46 @@ public class ActionMenuItemView extends TextView
             // TextView won't center compound drawables in both dimensions without
             // a little coercion. Pad in to center the icon after we've measured.
             final int w = getMeasuredWidth();
-            final int dw = mIcon.getIntrinsicWidth();
+            final int dw = mIcon.getBounds().width();
             super.setPadding((w - dw) / 2, getPaddingTop(), getPaddingRight(), getPaddingBottom());
         }
+    }
+
+    private class ActionMenuItemForwardingListener extends ForwardingListener {
+        public ActionMenuItemForwardingListener() {
+            super(ActionMenuItemView.this);
+        }
+
+        @Override
+        public ListPopupWindow getPopup() {
+            if (mPopupCallback != null) {
+                return mPopupCallback.getPopup();
+            }
+            return null;
+        }
+
+        @Override
+        protected boolean onForwardingStarted() {
+            // Call the invoker, then check if the expected popup is showing.
+            if (mItemInvoker != null && mItemInvoker.invokeItem(mItemData)) {
+                final ListPopupWindow popup = getPopup();
+                return popup != null && popup.isShowing();
+            }
+            return false;
+        }
+
+        @Override
+        protected boolean onForwardingStopped() {
+            final ListPopupWindow popup = getPopup();
+            if (popup != null) {
+                popup.dismiss();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public static abstract class PopupCallback {
+        public abstract ListPopupWindow getPopup();
     }
 }

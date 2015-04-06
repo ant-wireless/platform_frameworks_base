@@ -16,12 +16,17 @@
 
 package android.graphics.drawable;
 
+import com.android.internal.R;
+
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 
+import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
+import android.content.res.Resources.Theme;
 import android.graphics.*;
+import android.graphics.PorterDuff.Mode;
 import android.view.Gravity;
 import android.util.AttributeSet;
 
@@ -46,12 +51,14 @@ import java.io.IOException;
  * @attr ref android.R.styleable#ClipDrawable_drawable
  */
 public class ClipDrawable extends Drawable implements Drawable.Callback {
-    private ClipState mClipState;
+    private ClipState mState;
     private final Rect mTmpRect = new Rect();
 
     public static final int HORIZONTAL = 1;
     public static final int VERTICAL = 2;
-    
+
+    private boolean mMutated;
+
     ClipDrawable() {
         this(null, null);
     }
@@ -62,9 +69,9 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
     public ClipDrawable(Drawable drawable, int gravity, int orientation) {
         this(null, null);
 
-        mClipState.mDrawable = drawable;
-        mClipState.mGravity = gravity;
-        mClipState.mOrientation = orientation;
+        mState.mDrawable = drawable;
+        mState.mGravity = gravity;
+        mState.mOrientation = orientation;
 
         if (drawable != null) {
             drawable.setCallback(this);
@@ -72,44 +79,102 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
     }
 
     @Override
-    public void inflate(Resources r, XmlPullParser parser, AttributeSet attrs)
+    public void inflate(Resources r, XmlPullParser parser, AttributeSet attrs, Theme theme)
             throws XmlPullParserException, IOException {
-        super.inflate(r, parser, attrs);
+        super.inflate(r, parser, attrs, theme);
 
-        int type;
+        final TypedArray a = obtainAttributes(r, theme, attrs, R.styleable.ClipDrawable);
 
-        TypedArray a = r.obtainAttributes(attrs, com.android.internal.R.styleable.ClipDrawable);
+        // Reset mDrawable to preserve old multiple-inflate behavior. This is
+        // silly, but we have CTS tests that rely on it.
+        mState.mDrawable = null;
 
-        int orientation = a.getInt(
-                com.android.internal.R.styleable.ClipDrawable_clipOrientation,
-                HORIZONTAL);
-        int g = a.getInt(com.android.internal.R.styleable.ClipDrawable_gravity, Gravity.LEFT);
-        Drawable dr = a.getDrawable(com.android.internal.R.styleable.ClipDrawable_drawable);
-
+        updateStateFromTypedArray(a);
+        inflateChildElements(r, parser, attrs, theme);
+        verifyRequiredAttributes(a);
         a.recycle();
+    }
 
+    private void inflateChildElements(Resources r, XmlPullParser parser, AttributeSet attrs,
+            Theme theme) throws XmlPullParserException, IOException {
+        Drawable dr = null;
+        int type;
         final int outerDepth = parser.getDepth();
         while ((type = parser.next()) != XmlPullParser.END_DOCUMENT
                 && (type != XmlPullParser.END_TAG || parser.getDepth() > outerDepth)) {
             if (type != XmlPullParser.START_TAG) {
                 continue;
             }
-            dr = Drawable.createFromXmlInner(r, parser, attrs);
+            dr = Drawable.createFromXmlInner(r, parser, attrs, theme);
         }
 
-        if (dr == null) {
-            throw new IllegalArgumentException("No drawable specified for <clip>");
+        if (dr != null) {
+            mState.mDrawable = dr;
+            dr.setCallback(this);
+        }
+    }
+
+    private void verifyRequiredAttributes(TypedArray a) throws XmlPullParserException {
+        // If we're not waiting on a theme, verify required attributes.
+        if (mState.mDrawable == null && (mState.mThemeAttrs == null
+                || mState.mThemeAttrs[R.styleable.ClipDrawable_drawable] == 0)) {
+            throw new XmlPullParserException(a.getPositionDescription()
+                    + ": <clip> tag requires a 'drawable' attribute or "
+                    + "child tag defining a drawable");
+        }
+    }
+
+    private void updateStateFromTypedArray(TypedArray a) {
+        final ClipState state = mState;
+
+        // Account for any configuration changes.
+        state.mChangingConfigurations |= a.getChangingConfigurations();
+
+        // Extract the theme attributes, if any.
+        state.mThemeAttrs = a.extractThemeAttrs();
+
+        state.mOrientation = a.getInt(R.styleable.ClipDrawable_clipOrientation, state.mOrientation);
+        state.mGravity = a.getInt(R.styleable.ClipDrawable_gravity, state.mGravity);
+
+        final Drawable dr = a.getDrawable(R.styleable.ClipDrawable_drawable);
+        if (dr != null) {
+            state.mDrawable = dr;
+            dr.setCallback(this);
+        }
+    }
+
+    @Override
+    public void applyTheme(Theme t) {
+        super.applyTheme(t);
+
+        final ClipState state = mState;
+        if (state == null || state.mThemeAttrs == null) {
+            return;
         }
 
-        mClipState.mDrawable = dr;
-        mClipState.mOrientation = orientation;
-        mClipState.mGravity = g;
+        final TypedArray a = t.resolveAttributes(state.mThemeAttrs, R.styleable.ClipDrawable);
+        try {
+            updateStateFromTypedArray(a);
+            verifyRequiredAttributes(a);
+        } catch (XmlPullParserException e) {
+            throw new RuntimeException(e);
+        } finally {
+            a.recycle();
+        }
 
-        dr.setCallback(this);
+        if (state.mDrawable != null && state.mDrawable.canApplyTheme()) {
+            state.mDrawable.applyTheme(t);
+        }
+    }
+
+    @Override
+    public boolean canApplyTheme() {
+        return (mState != null && mState.canApplyTheme()) || super.canApplyTheme();
     }
 
     // overrides from Drawable.Callback
 
+    @Override
     public void invalidateDrawable(Drawable who) {
         final Callback callback = getCallback();
         if (callback != null) {
@@ -117,6 +182,7 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
         }
     }
 
+    @Override
     public void scheduleDrawable(Drawable who, Runnable what, long when) {
         final Callback callback = getCallback();
         if (callback != null) {
@@ -124,6 +190,7 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
         }
     }
 
+    @Override
     public void unscheduleDrawable(Drawable who, Runnable what) {
         final Callback callback = getCallback();
         if (callback != null) {
@@ -136,63 +203,78 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
     @Override
     public int getChangingConfigurations() {
         return super.getChangingConfigurations()
-                | mClipState.mChangingConfigurations
-                | mClipState.mDrawable.getChangingConfigurations();
+                | mState.mChangingConfigurations
+                | mState.mDrawable.getChangingConfigurations();
     }
 
     @Override
     public boolean getPadding(Rect padding) {
         // XXX need to adjust padding!
-        return mClipState.mDrawable.getPadding(padding);
+        return mState.mDrawable.getPadding(padding);
     }
 
     @Override
     public boolean setVisible(boolean visible, boolean restart) {
-        mClipState.mDrawable.setVisible(visible, restart);
+        mState.mDrawable.setVisible(visible, restart);
         return super.setVisible(visible, restart);
     }
 
     @Override
     public void setAlpha(int alpha) {
-        mClipState.mDrawable.setAlpha(alpha);
+        mState.mDrawable.setAlpha(alpha);
+    }
+
+    @Override
+    public int getAlpha() {
+        return mState.mDrawable.getAlpha();
     }
 
     @Override
     public void setColorFilter(ColorFilter cf) {
-        mClipState.mDrawable.setColorFilter(cf);
+        mState.mDrawable.setColorFilter(cf);
+    }
+
+    @Override
+    public void setTintList(ColorStateList tint) {
+        mState.mDrawable.setTintList(tint);
+    }
+
+    @Override
+    public void setTintMode(Mode tintMode) {
+        mState.mDrawable.setTintMode(tintMode);
     }
 
     @Override
     public int getOpacity() {
-        return mClipState.mDrawable.getOpacity();
+        return mState.mDrawable.getOpacity();
     }
 
     @Override
     public boolean isStateful() {
-        return mClipState.mDrawable.isStateful();
+        return mState.mDrawable.isStateful();
     }
 
     @Override
     protected boolean onStateChange(int[] state) {
-        return mClipState.mDrawable.setState(state);
+        return mState.mDrawable.setState(state);
     }
 
     @Override
     protected boolean onLevelChange(int level) {
-        mClipState.mDrawable.setLevel(level);
+        mState.mDrawable.setLevel(level);
         invalidateSelf();
         return true;
     }
 
     @Override
     protected void onBoundsChange(Rect bounds) {
-        mClipState.mDrawable.setBounds(bounds);
+        mState.mDrawable.setBounds(bounds);
     }
 
     @Override
     public void draw(Canvas canvas) {
-        
-        if (mClipState.mDrawable.getLevel() == 0) {
+
+        if (mState.mDrawable.getLevel() == 0) {
             return;
         }
 
@@ -200,68 +282,105 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
         final Rect bounds = getBounds();
         int level = getLevel();
         int w = bounds.width();
-        final int iw = 0; //mClipState.mDrawable.getIntrinsicWidth();
-        if ((mClipState.mOrientation & HORIZONTAL) != 0) {
+        final int iw = 0; //mState.mDrawable.getIntrinsicWidth();
+        if ((mState.mOrientation & HORIZONTAL) != 0) {
             w -= (w - iw) * (10000 - level) / 10000;
         }
         int h = bounds.height();
-        final int ih = 0; //mClipState.mDrawable.getIntrinsicHeight();
-        if ((mClipState.mOrientation & VERTICAL) != 0) {
+        final int ih = 0; //mState.mDrawable.getIntrinsicHeight();
+        if ((mState.mOrientation & VERTICAL) != 0) {
             h -= (h - ih) * (10000 - level) / 10000;
         }
-        final int layoutDirection = getResolvedLayoutDirectionSelf();
-        Gravity.apply(mClipState.mGravity, w, h, bounds, r, layoutDirection);
+        final int layoutDirection = getLayoutDirection();
+        Gravity.apply(mState.mGravity, w, h, bounds, r, layoutDirection);
 
         if (w > 0 && h > 0) {
             canvas.save();
             canvas.clipRect(r);
-            mClipState.mDrawable.draw(canvas);
+            mState.mDrawable.draw(canvas);
             canvas.restore();
         }
     }
 
     @Override
     public int getIntrinsicWidth() {
-        return mClipState.mDrawable.getIntrinsicWidth();
+        return mState.mDrawable.getIntrinsicWidth();
     }
 
     @Override
     public int getIntrinsicHeight() {
-        return mClipState.mDrawable.getIntrinsicHeight();
+        return mState.mDrawable.getIntrinsicHeight();
     }
 
     @Override
     public ConstantState getConstantState() {
-        if (mClipState.canConstantState()) {
-            mClipState.mChangingConfigurations = getChangingConfigurations();
-            return mClipState;
+        if (mState.canConstantState()) {
+            mState.mChangingConfigurations = getChangingConfigurations();
+            return mState;
         }
         return null;
     }
 
-    
+    /** @hide */
+    @Override
+    public void setLayoutDirection(int layoutDirection) {
+        mState.mDrawable.setLayoutDirection(layoutDirection);
+        super.setLayoutDirection(layoutDirection);
+    }
+
+    @Override
+    public Drawable mutate() {
+        if (!mMutated && super.mutate() == this) {
+            mState.mDrawable.mutate();
+            mMutated = true;
+        }
+        return this;
+    }
+
+    /**
+     * @hide
+     */
+    public void clearMutated() {
+        super.clearMutated();
+        mState.mDrawable.clearMutated();
+        mMutated = false;
+    }
 
     final static class ClipState extends ConstantState {
-        Drawable mDrawable;
+        int[] mThemeAttrs;
         int mChangingConfigurations;
-        int mOrientation;
-        int mGravity;
+
+        Drawable mDrawable;
+
+        int mOrientation = HORIZONTAL;
+        int mGravity = Gravity.LEFT;
 
         private boolean mCheckedConstantState;
         private boolean mCanConstantState;
 
         ClipState(ClipState orig, ClipDrawable owner, Resources res) {
             if (orig != null) {
+                mThemeAttrs = orig.mThemeAttrs;
+                mChangingConfigurations = orig.mChangingConfigurations;
                 if (res != null) {
                     mDrawable = orig.mDrawable.getConstantState().newDrawable(res);
                 } else {
                     mDrawable = orig.mDrawable.getConstantState().newDrawable();
                 }
                 mDrawable.setCallback(owner);
+                mDrawable.setLayoutDirection(orig.mDrawable.getLayoutDirection());
+                mDrawable.setBounds(orig.mDrawable.getBounds());
+                mDrawable.setLevel(orig.mDrawable.getLevel());
                 mOrientation = orig.mOrientation;
                 mGravity = orig.mGravity;
                 mCheckedConstantState = mCanConstantState = true;
             }
+        }
+
+        @Override
+        public boolean canApplyTheme() {
+            return mThemeAttrs != null || (mDrawable != null && mDrawable.canApplyTheme())
+                    || super.canApplyTheme();
         }
 
         @Override
@@ -290,7 +409,7 @@ public class ClipDrawable extends Drawable implements Drawable.Callback {
     }
 
     private ClipDrawable(ClipState state, Resources res) {
-        mClipState = new ClipState(state, this, res);
+        mState = new ClipState(state, this, res);
     }
 }
 

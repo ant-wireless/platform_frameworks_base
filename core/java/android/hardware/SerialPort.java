@@ -17,14 +17,9 @@
 package android.hardware;
 
 import android.os.ParcelFileDescriptor;
-import android.util.Log;
 
 import java.io.FileDescriptor;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 
 import java.nio.ByteBuffer;
 
@@ -82,7 +77,9 @@ public class SerialPort {
     }
 
     /**
-     * Reads data into the provided buffer
+     * Reads data into the provided buffer.
+     * Note that the value returned by {@link java.nio.Buffer#position()} on this buffer is
+     * unchanged after a call to this method.
      *
      * @param buffer to read into
      * @return number of bytes read
@@ -98,7 +95,9 @@ public class SerialPort {
     }
 
     /**
-     * Writes data from provided buffer
+     * Writes data from provided buffer.
+     * Note that the value returned by {@link java.nio.Buffer#position()} on this buffer is
+     * unchanged after a call to this method.
      *
      * @param buffer to write
      * @param length number of bytes to write

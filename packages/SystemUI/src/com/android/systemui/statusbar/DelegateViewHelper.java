@@ -16,10 +16,11 @@
 
 package com.android.systemui.statusbar;
 
+import android.app.StatusBarManager;
+import android.content.res.Resources;
 import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
-
 import com.android.systemui.R;
 
 public class DelegateViewHelper {
@@ -34,6 +35,7 @@ public class DelegateViewHelper {
     RectF mInitialTouch = new RectF();
     private boolean mStarted;
     private boolean mSwapXY = false;
+    private boolean mDisabled;
 
     public DelegateViewHelper(View sourceView) {
         setSourceView(sourceView);
@@ -48,8 +50,7 @@ public class DelegateViewHelper {
     }
 
     public boolean onInterceptTouchEvent(MotionEvent event) {
-        if (mSourceView == null || mDelegateView == null
-                || mBar.shouldDisableNavbarGestures() || mBar.inKeyguardRestrictedInputMode()) {
+        if (mSourceView == null || mDelegateView == null || mBar.shouldDisableNavbarGestures()) {
             return false;
         }
 
@@ -57,8 +58,8 @@ public class DelegateViewHelper {
         final float sourceX = mTempPoint[0];
         final float sourceY = mTempPoint[1];
 
-
-        switch (event.getAction()) {
+        final int action = event.getAction();
+        switch (action) {
             case MotionEvent.ACTION_DOWN:
                 mPanelShowing = mDelegateView.getVisibility() == View.VISIBLE;
                 mDownPoint[0] = event.getX();
@@ -71,7 +72,7 @@ public class DelegateViewHelper {
             return false;
         }
 
-        if (!mPanelShowing && event.getAction() == MotionEvent.ACTION_MOVE) {
+        if (!mDisabled && !mPanelShowing && action == MotionEvent.ACTION_MOVE) {
             final int historySize = event.getHistorySize();
             for (int k = 0; k < historySize + 1; k++) {
                 float x = k < historySize ? event.getHistoricalX(k) : event.getX();
@@ -83,6 +84,12 @@ public class DelegateViewHelper {
                     break;
                 }
             }
+        }
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            mBar.setInteracting(StatusBarManager.WINDOW_NAVIGATION_BAR, true);
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            mBar.setInteracting(StatusBarManager.WINDOW_NAVIGATION_BAR, false);
         }
 
         mDelegateView.getLocationOnScreen(mTempPoint);
@@ -100,8 +107,8 @@ public class DelegateViewHelper {
     public void setSourceView(View view) {
         mSourceView = view;
         if (mSourceView != null) {
-            mTriggerThreshhold = mSourceView.getContext().getResources()
-                    .getDimension(R.dimen.navbar_search_up_threshhold);
+            Resources r = mSourceView.getContext().getResources();
+            mTriggerThreshhold = r.getDimensionPixelSize(R.dimen.navigation_bar_min_swipe_distance);
         }
     }
 
@@ -134,5 +141,9 @@ public class DelegateViewHelper {
      */
     public void setSwapXY(boolean swap) {
         mSwapXY = swap;
+    }
+
+    public void setDisabled(boolean disabled) {
+        mDisabled = disabled;
     }
 }

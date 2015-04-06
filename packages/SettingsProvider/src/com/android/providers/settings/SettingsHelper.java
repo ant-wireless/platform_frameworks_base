@@ -16,40 +16,37 @@
 
 package com.android.providers.settings;
 
-import java.util.Locale;
-
 import android.app.ActivityManagerNative;
 import android.app.IActivityManager;
-import android.app.backup.BackupDataInput;
 import android.app.backup.IBackupManager;
-import android.content.ContentResolver;
 import android.content.Context;
-import android.content.IContentService;
 import android.content.res.Configuration;
 import android.location.LocationManager;
 import android.media.AudioManager;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.IPowerManager;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.UserManager;
 import android.provider.Settings;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
-import android.util.Log;
+
+import java.util.Locale;
 
 public class SettingsHelper {
-    private static final String TAG = "SettingsHelper";
-
+    private static final String SILENT_RINGTONE = "_silent";
     private Context mContext;
     private AudioManager mAudioManager;
-    private IContentService mContentService;
-    private IPowerManager mPowerManager;
+    private TelephonyManager mTelephonyManager;
 
     public SettingsHelper(Context context) {
         mContext = context;
         mAudioManager = (AudioManager) context
                 .getSystemService(Context.AUDIO_SERVICE);
-        mContentService = ContentResolver.getContentService();
-        mPowerManager = IPowerManager.Stub.asInterface(
-                ServiceManager.getService("power"));
+        mTelephonyManager = (TelephonyManager) context
+                .getSystemService(Context.TELEPHONY_SERVICE);
     }
 
     /**
@@ -71,8 +68,90 @@ public class SettingsHelper {
             return false;
         } else if (Settings.Secure.BACKUP_AUTO_RESTORE.equals(name)) {
             setAutoRestore(Integer.parseInt(value) == 1);
+        } else if (isAlreadyConfiguredCriticalAccessibilitySetting(name)) {
+            return false;
+        } else if (Settings.System.RINGTONE.equals(name)
+                || Settings.System.NOTIFICATION_SOUND.equals(name)) {
+            setRingtone(name, value);
+            return false;
         }
         return true;
+    }
+
+    public String onBackupValue(String name, String value) {
+        // Special processing for backing up ringtones & notification sounds
+        if (Settings.System.RINGTONE.equals(name)
+                || Settings.System.NOTIFICATION_SOUND.equals(name)) {
+            if (value == null) {
+                if (Settings.System.RINGTONE.equals(name)) {
+                    // For ringtones, we need to distinguish between non-telephony vs telephony
+                    if (mTelephonyManager != null && mTelephonyManager.isVoiceCapable()) {
+                        // Backup a null ringtone as silent on voice-capable devices
+                        return SILENT_RINGTONE;
+                    } else {
+                        // Skip backup of ringtone on non-telephony devices.
+                        return null;
+                    }
+                } else {
+                    // Backup a null notification sound as silent
+                    return SILENT_RINGTONE;
+                }
+            } else {
+                return getCanonicalRingtoneValue(value);
+            }
+        }
+        // Return the original value
+        return value;
+    }
+
+    /**
+     * Sets the ringtone of type specified by the name.
+     *
+     * @param name should be Settings.System.RINGTONE or Settings.System.NOTIFICATION_SOUND.
+     * @param value can be a canonicalized uri or "_silent" to indicate a silent (null) ringtone.
+     */
+    private void setRingtone(String name, String value) {
+        // If it's null, don't change the default
+        if (value == null) return;
+        Uri ringtoneUri = null;
+        if (SILENT_RINGTONE.equals(value)) {
+            ringtoneUri = null;
+        } else {
+            Uri canonicalUri = Uri.parse(value);
+            ringtoneUri = mContext.getContentResolver().uncanonicalize(canonicalUri);
+            if (ringtoneUri == null) {
+                // Unrecognized or invalid Uri, don't restore
+                return;
+            }
+        }
+        final int ringtoneType = Settings.System.RINGTONE.equals(name)
+                ? RingtoneManager.TYPE_RINGTONE : RingtoneManager.TYPE_NOTIFICATION;
+        RingtoneManager.setActualDefaultRingtoneUri(mContext, ringtoneType, ringtoneUri);
+    }
+
+    private String getCanonicalRingtoneValue(String value) {
+        final Uri ringtoneUri = Uri.parse(value);
+        final Uri canonicalUri = mContext.getContentResolver().canonicalize(ringtoneUri);
+        return canonicalUri == null ? null : canonicalUri.toString();
+    }
+
+    private boolean isAlreadyConfiguredCriticalAccessibilitySetting(String name) {
+        // These are the critical accessibility settings that are required for a
+        // blind user to be able to interact with the device. If these settings are
+        // already configured, we will not overwrite them. If they are already set,
+        // it means that the user has performed a global gesture to enable accessibility
+        // and definitely needs these features working after the restore.
+        if (Settings.Secure.ACCESSIBILITY_ENABLED.equals(name)
+                || Settings.Secure.ACCESSIBILITY_SCRIPT_INJECTION.equals(name)
+                || Settings.Secure.ACCESSIBILITY_SPEAK_PASSWORD.equals(name)
+                || Settings.Secure.TOUCH_EXPLORATION_ENABLED.equals(name)) {
+            return Settings.Secure.getInt(mContext.getContentResolver(), name, 0) != 0;
+        } else if (Settings.Secure.TOUCH_EXPLORATION_GRANTED_ACCESSIBILITY_SERVICES.equals(name)
+                || Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES.equals(name)) {
+            return !TextUtils.isEmpty(Settings.Secure.getString(
+                    mContext.getContentResolver(), name));
+        }
+        return false;
     }
 
     private void setAutoRestore(boolean enabled) {
@@ -86,8 +165,12 @@ public class SettingsHelper {
     }
 
     private void setGpsLocation(String value) {
+        UserManager um = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
+        if (um.hasUserRestriction(UserManager.DISALLOW_SHARE_LOCATION)) {
+            return;
+        }
         final String GPS = LocationManager.GPS_PROVIDER;
-        boolean enabled = 
+        boolean enabled =
                 GPS.equals(value) ||
                 value.startsWith(GPS + ",") ||
                 value.endsWith("," + GPS) ||
@@ -109,7 +192,7 @@ public class SettingsHelper {
             IPowerManager power = IPowerManager.Stub.asInterface(
                     ServiceManager.getService("power"));
             if (power != null) {
-                power.setBacklightBrightness(brightness);
+                power.setTemporaryScreenBrightnessSettingOverride(brightness);
             }
         } catch (RemoteException doe) {
 
@@ -122,33 +205,34 @@ public class SettingsHelper {
         String localeString = loc.getLanguage();
         String country = loc.getCountry();
         if (!TextUtils.isEmpty(country)) {
-            localeString += "_" + country;
+            localeString += "-" + country;
         }
         return localeString.getBytes();
     }
 
     /**
-     * Sets the locale specified. Input data is the equivalent of "ll_cc".getBytes(), where
-     * "ll" is the language code and "cc" is the country code.
+     * Sets the locale specified. Input data is the byte representation of a
+     * BCP-47 language tag. For backwards compatibility, strings of the form
+     * {@code ll_CC} are also accepted, where {@code ll} is a two letter language
+     * code and {@code CC} is a two letter country code.
+     *
      * @param data the locale string in bytes.
      */
     void setLocaleData(byte[] data, int size) {
         // Check if locale was set by the user:
         Configuration conf = mContext.getResources().getConfiguration();
-        Locale loc = conf.locale;
         // TODO: The following is not working as intended because the network is forcing a locale
         // change after registering. Need to find some other way to detect if the user manually
         // changed the locale
         if (conf.userSetLocale) return; // Don't change if user set it in the SetupWizard
 
         final String[] availableLocales = mContext.getAssets().getLocales();
-        String localeCode = new String(data, 0, size);
-        String language = new String(data, 0, 2);
-        String country = size > 4 ? new String(data, 3, 2) : "";
-        loc = null;
+        // Replace "_" with "-" to deal with older backups.
+        String localeCode = new String(data, 0, size).replace('_', '-');
+        Locale loc = null;
         for (int i = 0; i < availableLocales.length; i++) {
             if (availableLocales[i].equals(localeCode)) {
-                loc = new Locale(language, country);
+                loc = Locale.forLanguageTag(localeCode);
                 break;
             }
         }

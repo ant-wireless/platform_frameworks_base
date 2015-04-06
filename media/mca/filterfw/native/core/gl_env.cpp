@@ -26,6 +26,8 @@
 #include <string>
 #include <EGL/eglext.h>
 
+#include <gui/GLConsumer.h>
+
 namespace android {
 namespace filterfw {
 
@@ -159,10 +161,13 @@ bool GLEnv::InitWithNewContext() {
     return false;
   }
 
-  // Create dummy surface using a SurfaceTexture
-  surfaceTexture_ = new SurfaceTexture(0);
-  window_ = new SurfaceTextureClient(static_cast<sp<ISurfaceTexture> >(
-          surfaceTexture_->getBufferQueue()));
+  // Create dummy surface using a GLConsumer
+  sp<IGraphicBufferProducer> producer;
+  sp<IGraphicBufferConsumer> consumer;
+  BufferQueue::createBufferQueue(&producer, &consumer);
+  surfaceTexture_ = new GLConsumer(consumer, 0, GLConsumer::TEXTURE_EXTERNAL,
+          true, false);
+  window_ = new Surface(producer);
 
   surfaces_[0] = SurfaceWindowPair(eglCreateWindowSurface(display(), config, window_.get(), NULL), NULL);
   if (CheckEGLError("eglCreateWindowSurface")) return false;

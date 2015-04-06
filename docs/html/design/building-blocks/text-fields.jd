@@ -1,7 +1,15 @@
 page.title=Text Fields
+page.tags=text,edittext,input
 @jd:body
 
-<p>Text fields allow the user to type text into your app. They can be either single line or multi-line.
+<a class="notice-developers" href="{@docRoot}guide/topics/ui/controls/text.html">
+  <div>
+    <h3>Developer Docs</h3>
+    <p>Text Fields</p>
+  </div>
+</a>
+
+<p itemprop="description">Text fields allow the user to type text into your app. They can be either single line or multi-line.
 Touching a text field places the cursor and automatically displays the keyboard. In addition to
 typing, text fields allow for a variety of other activities, such as text selection (cut, copy,
 paste) and data lookup via auto-completion.</p>
@@ -68,3 +76,4 @@ Selection mode includes:</p>
 
   </div>
 </div>
+

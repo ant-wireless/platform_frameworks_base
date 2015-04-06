@@ -17,12 +17,18 @@
 package android.app;
 
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IRemoteCallback;
 import android.os.RemoteException;
+import android.os.ResultReceiver;
+import android.util.Pair;
 import android.view.View;
+import android.view.Window;
+
+import java.util.ArrayList;
 
 /**
  * Helper class for building an options Bundle that can be used with
@@ -30,6 +36,8 @@ import android.view.View;
  * Context.startActivity(Intent, Bundle)} and related methods.
  */
 public class ActivityOptions {
+    private static final String TAG = "ActivityOptions";
+
     /**
      * The package name that created the options.
      * @hide
@@ -55,6 +63,12 @@ public class ActivityOptions {
     public static final String KEY_ANIM_EXIT_RES_ID = "android:animExitRes";
 
     /**
+     * Custom in-place animation resource ID.
+     * @hide
+     */
+    public static final String KEY_ANIM_IN_PLACE_RES_ID = "android:animInPlaceRes";
+
+    /**
      * Bitmap for thumbnail animation.
      * @hide
      */
@@ -76,19 +90,33 @@ public class ActivityOptions {
      * Initial width of the animation.
      * @hide
      */
-    public static final String KEY_ANIM_START_WIDTH = "android:animStartWidth";
+    public static final String KEY_ANIM_WIDTH = "android:animWidth";
 
     /**
      * Initial height of the animation.
      * @hide
      */
-    public static final String KEY_ANIM_START_HEIGHT = "android:animStartHeight";
+    public static final String KEY_ANIM_HEIGHT = "android:animHeight";
 
     /**
      * Callback for when animation is started.
      * @hide
      */
     public static final String KEY_ANIM_START_LISTENER = "android:animStartListener";
+
+    /**
+     * For Activity transitions, the calling Activity's TransitionListener used to
+     * notify the called Activity when the shared element and the exit transitions
+     * complete.
+     */
+    private static final String KEY_TRANSITION_COMPLETE_LISTENER
+            = "android:transitionCompleteListener";
+
+    private static final String KEY_TRANSITION_IS_RETURNING = "android:transitionIsReturning";
+    private static final String KEY_TRANSITION_SHARED_ELEMENTS = "android:sharedElementNames";
+    private static final String KEY_RESULT_DATA = "android:resultData";
+    private static final String KEY_RESULT_CODE = "android:resultCode";
+    private static final String KEY_EXIT_COORDINATOR_INDEX = "android:exitCoordinatorIndex";
 
     /** @hide */
     public static final int ANIM_NONE = 0;
@@ -97,20 +125,39 @@ public class ActivityOptions {
     /** @hide */
     public static final int ANIM_SCALE_UP = 2;
     /** @hide */
-    public static final int ANIM_THUMBNAIL = 3;
+    public static final int ANIM_THUMBNAIL_SCALE_UP = 3;
     /** @hide */
-    public static final int ANIM_THUMBNAIL_DELAYED = 4;
+    public static final int ANIM_THUMBNAIL_SCALE_DOWN = 4;
+    /** @hide */
+    public static final int ANIM_SCENE_TRANSITION = 5;
+    /** @hide */
+    public static final int ANIM_DEFAULT = 6;
+    /** @hide */
+    public static final int ANIM_LAUNCH_TASK_BEHIND = 7;
+    /** @hide */
+    public static final int ANIM_THUMBNAIL_ASPECT_SCALE_UP = 8;
+    /** @hide */
+    public static final int ANIM_THUMBNAIL_ASPECT_SCALE_DOWN = 9;
+    /** @hide */
+    public static final int ANIM_CUSTOM_IN_PLACE = 10;
 
     private String mPackageName;
     private int mAnimationType = ANIM_NONE;
     private int mCustomEnterResId;
     private int mCustomExitResId;
+    private int mCustomInPlaceResId;
     private Bitmap mThumbnail;
     private int mStartX;
     private int mStartY;
-    private int mStartWidth;
-    private int mStartHeight;
+    private int mWidth;
+    private int mHeight;
     private IRemoteCallback mAnimationStartedListener;
+    private ResultReceiver mTransitionReceiver;
+    private boolean mIsReturning;
+    private ArrayList<String> mSharedElementNames;
+    private Intent mResultData;
+    private int mResultCode;
+    private int mExitCoordinatorIndex;
 
     /**
      * Create an ActivityOptions specifying a custom animation to run when
@@ -156,11 +203,36 @@ public class ActivityOptions {
         opts.mAnimationType = ANIM_CUSTOM;
         opts.mCustomEnterResId = enterResId;
         opts.mCustomExitResId = exitResId;
-        opts.setListener(handler, listener);
+        opts.setOnAnimationStartedListener(handler, listener);
         return opts;
     }
 
-    private void setListener(Handler handler, OnAnimationStartedListener listener) {
+    /**
+     * Creates an ActivityOptions specifying a custom animation to run in place on an existing
+     * activity.
+     *
+     * @param context Who is defining this.  This is the application that the
+     * animation resources will be loaded from.
+     * @param animId A resource ID of the animation resource to use for
+     * the incoming activity.
+     * @return Returns a new ActivityOptions object that you can use to
+     * supply these options as the options Bundle when running an in-place animation.
+     * @hide
+     */
+    public static ActivityOptions makeCustomInPlaceAnimation(Context context, int animId) {
+        if (animId == 0) {
+            throw new RuntimeException("You must specify a valid animation.");
+        }
+
+        ActivityOptions opts = new ActivityOptions();
+        opts.mPackageName = context.getPackageName();
+        opts.mAnimationType = ANIM_CUSTOM_IN_PLACE;
+        opts.mCustomInPlaceResId = animId;
+        return opts;
+    }
+
+    private void setOnAnimationStartedListener(Handler handler,
+            OnAnimationStartedListener listener) {
         if (listener != null) {
             final Handler h = handler;
             final OnAnimationStartedListener finalListener = listener;
@@ -199,13 +271,13 @@ public class ActivityOptions {
      * defines the coordinate space for <var>startX</var> and <var>startY</var>.
      * @param startX The x starting location of the new activity, relative to <var>source</var>.
      * @param startY The y starting location of the activity, relative to <var>source</var>.
-     * @param startWidth The initial width of the new activity.
-     * @param startHeight The initial height of the new activity.
+     * @param width The initial width of the new activity.
+     * @param height The initial height of the new activity.
      * @return Returns a new ActivityOptions object that you can use to
      * supply these options as the options Bundle when starting an activity.
      */
     public static ActivityOptions makeScaleUpAnimation(View source,
-            int startX, int startY, int startWidth, int startHeight) {
+            int startX, int startY, int width, int height) {
         ActivityOptions opts = new ActivityOptions();
         opts.mPackageName = source.getContext().getPackageName();
         opts.mAnimationType = ANIM_SCALE_UP;
@@ -213,8 +285,8 @@ public class ActivityOptions {
         source.getLocationOnScreen(pts);
         opts.mStartX = pts[0] + startX;
         opts.mStartY = pts[1] + startY;
-        opts.mStartWidth = startWidth;
-        opts.mStartHeight = startHeight;
+        opts.mWidth = width;
+        opts.mHeight = height;
         return opts;
     }
 
@@ -262,20 +334,19 @@ public class ActivityOptions {
      */
     public static ActivityOptions makeThumbnailScaleUpAnimation(View source,
             Bitmap thumbnail, int startX, int startY, OnAnimationStartedListener listener) {
-        return makeThumbnailScaleUpAnimation(source, thumbnail, startX, startY, listener, false);
+        return makeThumbnailAnimation(source, thumbnail, startX, startY, listener, true);
     }
 
     /**
-     * Create an ActivityOptions specifying an animation where a thumbnail
-     * is scaled from a given position to the new activity window that is
-     * being started. Before the animation, there is a short delay.
+     * Create an ActivityOptions specifying an animation where an activity window
+     * is scaled from a given position to a thumbnail at a specified location.
      *
-     * @param source The View that this thumbnail is animating from.  This
+     * @param source The View that this thumbnail is animating to.  This
      * defines the coordinate space for <var>startX</var> and <var>startY</var>.
-     * @param thumbnail The bitmap that will be shown as the initial thumbnail
+     * @param thumbnail The bitmap that will be shown as the final thumbnail
      * of the animation.
-     * @param startX The x starting location of the bitmap, relative to <var>source</var>.
-     * @param startY The y starting location of the bitmap, relative to <var>source</var>.
+     * @param startX The x end location of the bitmap, relative to <var>source</var>.
+     * @param startY The y end location of the bitmap, relative to <var>source</var>.
      * @param listener Optional OnAnimationStartedListener to find out when the
      * requested animation has started running.  If for some reason the animation
      * is not executed, the callback will happen immediately.
@@ -283,24 +354,212 @@ public class ActivityOptions {
      * supply these options as the options Bundle when starting an activity.
      * @hide
      */
-    public static ActivityOptions makeDelayedThumbnailScaleUpAnimation(View source,
+    public static ActivityOptions makeThumbnailScaleDownAnimation(View source,
             Bitmap thumbnail, int startX, int startY, OnAnimationStartedListener listener) {
-        return makeThumbnailScaleUpAnimation(source, thumbnail, startX, startY, listener, true);
+        return makeThumbnailAnimation(source, thumbnail, startX, startY, listener, false);
     }
 
-    private static ActivityOptions makeThumbnailScaleUpAnimation(View source,
+    private static ActivityOptions makeThumbnailAnimation(View source,
             Bitmap thumbnail, int startX, int startY, OnAnimationStartedListener listener,
-            boolean delayed) {
+            boolean scaleUp) {
         ActivityOptions opts = new ActivityOptions();
         opts.mPackageName = source.getContext().getPackageName();
-        opts.mAnimationType = delayed ? ANIM_THUMBNAIL_DELAYED : ANIM_THUMBNAIL;
+        opts.mAnimationType = scaleUp ? ANIM_THUMBNAIL_SCALE_UP : ANIM_THUMBNAIL_SCALE_DOWN;
         opts.mThumbnail = thumbnail;
         int[] pts = new int[2];
         source.getLocationOnScreen(pts);
         opts.mStartX = pts[0] + startX;
         opts.mStartY = pts[1] + startY;
-        opts.setListener(source.getHandler(), listener);
+        opts.setOnAnimationStartedListener(source.getHandler(), listener);
         return opts;
+    }
+
+    /**
+     * Create an ActivityOptions specifying an animation where the new activity
+     * window and a thumbnail is aspect-scaled to a new location.
+     *
+     * @param source The View that this thumbnail is animating from.  This
+     * defines the coordinate space for <var>startX</var> and <var>startY</var>.
+     * @param thumbnail The bitmap that will be shown as the initial thumbnail
+     * of the animation.
+     * @param startX The x starting location of the bitmap, relative to <var>source</var>.
+     * @param startY The y starting location of the bitmap, relative to <var>source</var>.
+     * @param handler If <var>listener</var> is non-null this must be a valid
+     * Handler on which to dispatch the callback; otherwise it should be null.
+     * @param listener Optional OnAnimationStartedListener to find out when the
+     * requested animation has started running.  If for some reason the animation
+     * is not executed, the callback will happen immediately.
+     * @return Returns a new ActivityOptions object that you can use to
+     * supply these options as the options Bundle when starting an activity.
+     * @hide
+     */
+    public static ActivityOptions makeThumbnailAspectScaleUpAnimation(View source,
+            Bitmap thumbnail, int startX, int startY, int targetWidth, int targetHeight,
+            Handler handler, OnAnimationStartedListener listener) {
+        return makeAspectScaledThumbnailAnimation(source, thumbnail, startX, startY,
+                targetWidth, targetHeight, handler, listener, true);
+    }
+
+    /**
+     * Create an ActivityOptions specifying an animation where the new activity
+     * window and a thumbnail is aspect-scaled to a new location.
+     *
+     * @param source The View that this thumbnail is animating to.  This
+     * defines the coordinate space for <var>startX</var> and <var>startY</var>.
+     * @param thumbnail The bitmap that will be shown as the final thumbnail
+     * of the animation.
+     * @param startX The x end location of the bitmap, relative to <var>source</var>.
+     * @param startY The y end location of the bitmap, relative to <var>source</var>.
+     * @param handler If <var>listener</var> is non-null this must be a valid
+     * Handler on which to dispatch the callback; otherwise it should be null.
+     * @param listener Optional OnAnimationStartedListener to find out when the
+     * requested animation has started running.  If for some reason the animation
+     * is not executed, the callback will happen immediately.
+     * @return Returns a new ActivityOptions object that you can use to
+     * supply these options as the options Bundle when starting an activity.
+     * @hide
+     */
+    public static ActivityOptions makeThumbnailAspectScaleDownAnimation(View source,
+            Bitmap thumbnail, int startX, int startY, int targetWidth, int targetHeight,
+            Handler handler, OnAnimationStartedListener listener) {
+        return makeAspectScaledThumbnailAnimation(source, thumbnail, startX, startY,
+                targetWidth, targetHeight, handler, listener, false);
+    }
+
+    private static ActivityOptions makeAspectScaledThumbnailAnimation(View source, Bitmap thumbnail,
+            int startX, int startY, int targetWidth, int targetHeight,
+            Handler handler, OnAnimationStartedListener listener, boolean scaleUp) {
+        ActivityOptions opts = new ActivityOptions();
+        opts.mPackageName = source.getContext().getPackageName();
+        opts.mAnimationType = scaleUp ? ANIM_THUMBNAIL_ASPECT_SCALE_UP :
+                ANIM_THUMBNAIL_ASPECT_SCALE_DOWN;
+        opts.mThumbnail = thumbnail;
+        int[] pts = new int[2];
+        source.getLocationOnScreen(pts);
+        opts.mStartX = pts[0] + startX;
+        opts.mStartY = pts[1] + startY;
+        opts.mWidth = targetWidth;
+        opts.mHeight = targetHeight;
+        opts.setOnAnimationStartedListener(handler, listener);
+        return opts;
+    }
+
+    /**
+     * Create an ActivityOptions to transition between Activities using cross-Activity scene
+     * animations. This method carries the position of one shared element to the started Activity.
+     * The position of <code>sharedElement</code> will be used as the epicenter for the
+     * exit Transition. The position of the shared element in the launched Activity will be the
+     * epicenter of its entering Transition.
+     *
+     * <p>This requires {@link android.view.Window#FEATURE_ACTIVITY_TRANSITIONS} to be
+     * enabled on the calling Activity to cause an exit transition. The same must be in
+     * the called Activity to get an entering transition.</p>
+     * @param activity The Activity whose window contains the shared elements.
+     * @param sharedElement The View to transition to the started Activity.
+     * @param sharedElementName The shared element name as used in the target Activity. This
+     *                          must not be null.
+     * @return Returns a new ActivityOptions object that you can use to
+     *         supply these options as the options Bundle when starting an activity.
+     * @see android.transition.Transition#setEpicenterCallback(
+     *          android.transition.Transition.EpicenterCallback)
+     */
+    public static ActivityOptions makeSceneTransitionAnimation(Activity activity,
+            View sharedElement, String sharedElementName) {
+        return makeSceneTransitionAnimation(activity, Pair.create(sharedElement, sharedElementName));
+    }
+
+    /**
+     * Create an ActivityOptions to transition between Activities using cross-Activity scene
+     * animations. This method carries the position of multiple shared elements to the started
+     * Activity. The position of the first element in sharedElements
+     * will be used as the epicenter for the exit Transition. The position of the associated
+     * shared element in the launched Activity will be the epicenter of its entering Transition.
+     *
+     * <p>This requires {@link android.view.Window#FEATURE_ACTIVITY_TRANSITIONS} to be
+     * enabled on the calling Activity to cause an exit transition. The same must be in
+     * the called Activity to get an entering transition.</p>
+     * @param activity The Activity whose window contains the shared elements.
+     * @param sharedElements The names of the shared elements to transfer to the called
+     *                       Activity and their associated Views. The Views must each have
+     *                       a unique shared element name.
+     * @return Returns a new ActivityOptions object that you can use to
+     *         supply these options as the options Bundle when starting an activity.
+     * @see android.transition.Transition#setEpicenterCallback(
+     *          android.transition.Transition.EpicenterCallback)
+     */
+    public static ActivityOptions makeSceneTransitionAnimation(Activity activity,
+            Pair<View, String>... sharedElements) {
+        ActivityOptions opts = new ActivityOptions();
+        if (!activity.getWindow().hasFeature(Window.FEATURE_ACTIVITY_TRANSITIONS)) {
+            opts.mAnimationType = ANIM_DEFAULT;
+            return opts;
+        }
+        opts.mAnimationType = ANIM_SCENE_TRANSITION;
+
+        ArrayList<String> names = new ArrayList<String>();
+        ArrayList<View> views = new ArrayList<View>();
+
+        if (sharedElements != null) {
+            for (int i = 0; i < sharedElements.length; i++) {
+                Pair<View, String> sharedElement = sharedElements[i];
+                String sharedElementName = sharedElement.second;
+                if (sharedElementName == null) {
+                    throw new IllegalArgumentException("Shared element name must not be null");
+                }
+                names.add(sharedElementName);
+                View view = sharedElement.first;
+                if (view == null) {
+                    throw new IllegalArgumentException("Shared element must not be null");
+                }
+                views.add(sharedElement.first);
+            }
+        }
+
+        ExitTransitionCoordinator exit = new ExitTransitionCoordinator(activity, names, names,
+                views, false);
+        opts.mTransitionReceiver = exit;
+        opts.mSharedElementNames = names;
+        opts.mIsReturning = false;
+        opts.mExitCoordinatorIndex =
+                activity.mActivityTransitionState.addExitTransitionCoordinator(exit);
+        return opts;
+    }
+
+    /** @hide */
+    public static ActivityOptions makeSceneTransitionAnimation(Activity activity,
+            ExitTransitionCoordinator exitCoordinator, ArrayList<String> sharedElementNames,
+            int resultCode, Intent resultData) {
+        ActivityOptions opts = new ActivityOptions();
+        opts.mAnimationType = ANIM_SCENE_TRANSITION;
+        opts.mSharedElementNames = sharedElementNames;
+        opts.mTransitionReceiver = exitCoordinator;
+        opts.mIsReturning = true;
+        opts.mResultCode = resultCode;
+        opts.mResultData = resultData;
+        opts.mExitCoordinatorIndex =
+                activity.mActivityTransitionState.addExitTransitionCoordinator(exitCoordinator);
+        return opts;
+    }
+
+    /**
+     * If set along with Intent.FLAG_ACTIVITY_NEW_DOCUMENT then the task being launched will not be
+     * presented to the user but will instead be only available through the recents task list.
+     * In addition, the new task wil be affiliated with the launching activity's task.
+     * Affiliated tasks are grouped together in the recents task list.
+     *
+     * <p>This behavior is not supported for activities with {@link
+     * android.R.styleable#AndroidManifestActivity_launchMode launchMode} values of
+     * <code>singleInstance</code> or <code>singleTask</code>.
+     */
+    public static ActivityOptions makeTaskLaunchBehind() {
+        final ActivityOptions opts = new ActivityOptions();
+        opts.mAnimationType = ANIM_LAUNCH_TASK_BEHIND;
+        return opts;
+    }
+
+    /** @hide */
+    public boolean getLaunchTaskBehind() {
+        return mAnimationType == ANIM_LAUNCH_TASK_BEHIND;
     }
 
     private ActivityOptions() {
@@ -310,23 +569,46 @@ public class ActivityOptions {
     public ActivityOptions(Bundle opts) {
         mPackageName = opts.getString(KEY_PACKAGE_NAME);
         mAnimationType = opts.getInt(KEY_ANIM_TYPE);
-        if (mAnimationType == ANIM_CUSTOM) {
-            mCustomEnterResId = opts.getInt(KEY_ANIM_ENTER_RES_ID, 0);
-            mCustomExitResId = opts.getInt(KEY_ANIM_EXIT_RES_ID, 0);
-            mAnimationStartedListener = IRemoteCallback.Stub.asInterface(
-                    opts.getIBinder(KEY_ANIM_START_LISTENER));
-        } else if (mAnimationType == ANIM_SCALE_UP) {
-            mStartX = opts.getInt(KEY_ANIM_START_X, 0);
-            mStartY = opts.getInt(KEY_ANIM_START_Y, 0);
-            mStartWidth = opts.getInt(KEY_ANIM_START_WIDTH, 0);
-            mStartHeight = opts.getInt(KEY_ANIM_START_HEIGHT, 0);
-        } else if (mAnimationType == ANIM_THUMBNAIL ||
-                mAnimationType == ANIM_THUMBNAIL_DELAYED) {
-            mThumbnail = (Bitmap)opts.getParcelable(KEY_ANIM_THUMBNAIL);
-            mStartX = opts.getInt(KEY_ANIM_START_X, 0);
-            mStartY = opts.getInt(KEY_ANIM_START_Y, 0);
-            mAnimationStartedListener = IRemoteCallback.Stub.asInterface(
-                    opts.getIBinder(KEY_ANIM_START_LISTENER));
+        switch (mAnimationType) {
+            case ANIM_CUSTOM:
+                mCustomEnterResId = opts.getInt(KEY_ANIM_ENTER_RES_ID, 0);
+                mCustomExitResId = opts.getInt(KEY_ANIM_EXIT_RES_ID, 0);
+                mAnimationStartedListener = IRemoteCallback.Stub.asInterface(
+                        opts.getBinder(KEY_ANIM_START_LISTENER));
+                break;
+
+            case ANIM_CUSTOM_IN_PLACE:
+                mCustomInPlaceResId = opts.getInt(KEY_ANIM_IN_PLACE_RES_ID, 0);
+                break;
+
+            case ANIM_SCALE_UP:
+                mStartX = opts.getInt(KEY_ANIM_START_X, 0);
+                mStartY = opts.getInt(KEY_ANIM_START_Y, 0);
+                mWidth = opts.getInt(KEY_ANIM_WIDTH, 0);
+                mHeight = opts.getInt(KEY_ANIM_HEIGHT, 0);
+                break;
+
+            case ANIM_THUMBNAIL_SCALE_UP:
+            case ANIM_THUMBNAIL_SCALE_DOWN:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_UP:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_DOWN:
+                mThumbnail = (Bitmap) opts.getParcelable(KEY_ANIM_THUMBNAIL);
+                mStartX = opts.getInt(KEY_ANIM_START_X, 0);
+                mStartY = opts.getInt(KEY_ANIM_START_Y, 0);
+                mWidth = opts.getInt(KEY_ANIM_WIDTH, 0);
+                mHeight = opts.getInt(KEY_ANIM_HEIGHT, 0);
+                mAnimationStartedListener = IRemoteCallback.Stub.asInterface(
+                        opts.getBinder(KEY_ANIM_START_LISTENER));
+                break;
+
+            case ANIM_SCENE_TRANSITION:
+                mTransitionReceiver = opts.getParcelable(KEY_TRANSITION_COMPLETE_LISTENER);
+                mIsReturning = opts.getBoolean(KEY_TRANSITION_IS_RETURNING, false);
+                mSharedElementNames = opts.getStringArrayList(KEY_TRANSITION_SHARED_ELEMENTS);
+                mResultData = opts.getParcelable(KEY_RESULT_DATA);
+                mResultCode = opts.getInt(KEY_RESULT_CODE);
+                mExitCoordinatorIndex = opts.getInt(KEY_EXIT_COORDINATOR_INDEX);
+                break;
         }
     }
 
@@ -351,6 +633,11 @@ public class ActivityOptions {
     }
 
     /** @hide */
+    public int getCustomInPlaceResId() {
+        return mCustomInPlaceResId;
+    }
+
+    /** @hide */
     public Bitmap getThumbnail() {
         return mThumbnail;
     }
@@ -366,19 +653,22 @@ public class ActivityOptions {
     }
 
     /** @hide */
-    public int getStartWidth() {
-        return mStartWidth;
+    public int getWidth() {
+        return mWidth;
     }
 
     /** @hide */
-    public int getStartHeight() {
-        return mStartHeight;
+    public int getHeight() {
+        return mHeight;
     }
 
     /** @hide */
     public IRemoteCallback getOnAnimationStartListener() {
         return mAnimationStartedListener;
     }
+
+    /** @hide */
+    public int getExitCoordinatorKey() { return mExitCoordinatorIndex; }
 
     /** @hide */
     public void abort() {
@@ -389,6 +679,25 @@ public class ActivityOptions {
             }
         }
     }
+
+    /** @hide */
+    public boolean isReturning() {
+        return mIsReturning;
+    }
+
+    /** @hide */
+    public ArrayList<String> getSharedElementNames() {
+        return mSharedElementNames;
+    }
+
+    /** @hide */
+    public ResultReceiver getResultReceiver() { return mTransitionReceiver; }
+
+    /** @hide */
+    public int getResultCode() { return mResultCode; }
+
+    /** @hide */
+    public Intent getResultData() { return mResultData; }
 
     /** @hide */
     public static void abort(Bundle options) {
@@ -406,47 +715,68 @@ public class ActivityOptions {
         if (otherOptions.mPackageName != null) {
             mPackageName = otherOptions.mPackageName;
         }
+        mTransitionReceiver = null;
+        mSharedElementNames = null;
+        mIsReturning = false;
+        mResultData = null;
+        mResultCode = 0;
+        mExitCoordinatorIndex = 0;
+        mAnimationType = otherOptions.mAnimationType;
         switch (otherOptions.mAnimationType) {
             case ANIM_CUSTOM:
-                mAnimationType = otherOptions.mAnimationType;
                 mCustomEnterResId = otherOptions.mCustomEnterResId;
                 mCustomExitResId = otherOptions.mCustomExitResId;
                 mThumbnail = null;
-                if (otherOptions.mAnimationStartedListener != null) {
+                if (mAnimationStartedListener != null) {
                     try {
-                        otherOptions.mAnimationStartedListener.sendResult(null);
+                        mAnimationStartedListener.sendResult(null);
                     } catch (RemoteException e) {
                     }
                 }
                 mAnimationStartedListener = otherOptions.mAnimationStartedListener;
                 break;
+            case ANIM_CUSTOM_IN_PLACE:
+                mCustomInPlaceResId = otherOptions.mCustomInPlaceResId;
+                break;
             case ANIM_SCALE_UP:
-                mAnimationType = otherOptions.mAnimationType;
                 mStartX = otherOptions.mStartX;
                 mStartY = otherOptions.mStartY;
-                mStartWidth = otherOptions.mStartWidth;
-                mStartHeight = otherOptions.mStartHeight;
-                if (otherOptions.mAnimationStartedListener != null) {
+                mWidth = otherOptions.mWidth;
+                mHeight = otherOptions.mHeight;
+                if (mAnimationStartedListener != null) {
                     try {
-                        otherOptions.mAnimationStartedListener.sendResult(null);
+                        mAnimationStartedListener.sendResult(null);
                     } catch (RemoteException e) {
                     }
                 }
                 mAnimationStartedListener = null;
                 break;
-            case ANIM_THUMBNAIL:
-            case ANIM_THUMBNAIL_DELAYED:
-                mAnimationType = otherOptions.mAnimationType;
+            case ANIM_THUMBNAIL_SCALE_UP:
+            case ANIM_THUMBNAIL_SCALE_DOWN:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_UP:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_DOWN:
                 mThumbnail = otherOptions.mThumbnail;
                 mStartX = otherOptions.mStartX;
                 mStartY = otherOptions.mStartY;
-                if (otherOptions.mAnimationStartedListener != null) {
+                mWidth = otherOptions.mWidth;
+                mHeight = otherOptions.mHeight;
+                if (mAnimationStartedListener != null) {
                     try {
-                        otherOptions.mAnimationStartedListener.sendResult(null);
+                        mAnimationStartedListener.sendResult(null);
                     } catch (RemoteException e) {
                     }
                 }
                 mAnimationStartedListener = otherOptions.mAnimationStartedListener;
+                break;
+            case ANIM_SCENE_TRANSITION:
+                mTransitionReceiver = otherOptions.mTransitionReceiver;
+                mSharedElementNames = otherOptions.mSharedElementNames;
+                mIsReturning = otherOptions.mIsReturning;
+                mThumbnail = null;
+                mAnimationStartedListener = null;
+                mResultData = otherOptions.mResultData;
+                mResultCode = otherOptions.mResultCode;
+                mExitCoordinatorIndex = otherOptions.mExitCoordinatorIndex;
                 break;
         }
     }
@@ -460,35 +790,69 @@ public class ActivityOptions {
      * methods that take an options Bundle.
      */
     public Bundle toBundle() {
+        if (mAnimationType == ANIM_DEFAULT) {
+            return null;
+        }
         Bundle b = new Bundle();
         if (mPackageName != null) {
             b.putString(KEY_PACKAGE_NAME, mPackageName);
         }
+        b.putInt(KEY_ANIM_TYPE, mAnimationType);
         switch (mAnimationType) {
             case ANIM_CUSTOM:
-                b.putInt(KEY_ANIM_TYPE, mAnimationType);
                 b.putInt(KEY_ANIM_ENTER_RES_ID, mCustomEnterResId);
                 b.putInt(KEY_ANIM_EXIT_RES_ID, mCustomExitResId);
-                b.putIBinder(KEY_ANIM_START_LISTENER, mAnimationStartedListener
+                b.putBinder(KEY_ANIM_START_LISTENER, mAnimationStartedListener
                         != null ? mAnimationStartedListener.asBinder() : null);
                 break;
+            case ANIM_CUSTOM_IN_PLACE:
+                b.putInt(KEY_ANIM_IN_PLACE_RES_ID, mCustomInPlaceResId);
+                break;
             case ANIM_SCALE_UP:
-                b.putInt(KEY_ANIM_TYPE, mAnimationType);
                 b.putInt(KEY_ANIM_START_X, mStartX);
                 b.putInt(KEY_ANIM_START_Y, mStartY);
-                b.putInt(KEY_ANIM_START_WIDTH, mStartWidth);
-                b.putInt(KEY_ANIM_START_HEIGHT, mStartHeight);
+                b.putInt(KEY_ANIM_WIDTH, mWidth);
+                b.putInt(KEY_ANIM_HEIGHT, mHeight);
                 break;
-            case ANIM_THUMBNAIL:
-            case ANIM_THUMBNAIL_DELAYED:
-                b.putInt(KEY_ANIM_TYPE, mAnimationType);
+            case ANIM_THUMBNAIL_SCALE_UP:
+            case ANIM_THUMBNAIL_SCALE_DOWN:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_UP:
+            case ANIM_THUMBNAIL_ASPECT_SCALE_DOWN:
                 b.putParcelable(KEY_ANIM_THUMBNAIL, mThumbnail);
                 b.putInt(KEY_ANIM_START_X, mStartX);
                 b.putInt(KEY_ANIM_START_Y, mStartY);
-                b.putIBinder(KEY_ANIM_START_LISTENER, mAnimationStartedListener
+                b.putInt(KEY_ANIM_WIDTH, mWidth);
+                b.putInt(KEY_ANIM_HEIGHT, mHeight);
+                b.putBinder(KEY_ANIM_START_LISTENER, mAnimationStartedListener
                         != null ? mAnimationStartedListener.asBinder() : null);
                 break;
+            case ANIM_SCENE_TRANSITION:
+                if (mTransitionReceiver != null) {
+                    b.putParcelable(KEY_TRANSITION_COMPLETE_LISTENER, mTransitionReceiver);
+                }
+                b.putBoolean(KEY_TRANSITION_IS_RETURNING, mIsReturning);
+                b.putStringArrayList(KEY_TRANSITION_SHARED_ELEMENTS, mSharedElementNames);
+                b.putParcelable(KEY_RESULT_DATA, mResultData);
+                b.putInt(KEY_RESULT_CODE, mResultCode);
+                b.putInt(KEY_EXIT_COORDINATOR_INDEX, mExitCoordinatorIndex);
+                break;
         }
+
         return b;
     }
+
+    /**
+     * Return the filtered options only meant to be seen by the target activity itself
+     * @hide
+     */
+    public ActivityOptions forTargetActivity() {
+        if (mAnimationType == ANIM_SCENE_TRANSITION) {
+            final ActivityOptions result = new ActivityOptions();
+            result.update(this);
+            return result;
+        }
+
+        return null;
+    }
+
 }

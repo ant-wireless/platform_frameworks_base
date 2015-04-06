@@ -2,8 +2,10 @@
 
 package android.speech.tts;
 
+import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
+import android.speech.tts.TextToSpeechService.AudioOutputParams;
 import android.util.Log;
 
 /**
@@ -44,12 +46,11 @@ class BlockingAudioTrack {
     private static final int MIN_AUDIO_BUFFER_SIZE = 8192;
 
 
-    private final int mStreamType;
+    private final AudioOutputParams mAudioParams;
     private final int mSampleRateInHz;
     private final int mAudioFormat;
     private final int mChannelCount;
-    private final float mVolume;
-    private final float mPan;
+
 
     private final int mBytesPerFrame;
     /**
@@ -67,24 +68,22 @@ class BlockingAudioTrack {
     private int mAudioBufferSize;
     private int mBytesWritten = 0;
 
+    // Need to be seen by stop() which can be called from another thread. mAudioTrack will be
+    // set to null only after waitAndRelease().
+    private Object mAudioTrackLock = new Object();
     private AudioTrack mAudioTrack;
     private volatile boolean mStopped;
-    // Locks the initialization / uninitialization of the audio track.
-    // This is required because stop() will throw an illegal state exception
-    // if called before init() or after mAudioTrack.release().
-    private final Object mAudioTrackLock = new Object();
 
-    BlockingAudioTrack(int streamType, int sampleRate,
-            int audioFormat, int channelCount,
-            float volume, float pan) {
-        mStreamType = streamType;
+    private int mSessionId;
+
+    BlockingAudioTrack(AudioOutputParams audioParams, int sampleRate,
+            int audioFormat, int channelCount) {
+        mAudioParams = audioParams;
         mSampleRateInHz = sampleRate;
         mAudioFormat = audioFormat;
         mChannelCount = channelCount;
-        mVolume = volume;
-        mPan = pan;
 
-        mBytesPerFrame = getBytesPerFrame(mAudioFormat) * mChannelCount;
+        mBytesPerFrame = AudioFormat.getBytesPerSample(mAudioFormat) * mChannelCount;
         mIsShortUtterance = false;
         mAudioBufferSize = 0;
         mBytesWritten = 0;
@@ -93,11 +92,16 @@ class BlockingAudioTrack {
         mStopped = false;
     }
 
-    public void init() {
+    public boolean init() {
         AudioTrack track = createStreamingAudioTrack();
-
         synchronized (mAudioTrackLock) {
             mAudioTrack = track;
+        }
+
+        if (track == null) {
+            return false;
+        } else {
+            return true;
         }
     }
 
@@ -106,20 +110,35 @@ class BlockingAudioTrack {
             if (mAudioTrack != null) {
                 mAudioTrack.stop();
             }
+            mStopped = true;
         }
-        mStopped = true;
     }
 
     public int write(byte[] data) {
-        if (mAudioTrack == null || mStopped) {
+        AudioTrack track = null;
+        synchronized (mAudioTrackLock) {
+            track = mAudioTrack;
+        }
+
+        if (track == null || mStopped) {
             return -1;
         }
-        final int bytesWritten = writeToAudioTrack(mAudioTrack, data);
+        final int bytesWritten = writeToAudioTrack(track, data);
+
         mBytesWritten += bytesWritten;
         return bytesWritten;
     }
 
     public void waitAndRelease() {
+        AudioTrack track = null;
+        synchronized (mAudioTrackLock) {
+            track = mAudioTrack;
+        }
+        if (track == null) {
+            if (DBG) Log.d(TAG, "Audio track null [duplicate call to waitAndRelease ?]");
+            return;
+        }
+
         // For "small" audio tracks, we have to stop() them to make them mixable,
         // else the audio subsystem will wait indefinitely for us to fill the buffer
         // before rendering the track mixable.
@@ -129,11 +148,11 @@ class BlockingAudioTrack {
         if (mBytesWritten < mAudioBufferSize && !mStopped) {
             if (DBG) {
                 Log.d(TAG, "Stopping audio track to flush audio, state was : " +
-                        mAudioTrack.getPlayState() + ",stopped= " + mStopped);
+                        track.getPlayState() + ",stopped= " + mStopped);
             }
 
             mIsShortUtterance = true;
-            mAudioTrack.stop();
+            track.stop();
         }
 
         // Block until the audio track is done only if we haven't stopped yet.
@@ -145,11 +164,11 @@ class BlockingAudioTrack {
         // The last call to AudioTrack.write( ) will return only after
         // all data from the audioTrack has been sent to the mixer, so
         // it's safe to release at this point.
-        if (DBG) Log.d(TAG, "Releasing audio track [" + mAudioTrack.hashCode() + "]");
-        synchronized (mAudioTrackLock) {
-            mAudioTrack.release();
+        if (DBG) Log.d(TAG, "Releasing audio track [" + track.hashCode() + "]");
+        synchronized(mAudioTrackLock) {
             mAudioTrack = null;
         }
+        track.release();
     }
 
 
@@ -196,8 +215,14 @@ class BlockingAudioTrack {
                 = AudioTrack.getMinBufferSize(mSampleRateInHz, channelConfig, mAudioFormat);
         int bufferSizeInBytes = Math.max(MIN_AUDIO_BUFFER_SIZE, minBufferSizeInBytes);
 
-        AudioTrack audioTrack = new AudioTrack(mStreamType, mSampleRateInHz, channelConfig,
-                mAudioFormat, bufferSizeInBytes, AudioTrack.MODE_STREAM);
+        AudioFormat audioFormat = (new AudioFormat.Builder())
+                .setChannelMask(channelConfig)
+                .setEncoding(mAudioFormat)
+                .setSampleRate(mSampleRateInHz).build();
+        AudioTrack audioTrack = new AudioTrack(mAudioParams.mAudioAttributes,
+                audioFormat, bufferSizeInBytes, AudioTrack.MODE_STREAM,
+                mAudioParams.mSessionId);
+
         if (audioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
             Log.w(TAG, "Unable to create audio track.");
             audioTrack.release();
@@ -206,20 +231,9 @@ class BlockingAudioTrack {
 
         mAudioBufferSize = bufferSizeInBytes;
 
-        setupVolume(audioTrack, mVolume, mPan);
+        setupVolume(audioTrack, mAudioParams.mVolume, mAudioParams.mPan);
         return audioTrack;
     }
-
-    private static int getBytesPerFrame(int audioFormat) {
-        if (audioFormat == AudioFormat.ENCODING_PCM_8BIT) {
-            return 1;
-        } else if (audioFormat == AudioFormat.ENCODING_PCM_16BIT) {
-            return 2;
-        }
-
-        return -1;
-    }
-
 
     private void blockUntilDone(AudioTrack audioTrack) {
         if (mBytesWritten <= 0) {
@@ -320,19 +334,11 @@ class BlockingAudioTrack {
     }
 
     private static final long clip(long value, long min, long max) {
-        if (value < min) {
-            return min;
-        }
-
-        if (value > max) {
-            return max;
-        }
-
-        return value;
+        return value < min ? min : (value < max ? value : max);
     }
 
-    private static float clip(float value, float min, float max) {
-        return value > max ? max : (value < min ? min : value);
+    private static final float clip(float value, float min, float max) {
+        return value < min ? min : (value < max ? value : max);
     }
 
 }

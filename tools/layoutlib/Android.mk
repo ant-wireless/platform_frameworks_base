@@ -16,6 +16,8 @@
 LOCAL_PATH := $(my-dir)
 include $(CLEAR_VARS)
 
+LOCAL_JAVACFLAGS := -source 6 -target 6
+
 #
 # Define rules to build temp_layoutlib.jar, which contains a subset of
 # the classes in framework.jar.  The layoutlib_create tool is used to
@@ -28,8 +30,13 @@ include $(CLEAR_VARS)
 built_framework_dep := $(call java-lib-deps,framework)
 built_framework_classes := $(call java-lib-files,framework)
 
-built_core_dep := $(call java-lib-deps,core)
-built_core_classes := $(call java-lib-files,core)
+built_core_dep := $(call java-lib-deps,core-libart)
+built_core_classes := $(call java-lib-files,core-libart)
+
+built_ext_dep := $(call java-lib-deps,ext)
+built_ext_classes := $(call java-lib-files,ext)
+built_ext_data := $(call intermediates-dir-for, \
+			JAVA_LIBRARIES,ext,,COMMON)/javalib.jar
 
 built_layoutlib_create_jar := $(call intermediates-dir-for, \
 			JAVA_LIBRARIES,layoutlib_create,HOST)/javalib.jar
@@ -47,15 +54,19 @@ include $(BUILD_SYSTEM)/base_rules.mk
 
 $(LOCAL_BUILT_MODULE): $(built_core_dep) \
                        $(built_framework_dep) \
+                       $(built_ext_dep) \
+                       $(built_ext_data) \
                        $(built_layoutlib_create_jar)
 	$(hide) echo "host layoutlib_create: $@"
 	$(hide) mkdir -p $(dir $@)
 	$(hide) rm -f $@
 	$(hide) ls -l $(built_framework_classes)
-	$(hide) java -jar $(built_layoutlib_create_jar) \
+	$(hide) java -ea -jar $(built_layoutlib_create_jar) \
 	             $@ \
 	             $(built_core_classes) \
-	             $(built_framework_classes)
+	             $(built_framework_classes) \
+	             $(built_ext_classes) \
+	             $(built_ext_data)
 	$(hide) ls -l $(built_framework_classes)
 
 

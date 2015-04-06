@@ -16,6 +16,7 @@
 
 package android.accessibilityservice;
 
+import android.annotation.NonNull;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -24,11 +25,19 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.WindowManager;
+import android.view.WindowManagerGlobal;
+import android.view.WindowManagerImpl;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityInteractionClient;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import com.android.internal.os.HandlerCaller;
+import com.android.internal.os.SomeArgs;
+
+import java.util.List;
 
 /**
  * An accessibility service runs in the background and receives callbacks by the system
@@ -179,28 +188,37 @@ import com.android.internal.os.HandlerCaller;
  * event generation has settled down.</p>
  * <h3>Event types</h3>
  * <ul>
- * <li>{@link AccessibilityEvent#TYPE_VIEW_CLICKED}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_LONG_CLICKED}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_FOCUSED}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_SELECTED}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_TEXT_CHANGED}
- * <li>{@link AccessibilityEvent#TYPE_WINDOW_STATE_CHANGED}
- * <li>{@link AccessibilityEvent#TYPE_NOTIFICATION_STATE_CHANGED}
- * <li>{@link AccessibilityEvent#TYPE_TOUCH_EXPLORATION_GESTURE_START}
- * <li>{@link AccessibilityEvent#TYPE_TOUCH_EXPLORATION_GESTURE_END}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_HOVER_ENTER}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_HOVER_EXIT}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_SCROLLED}
- * <li>{@link AccessibilityEvent#TYPE_VIEW_TEXT_SELECTION_CHANGED}
- * <li>{@link AccessibilityEvent#TYPE_WINDOW_CONTENT_CHANGED}
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_CLICKED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_LONG_CLICKED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_FOCUSED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_SELECTED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_TEXT_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_WINDOW_STATE_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_NOTIFICATION_STATE_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_TOUCH_EXPLORATION_GESTURE_START}</li>
+ * <li>{@link AccessibilityEvent#TYPE_TOUCH_EXPLORATION_GESTURE_END}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_HOVER_ENTER}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_HOVER_EXIT}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_SCROLLED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_TEXT_SELECTION_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_WINDOW_CONTENT_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_ANNOUNCEMENT}</li>
+ * <li>{@link AccessibilityEvent#TYPE_GESTURE_DETECTION_START}</li>
+ * <li>{@link AccessibilityEvent#TYPE_GESTURE_DETECTION_END}</li>
+ * <li>{@link AccessibilityEvent#TYPE_TOUCH_INTERACTION_START}</li>
+ * <li>{@link AccessibilityEvent#TYPE_TOUCH_INTERACTION_END}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_ACCESSIBILITY_FOCUSED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_WINDOWS_CHANGED}</li>
+ * <li>{@link AccessibilityEvent#TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED}</li>
  * </ul>
  * <h3>Feedback types</h3>
  * <ul>
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_HAPTIC}
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_VISUAL}
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_GENERIC}
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_HAPTIC}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_VISUAL}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_GENERIC}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_BRAILLE}</li>
  * </ul>
  * @see AccessibilityEvent
  * @see AccessibilityServiceInfo
@@ -307,6 +325,8 @@ public abstract class AccessibilityService extends Service {
      *     android:accessibilityFlags="flagDefault"
      *     android:settingsActivity="foo.bar.TestBackActivity"
      *     android:canRetrieveWindowContent="true"
+     *     android:canRequestTouchExplorationMode="true"
+     *     android:canRequestEnhancedWebAccessibility="true"
      *     . . .
      * /&gt;</pre>
      */
@@ -323,7 +343,7 @@ public abstract class AccessibilityService extends Service {
     public static final int GLOBAL_ACTION_HOME = 2;
 
     /**
-     * Action to open the recents.
+     * Action to open the recent apps.
      */
     public static final int GLOBAL_ACTION_RECENTS = 3;
 
@@ -332,19 +352,37 @@ public abstract class AccessibilityService extends Service {
      */
     public static final int GLOBAL_ACTION_NOTIFICATIONS = 4;
 
+    /**
+     * Action to open the quick settings.
+     */
+    public static final int GLOBAL_ACTION_QUICK_SETTINGS = 5;
+
+    /**
+     * Action to open the power long-press dialog.
+     */
+    public static final int GLOBAL_ACTION_POWER_DIALOG = 6;
+
     private static final String LOG_TAG = "AccessibilityService";
 
-    interface Callbacks {
+    /**
+     * @hide
+     */
+    public interface Callbacks {
         public void onAccessibilityEvent(AccessibilityEvent event);
         public void onInterrupt();
         public void onServiceConnected();
-        public void onSetConnectionId(int connectionId);
+        public void init(int connectionId, IBinder windowToken);
         public boolean onGesture(int gestureId);
+        public boolean onKeyEvent(KeyEvent event);
     }
 
     private int mConnectionId;
 
     private AccessibilityServiceInfo mInfo;
+
+    private IBinder mWindowToken;
+
+    private WindowManager mWindowManager;
 
     /**
      * Callback for {@link android.view.accessibility.AccessibilityEvent}s.
@@ -405,8 +443,69 @@ public abstract class AccessibilityService extends Service {
     }
 
     /**
+     * Callback that allows an accessibility service to observe the key events
+     * before they are passed to the rest of the system. This means that the events
+     * are first delivered here before they are passed to the device policy, the
+     * input method, or applications.
+     * <p>
+     * <strong>Note:</strong> It is important that key events are handled in such
+     * a way that the event stream that would be passed to the rest of the system
+     * is well-formed. For example, handling the down event but not the up event
+     * and vice versa would generate an inconsistent event stream.
+     * </p>
+     * <p>
+     * <strong>Note:</strong> The key events delivered in this method are copies
+     * and modifying them will have no effect on the events that will be passed
+     * to the system. This method is intended to perform purely filtering
+     * functionality.
+     * <p>
+     *
+     * @param event The event to be processed.
+     * @return If true then the event will be consumed and not delivered to
+     *         applications, otherwise it will be delivered as usual.
+     */
+    protected boolean onKeyEvent(KeyEvent event) {
+        return false;
+    }
+
+    /**
+     * Gets the windows on the screen. This method returns only the windows
+     * that a sighted user can interact with, as opposed to all windows.
+     * For example, if there is a modal dialog shown and the user cannot touch
+     * anything behind it, then only the modal window will be reported
+     * (assuming it is the top one). For convenience the returned windows
+     * are ordered in a descending layer order, which is the windows that
+     * are higher in the Z-order are reported first. Since the user can always
+     * interact with the window that has input focus by typing, the focused
+     * window is always returned (even if covered by a modal window).
+     * <p>
+     * <strong>Note:</strong> In order to access the windows your service has
+     * to declare the capability to retrieve window content by setting the
+     * {@link android.R.styleable#AccessibilityService_canRetrieveWindowContent}
+     * property in its meta-data. For details refer to {@link #SERVICE_META_DATA}.
+     * Also the service has to opt-in to retrieve the interactive windows by
+     * setting the {@link AccessibilityServiceInfo#FLAG_RETRIEVE_INTERACTIVE_WINDOWS}
+     * flag.
+     * </p>
+     *
+     * @return The windows if there are windows and the service is can retrieve
+     *         them, otherwise an empty list.
+     */
+    public List<AccessibilityWindowInfo> getWindows() {
+        return AccessibilityInteractionClient.getInstance().getWindows(mConnectionId);
+    }
+
+    /**
      * Gets the root node in the currently active window if this service
-     * can retrieve window content.
+     * can retrieve window content. The active window is the one that the user
+     * is currently touching or the window with input focus, if the user is not
+     * touching any window.
+     * <p>
+     * <strong>Note:</strong> In order to access the root node your service has
+     * to declare the capability to retrieve window content by setting the
+     * {@link android.R.styleable#AccessibilityService_canRetrieveWindowContent}
+     * property in its meta-data. For details refer to {@link #SERVICE_META_DATA}.
+     * </p>
      *
      * @return The root node if this service can retrieve window content.
      */
@@ -442,6 +541,31 @@ public abstract class AccessibilityService extends Service {
     }
 
     /**
+     * Find the view that has the specified focus type. The search is performed
+     * across all windows.
+     * <p>
+     * <strong>Note:</strong> In order to access the windows your service has
+     * to declare the capability to retrieve window content by setting the
+     * {@link android.R.styleable#AccessibilityService_canRetrieveWindowContent}
+     * property in its meta-data. For details refer to {@link #SERVICE_META_DATA}.
+     * Also the service has to opt-in to retrieve the interactive windows by
+     * setting the {@link AccessibilityServiceInfo#FLAG_RETRIEVE_INTERACTIVE_WINDOWS}
+     * flag.Otherwise, the search will be performed only in the active window.
+     * </p>
+     *
+     * @param focus The focus to find. One of {@link AccessibilityNodeInfo#FOCUS_INPUT} or
+     *         {@link AccessibilityNodeInfo#FOCUS_ACCESSIBILITY}.
+     * @return The node info of the focused view or null.
+     *
+     * @see AccessibilityNodeInfo#FOCUS_INPUT
+     * @see AccessibilityNodeInfo#FOCUS_ACCESSIBILITY
+     */
+    public AccessibilityNodeInfo findFocus(int focus) {
+        return AccessibilityInteractionClient.getInstance().findFocus(mConnectionId,
+                AccessibilityNodeInfo.ANY_WINDOW_ID, AccessibilityNodeInfo.ROOT_NODE_ID, focus);
+    }
+
+    /**
      * Gets the an {@link AccessibilityServiceInfo} describing this
      * {@link AccessibilityService}. This method is useful if one wants
      * to change some of the dynamically configurable properties at
@@ -449,7 +573,7 @@ public abstract class AccessibilityService extends Service {
      *
      * @return The accessibility service info.
      *
-     * @see AccessibilityNodeInfo
+     * @see AccessibilityServiceInfo
      */
     public final AccessibilityServiceInfo getServiceInfo() {
         IAccessibilityServiceConnection connection =
@@ -496,6 +620,23 @@ public abstract class AccessibilityService extends Service {
         }
     }
 
+    @Override
+    public Object getSystemService(@ServiceName @NonNull String name) {
+        if (getBaseContext() == null) {
+            throw new IllegalStateException(
+                    "System services not available to Activities before onCreate()");
+        }
+
+        // Guarantee that we always return the same window manager instance.
+        if (WINDOW_SERVICE.equals(name)) {
+            if (mWindowManager == null) {
+                mWindowManager = (WindowManager) getBaseContext().getSystemService(name);
+            }
+            return mWindowManager;
+        }
+        return super.getSystemService(name);
+    }
+
     /**
      * Implement to return the implementation of the internal accessibility
      * service interface.
@@ -519,13 +660,24 @@ public abstract class AccessibilityService extends Service {
             }
 
             @Override
-            public void onSetConnectionId( int connectionId) {
+            public void init(int connectionId, IBinder windowToken) {
                 mConnectionId = connectionId;
+                mWindowToken = windowToken;
+
+                // The client may have already obtained the window manager, so
+                // update the default token on whatever manager we gave them.
+                final WindowManagerImpl wm = (WindowManagerImpl) getSystemService(WINDOW_SERVICE);
+                wm.setDefaultToken(windowToken);
             }
 
             @Override
             public boolean onGesture(int gestureId) {
                 return AccessibilityService.this.onGesture(gestureId);
+            }
+
+            @Override
+            public boolean onKeyEvent(KeyEvent event) {
+                return AccessibilityService.this.onKeyEvent(event);
             }
         });
     }
@@ -533,30 +685,34 @@ public abstract class AccessibilityService extends Service {
     /**
      * Implements the internal {@link IAccessibilityServiceClient} interface to convert
      * incoming calls to it back to calls on an {@link AccessibilityService}.
+     *
+     * @hide
      */
-    static class IAccessibilityServiceClientWrapper extends IAccessibilityServiceClient.Stub
+    public static class IAccessibilityServiceClientWrapper extends IAccessibilityServiceClient.Stub
             implements HandlerCaller.Callback {
-
-        static final int NO_ID = -1;
-
-        private static final int DO_SET_SET_CONNECTION = 10;
-        private static final int DO_ON_INTERRUPT = 20;
-        private static final int DO_ON_ACCESSIBILITY_EVENT = 30;
-        private static final int DO_ON_GESTURE = 40;
+        private static final int DO_INIT = 1;
+        private static final int DO_ON_INTERRUPT = 2;
+        private static final int DO_ON_ACCESSIBILITY_EVENT = 3;
+        private static final int DO_ON_GESTURE = 4;
+        private static final int DO_CLEAR_ACCESSIBILITY_CACHE = 5;
+        private static final int DO_ON_KEY_EVENT = 6;
 
         private final HandlerCaller mCaller;
 
         private final Callbacks mCallback;
 
+        private int mConnectionId;
+
         public IAccessibilityServiceClientWrapper(Context context, Looper looper,
                 Callbacks callback) {
             mCallback = callback;
-            mCaller = new HandlerCaller(context, looper, this);
+            mCaller = new HandlerCaller(context, looper, this, true /*asyncHandler*/);
         }
 
-        public void setConnection(IAccessibilityServiceConnection connection, int connectionId) {
-            Message message = mCaller.obtainMessageIO(DO_SET_SET_CONNECTION, connectionId,
-                    connection);
+        public void init(IAccessibilityServiceConnection connection, int connectionId,
+                IBinder windowToken) {
+            Message message = mCaller.obtainMessageIOO(DO_INIT, connectionId,
+                    connection, windowToken);
             mCaller.sendMessage(message);
         }
 
@@ -575,37 +731,92 @@ public abstract class AccessibilityService extends Service {
             mCaller.sendMessage(message);
         }
 
+        public void clearAccessibilityCache() {
+            Message message = mCaller.obtainMessage(DO_CLEAR_ACCESSIBILITY_CACHE);
+            mCaller.sendMessage(message);
+        }
+
+        @Override
+        public void onKeyEvent(KeyEvent event, int sequence) {
+            Message message = mCaller.obtainMessageIO(DO_ON_KEY_EVENT, sequence, event);
+            mCaller.sendMessage(message);
+        }
+
+        @Override
         public void executeMessage(Message message) {
             switch (message.what) {
-                case DO_ON_ACCESSIBILITY_EVENT :
+                case DO_ON_ACCESSIBILITY_EVENT: {
                     AccessibilityEvent event = (AccessibilityEvent) message.obj;
                     if (event != null) {
                         AccessibilityInteractionClient.getInstance().onAccessibilityEvent(event);
                         mCallback.onAccessibilityEvent(event);
-                        event.recycle();
+                        // Make sure the event is recycled.
+                        try {
+                            event.recycle();
+                        } catch (IllegalStateException ise) {
+                            /* ignore - best effort */
+                        }
                     }
-                    return;
-                case DO_ON_INTERRUPT :
+                } return;
+
+                case DO_ON_INTERRUPT: {
                     mCallback.onInterrupt();
-                    return;
-                case DO_SET_SET_CONNECTION :
-                    final int connectionId = message.arg1;
+                } return;
+
+                case DO_INIT: {
+                    mConnectionId = message.arg1;
+                    SomeArgs args = (SomeArgs) message.obj;
                     IAccessibilityServiceConnection connection =
-                        (IAccessibilityServiceConnection) message.obj;
+                            (IAccessibilityServiceConnection) args.arg1;
+                    IBinder windowToken = (IBinder) args.arg2;
+                    args.recycle();
                     if (connection != null) {
-                        AccessibilityInteractionClient.getInstance().addConnection(connectionId,
+                        AccessibilityInteractionClient.getInstance().addConnection(mConnectionId,
                                 connection);
-                        mCallback.onSetConnectionId(connectionId);
+                        mCallback.init(mConnectionId, windowToken);
                         mCallback.onServiceConnected();
                     } else {
-                        AccessibilityInteractionClient.getInstance().removeConnection(connectionId);
-                        mCallback.onSetConnectionId(AccessibilityInteractionClient.NO_ID);
+                        AccessibilityInteractionClient.getInstance().removeConnection(
+                                mConnectionId);
+                        mConnectionId = AccessibilityInteractionClient.NO_ID;
+                        AccessibilityInteractionClient.getInstance().clearCache();
+                        mCallback.init(AccessibilityInteractionClient.NO_ID, null);
                     }
-                    return;
-                case DO_ON_GESTURE :
+                } return;
+
+                case DO_ON_GESTURE: {
                     final int gestureId = message.arg1;
                     mCallback.onGesture(gestureId);
-                    return;
+                } return;
+
+                case DO_CLEAR_ACCESSIBILITY_CACHE: {
+                    AccessibilityInteractionClient.getInstance().clearCache();
+                } return;
+
+                case DO_ON_KEY_EVENT: {
+                    KeyEvent event = (KeyEvent) message.obj;
+                    try {
+                        IAccessibilityServiceConnection connection = AccessibilityInteractionClient
+                                .getInstance().getConnection(mConnectionId);
+                        if (connection != null) {
+                            final boolean result = mCallback.onKeyEvent(event);
+                            final int sequence = message.arg1;
+                            try {
+                                connection.setOnKeyEventResult(result, sequence);
+                            } catch (RemoteException re) {
+                                /* ignore */
+                            }
+                        }
+                    } finally {
+                        // Make sure the event is recycled.
+                        try {
+                            event.recycle();
+                        } catch (IllegalStateException ise) {
+                            /* ignore - best effort */
+                        }
+                    }
+                } return;
+
                 default :
                     Log.w(LOG_TAG, "Unknown message type " + message.what);
             }

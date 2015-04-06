@@ -17,20 +17,16 @@
 package com.android.systemui.media;
 
 import android.content.Context;
+import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.MediaPlayer.OnCompletionListener;
 import android.net.Uri;
-import android.os.Handler;
 import android.os.Looper;
-import android.os.Message;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
 
-import java.io.IOException;
-import java.lang.IllegalStateException;
-import java.lang.Thread;
 import java.util.LinkedList;
 
 /**
@@ -50,11 +46,11 @@ public class NotificationPlayer implements OnCompletionListener {
         Context context;
         Uri uri;
         boolean looping;
-        int stream;
+        AudioAttributes attributes;
         long requestTime;
 
         public String toString() {
-            return "{ code=" + code + " looping=" + looping + " stream=" + stream
+            return "{ code=" + code + " looping=" + looping + " attributes=" + attributes
                     + " uri=" + uri + " }";
         }
     }
@@ -84,20 +80,37 @@ public class NotificationPlayer implements OnCompletionListener {
                     (AudioManager) mCmd.context.getSystemService(Context.AUDIO_SERVICE);
                 try {
                     MediaPlayer player = new MediaPlayer();
-                    player.setAudioStreamType(mCmd.stream);
+                    player.setAudioAttributes(mCmd.attributes);
                     player.setDataSource(mCmd.context, mCmd.uri);
                     player.setLooping(mCmd.looping);
                     player.prepare();
                     if ((mCmd.uri != null) && (mCmd.uri.getEncodedPath() != null)
                             && (mCmd.uri.getEncodedPath().length() > 0)) {
-                        if (mCmd.looping) {
-                            audioManager.requestAudioFocus(null, mCmd.stream,
-                                    AudioManager.AUDIOFOCUS_GAIN);
-                        } else {
-                            audioManager.requestAudioFocus(null, mCmd.stream,
-                                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+                        if (!audioManager.isMusicActiveRemotely()) {
+                            synchronized(mQueueAudioFocusLock) {
+                                if (mAudioManagerWithAudioFocus == null) {
+                                    if (mDebug) Log.d(mTag, "requesting AudioFocus");
+                                    if (mCmd.looping) {
+                                        audioManager.requestAudioFocus(null,
+                                                AudioAttributes.toLegacyStreamType(mCmd.attributes),
+                                                AudioManager.AUDIOFOCUS_GAIN);
+                                    } else {
+                                        audioManager.requestAudioFocus(null,
+                                                AudioAttributes.toLegacyStreamType(mCmd.attributes),
+                                                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+                                    }
+                                    mAudioManagerWithAudioFocus = audioManager;
+                                } else {
+                                    if (mDebug) Log.d(mTag, "AudioFocus was previously requested");
+                                }
+                            }
                         }
                     }
+                    // FIXME Having to start a new thread so we can receive completion callbacks
+                    //  is wrong, as we kill this thread whenever a new sound is to be played. This
+                    //  can lead to AudioFocus being released too early, before the second sound is
+                    //  done playing. This class should be modified to use a single thread, on which
+                    //  command are issued, and on which it receives the completion callbacks.
                     player.setOnCompletionListener(NotificationPlayer.this);
                     player.start();
                     if (mPlayer != null) {
@@ -108,7 +121,6 @@ public class NotificationPlayer implements OnCompletionListener {
                 catch (Exception e) {
                     Log.w(mTag, "error loading sound for " + mCmd.uri, e);
                 }
-                mAudioManager = audioManager;
                 this.notify();
             }
             Looper.loop();
@@ -179,8 +191,12 @@ public class NotificationPlayer implements OnCompletionListener {
                         mPlayer.stop();
                         mPlayer.release();
                         mPlayer = null;
-                        mAudioManager.abandonAudioFocus(null);
-                        mAudioManager = null;
+                        synchronized(mQueueAudioFocusLock) {
+                            if (mAudioManagerWithAudioFocus != null) {
+                                mAudioManagerWithAudioFocus.abandonAudioFocus(null);
+                                mAudioManagerWithAudioFocus = null;
+                            }
+                        }
                         if((mLooper != null)
                                 && (mLooper.getThread().getState() != Thread.State.TERMINATED)) {
                             mLooper.quit();
@@ -207,8 +223,14 @@ public class NotificationPlayer implements OnCompletionListener {
     }
 
     public void onCompletion(MediaPlayer mp) {
-        if (mAudioManager != null) {
-            mAudioManager.abandonAudioFocus(null);
+        synchronized(mQueueAudioFocusLock) {
+            if (mAudioManagerWithAudioFocus != null) {
+                if (mDebug) Log.d(mTag, "onCompletion() abandonning AudioFocus");
+                mAudioManagerWithAudioFocus.abandonAudioFocus(null);
+                mAudioManagerWithAudioFocus = null;
+            } else {
+                if (mDebug) Log.d(mTag, "onCompletion() no need to abandon AudioFocus");
+            }
         }
         // if there are no more sounds to play, end the Looper to listen for media completion
         synchronized (mCmdQueue) {
@@ -229,7 +251,8 @@ public class NotificationPlayer implements OnCompletionListener {
     private final Object mCompletionHandlingLock = new Object();
     private MediaPlayer mPlayer;
     private PowerManager.WakeLock mWakeLock;
-    private AudioManager mAudioManager;
+    private final Object mQueueAudioFocusLock = new Object();
+    private AudioManager mAudioManagerWithAudioFocus; // synchronized on mQueueAudioFocusLock
 
     // The current state according to the caller.  Reality lags behind
     // because of the asynchronous nature of this class.
@@ -260,7 +283,9 @@ public class NotificationPlayer implements OnCompletionListener {
      *          (see {@link MediaPlayer#setLooping(boolean)})
      * @param stream the AudioStream to use.
      *          (see {@link MediaPlayer#setAudioStreamType(int)})
+     * @deprecated use {@link #play(Context, Uri, boolean, AudioAttributes)} instead.
      */
+    @Deprecated
     public void play(Context context, Uri uri, boolean looping, int stream) {
         Command cmd = new Command();
         cmd.requestTime = SystemClock.uptimeMillis();
@@ -268,7 +293,34 @@ public class NotificationPlayer implements OnCompletionListener {
         cmd.context = context;
         cmd.uri = uri;
         cmd.looping = looping;
-        cmd.stream = stream;
+        cmd.attributes = new AudioAttributes.Builder().setInternalLegacyStreamType(stream).build();
+        synchronized (mCmdQueue) {
+            enqueueLocked(cmd);
+            mState = PLAY;
+        }
+    }
+
+    /**
+     * Start playing the sound.  It will actually start playing at some
+     * point in the future.  There are no guarantees about latency here.
+     * Calling this before another audio file is done playing will stop
+     * that one and start the new one.
+     *
+     * @param context Your application's context.
+     * @param uri The URI to play.  (see {@link MediaPlayer#setDataSource(Context, Uri)})
+     * @param looping Whether the audio should loop forever.
+     *          (see {@link MediaPlayer#setLooping(boolean)})
+     * @param attributes the AudioAttributes to use.
+     *          (see {@link MediaPlayer#setAudioAttributes(AudioAttributes)})
+     */
+    public void play(Context context, Uri uri, boolean looping, AudioAttributes attributes) {
+        Command cmd = new Command();
+        cmd.requestTime = SystemClock.uptimeMillis();
+        cmd.code = PLAY;
+        cmd.context = context;
+        cmd.uri = uri;
+        cmd.looping = looping;
+        cmd.attributes = attributes;
         synchronized (mCmdQueue) {
             enqueueLocked(cmd);
             mState = PLAY;

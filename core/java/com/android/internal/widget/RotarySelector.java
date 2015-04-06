@@ -24,8 +24,10 @@ import android.graphics.Paint;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
-import android.graphics.drawable.Drawable;
+import android.media.AudioAttributes;
+import android.os.UserHandle;
 import android.os.Vibrator;
+import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -33,7 +35,9 @@ import android.view.View;
 import android.view.VelocityTracker;
 import android.view.ViewConfiguration;
 import android.view.animation.DecelerateInterpolator;
+
 import static android.view.animation.AnimationUtils.currentAnimationTimeMillis;
+
 import com.android.internal.R;
 
 
@@ -49,6 +53,11 @@ public class RotarySelector extends View {
     private static final String LOG_TAG = "RotarySelector";
     private static final boolean DBG = false;
     private static final boolean VISUAL_DEBUG = false;
+
+    private static final AudioAttributes VIBRATION_ATTRIBUTES = new AudioAttributes.Builder()
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .build();
 
     // Listener for onDialTrigger() callbacks.
     private OnDialTriggerListener mOnDialTriggerListener;
@@ -667,11 +676,16 @@ public class RotarySelector extends View {
      * Triggers haptic feedback.
      */
     private synchronized void vibrate(long duration) {
-        if (mVibrator == null) {
-            mVibrator = (android.os.Vibrator)
-                    getContext().getSystemService(Context.VIBRATOR_SERVICE);
+        final boolean hapticEnabled = Settings.System.getIntForUser(
+                mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 1,
+                UserHandle.USER_CURRENT) != 0;
+        if (hapticEnabled) {
+            if (mVibrator == null) {
+                mVibrator = (android.os.Vibrator) getContext()
+                        .getSystemService(Context.VIBRATOR_SERVICE);
+            }
+            mVibrator.vibrate(duration, VIBRATION_ATTRIBUTES);
         }
-        mVibrator.vibrate(duration);
     }
 
     /**

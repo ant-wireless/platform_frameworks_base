@@ -16,7 +16,8 @@
 
 package android.app;
 
-import com.android.internal.app.ActionBarImpl;
+import android.content.pm.ApplicationInfo;
+import com.android.internal.app.WindowDecorActionBar;
 import com.android.internal.policy.PolicyManager;
 
 import android.content.ComponentName;
@@ -78,7 +79,7 @@ import java.lang.ref.WeakReference;
  * </div>
  */
 public class Dialog implements DialogInterface, Window.Callback,
-        KeyEvent.Callback, OnCreateContextMenuListener {
+        KeyEvent.Callback, OnCreateContextMenuListener, Window.OnWindowDismissedCallback {
     private static final String TAG = "Dialog";
     private Activity mOwnerActivity;
     
@@ -86,7 +87,7 @@ public class Dialog implements DialogInterface, Window.Callback,
     final WindowManager mWindowManager;
     Window mWindow;
     View mDecor;
-    private ActionBarImpl mActionBar;
+    private ActionBar mActionBar;
     /**
      * This field should be made private, so it is hidden from the SDK.
      * {@hide}
@@ -147,24 +148,29 @@ public class Dialog implements DialogInterface, Window.Callback,
         this(context, theme, true);
     }
 
-    Dialog(Context context, int theme, boolean createContextWrapper) {
-        if (theme == 0) {
-            TypedValue outValue = new TypedValue();
-            context.getTheme().resolveAttribute(com.android.internal.R.attr.dialogTheme,
-                    outValue, true);
-            theme = outValue.resourceId;
+    Dialog(Context context, int theme, boolean createContextThemeWrapper) {
+        if (createContextThemeWrapper) {
+            if (theme == 0) {
+                TypedValue outValue = new TypedValue();
+                context.getTheme().resolveAttribute(com.android.internal.R.attr.dialogTheme,
+                        outValue, true);
+                theme = outValue.resourceId;
+            }
+            mContext = new ContextThemeWrapper(context, theme);
+        } else {
+            mContext = context;
         }
 
-        mContext = createContextWrapper ? new ContextThemeWrapper(context, theme) : context;
         mWindowManager = (WindowManager)context.getSystemService(Context.WINDOW_SERVICE);
         Window w = PolicyManager.makeNewWindow(mContext);
         mWindow = w;
         w.setCallback(this);
+        w.setOnWindowDismissedCallback(this);
         w.setWindowManager(mWindowManager, null, null);
         w.setGravity(Gravity.CENTER);
         mListenersHandler = new ListenersHandler(this);
     }
-    
+
     /**
      * @deprecated
      * @hide
@@ -234,6 +240,18 @@ public class Dialog implements DialogInterface, Window.Callback,
     }
 
     /**
+     * Forces immediate creation of the dialog.
+     * <p>
+     * Note that you should not override this method to perform dialog creation.
+     * Rather, override {@link #onCreate(Bundle)}.
+     */
+    public void create() {
+        if (!mCreated) {
+            dispatchOnCreate(null);
+        }
+    }
+
+    /**
      * Start the dialog and display it on screen.  The window is placed in the
      * application layer and opaque.  Note that you should not override this
      * method to do initialization when the dialog is shown, instead implement
@@ -260,7 +278,10 @@ public class Dialog implements DialogInterface, Window.Callback,
         mDecor = mWindow.getDecorView();
 
         if (mActionBar == null && mWindow.hasFeature(Window.FEATURE_ACTION_BAR)) {
-            mActionBar = new ActionBarImpl(this);
+            final ApplicationInfo info = mContext.getApplicationInfo();
+            mWindow.setDefaultIcon(info.icon);
+            mWindow.setDefaultLogo(info.logo);
+            mActionBar = new WindowDecorActionBar(this);
         }
 
         WindowManager.LayoutParams l = mWindow.getAttributes();
@@ -297,6 +318,7 @@ public class Dialog implements DialogInterface, Window.Callback,
      * method to do cleanup when the dialog is dismissed, instead implement
      * that in {@link #onStop}.
      */
+    @Override
     public void dismiss() {
         if (Looper.myLooper() == mHandler.getLooper()) {
             dismissDialog();
@@ -316,7 +338,7 @@ public class Dialog implements DialogInterface, Window.Callback,
         }
 
         try {
-            mWindowManager.removeView(mDecor);
+            mWindowManager.removeViewImmediate(mDecor);
         } finally {
             if (mActionMode != null) {
                 mActionMode.finish();
@@ -325,7 +347,7 @@ public class Dialog implements DialogInterface, Window.Callback,
             mWindow.closeAllPanels();
             onStop();
             mShowing = false;
-            
+
             sendDismissMessage();
         }
     }
@@ -447,11 +469,12 @@ public class Dialog implements DialogInterface, Window.Callback,
     }
 
     /**
-     * Finds a view that was identified by the id attribute from the XML that
-     * was processed in {@link #onStart}.
+     * Finds a child view with the given identifier. Returns null if the
+     * specified child view does not exist or the dialog has not yet been fully
+     * created (for example, via {@link #show()} or {@link #create()}).
      *
      * @param id the identifier of the view to find
-     * @return The view if found or null otherwise.
+     * @return The view with the given id or null.
      */
     public View findViewById(int id) {
         return mWindow.findViewById(id);
@@ -470,7 +493,7 @@ public class Dialog implements DialogInterface, Window.Callback,
     /**
      * Set the screen content to an explicit view.  This view is placed
      * directly into the screen's view hierarchy.  It can itself be a complex
-     * view hierarhcy.
+     * view hierarchy.
      * 
      * @param view The desired content to display.
      */
@@ -685,6 +708,12 @@ public class Dialog implements DialogInterface, Window.Callback,
     
     public void onDetachedFromWindow() {
     }
+
+    /** @hide */
+    @Override
+    public void onWindowDismissed() {
+        dismiss();
+    }
     
     /**
      * Called to process key events.  You can override this to intercept all 
@@ -881,21 +910,27 @@ public class Dialog implements DialogInterface, Window.Callback,
      * @see Activity#openOptionsMenu()
      */
     public void openOptionsMenu() {
-        mWindow.openPanel(Window.FEATURE_OPTIONS_PANEL, null);
+        if (mWindow.hasFeature(Window.FEATURE_OPTIONS_PANEL)) {
+            mWindow.openPanel(Window.FEATURE_OPTIONS_PANEL, null);
+        }
     }
-    
+
     /**
      * @see Activity#closeOptionsMenu()
      */
     public void closeOptionsMenu() {
-        mWindow.closePanel(Window.FEATURE_OPTIONS_PANEL);
+        if (mWindow.hasFeature(Window.FEATURE_OPTIONS_PANEL)) {
+            mWindow.closePanel(Window.FEATURE_OPTIONS_PANEL);
+        }
     }
 
     /**
      * @see Activity#invalidateOptionsMenu()
      */
     public void invalidateOptionsMenu() {
-        mWindow.invalidatePanelMenu(Window.FEATURE_OPTIONS_PANEL);
+        if (mWindow.hasFeature(Window.FEATURE_OPTIONS_PANEL)) {
+            mWindow.invalidatePanelMenu(Window.FEATURE_OPTIONS_PANEL);
+        }
     }
 
     /**
@@ -1106,10 +1141,12 @@ public class Dialog implements DialogInterface, Window.Callback,
 
     /**
      * Set a listener to be invoked when the dialog is canceled.
-     * <p>
-     * This will only be invoked when the dialog is canceled, if the creator
-     * needs to know when it is dismissed in general, use
-     * {@link #setOnDismissListener}.
+     *
+     * <p>This will only be invoked when the dialog is canceled.
+     * Cancel events alone will not capture all ways that
+     * the dialog might be dismissed. If the creator needs
+     * to know when a dialog is dismissed in general, use
+     * {@link #setOnDismissListener}.</p>
      * 
      * @param listener The {@link DialogInterface.OnCancelListener} to use.
      */

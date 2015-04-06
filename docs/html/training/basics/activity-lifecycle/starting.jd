@@ -1,10 +1,8 @@
 page.title=Starting an Activity
-parent.title=Managing the Activity Lifecycle
-parent.link=index.html
+page.tags=activity lifecycle
+helpoutsWidget=true
 
 trainingnavtop=true
-next.title=Pausing and Resuming an Activity
-next.link=pausing.html
 
 @jd:body
 
@@ -220,7 +218,7 @@ public void onCreate(Bundle savedInstanceState) {
 </pre>
 
 <p class="caution"><strong>Caution:</strong> Using the {@link android.os.Build.VERSION#SDK_INT} to
-prevent older system's from executing new APIs works in this way on Android 2.0 (API level
+prevent older systems from executing new APIs works in this way on Android 2.0 (API level
 5) and higher only. Older versions will encounter a runtime exception.</p>
 
 <p>Once the {@link android.app.Activity#onCreate onCreate()} finishes execution, the system
@@ -265,7 +263,7 @@ signal that your activity instance is being completely removed from the system m
 with the activity and your activity should perform most cleanup during {@link
 android.app.Activity#onPause} and {@link android.app.Activity#onStop}. However, if your
 activity includes background threads that you created during {@link
-android.app.Activity#onCreate onCreate()} or other other long-running resources that could
+android.app.Activity#onCreate onCreate()} or other long-running resources that could
 potentially leak memory if not properly closed, you should kill them during  {@link
 android.app.Activity#onDestroy}.</p>
 

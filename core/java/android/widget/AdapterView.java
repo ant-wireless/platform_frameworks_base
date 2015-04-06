@@ -31,7 +31,6 @@ import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityNodeInfo;
-import android.view.accessibility.AccessibilityNodeProvider;
 
 /**
  * An AdapterView is a view whose children are determined by an {@link Adapter}.
@@ -216,7 +215,12 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     private boolean mDesiredFocusableState;
     private boolean mDesiredFocusableInTouchModeState;
 
+    /** Lazily-constructed runnable for dispatching selection events. */
     private SelectionNotifier mSelectionNotifier;
+
+    /** Selection notifier that's waiting for the next layout pass. */
+    private SelectionNotifier mPendingSelectionNotifier;
+
     /**
      * When set to true, calls to requestLayout() will not propagate up the parent hierarchy.
      * This is used to layout the children during a layout pass.
@@ -224,15 +228,19 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     boolean mBlockLayoutRequests = false;
 
     public AdapterView(Context context) {
-        super(context);
+        this(context, null);
     }
 
     public AdapterView(Context context, AttributeSet attrs) {
-        super(context, attrs);
+        this(context, attrs, 0);
     }
 
-    public AdapterView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public AdapterView(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public AdapterView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
 
         // If not explicitly specified this view is important for accessibility.
         if (getImportantForAccessibility() == IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
@@ -281,7 +289,9 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     }
 
     /**
-     * Call the OnItemClickListener, if it is defined.
+     * Call the OnItemClickListener, if it is defined. Performs all normal
+     * actions associated with clicking: reporting accessibility event, playing
+     * a sound, etc.
      *
      * @param view The view within the AdapterView that was clicked.
      * @param position The position of the view in the adapter.
@@ -292,10 +302,10 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     public boolean performItemClick(View view, int position, long id) {
         if (mOnItemClickListener != null) {
             playSoundEffect(SoundEffectConstants.CLICK);
+            mOnItemClickListener.onItemClick(this, view, position, id);
             if (view != null) {
                 view.sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED);
             }
-            mOnItemClickListener.onItemClick(this, view, position, id);
             return true;
         }
 
@@ -662,7 +672,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
 
     /**
      * When the current adapter is empty, the AdapterView can display a special view
-     * call the empty view. The empty view is used to provide feedback to the user
+     * called the empty view. The empty view is used to provide feedback to the user
      * that no data is available in this AdapterView.
      *
      * @return The view to show if the adapter is empty.
@@ -849,37 +859,49 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
 
     private class SelectionNotifier implements Runnable {
         public void run() {
-            if (mDataChanged) {
-                // Data has changed between when this SelectionNotifier
-                // was posted and now. We need to wait until the AdapterView
-                // has been synched to the new data.
+            mPendingSelectionNotifier = null;
+
+            if (mDataChanged && getViewRootImpl() != null
+                    && getViewRootImpl().isLayoutRequested()) {
+                // Data has changed between when this SelectionNotifier was
+                // posted and now. Postpone the notification until the next
+                // layout is complete and we run checkSelectionChanged().
                 if (getAdapter() != null) {
-                    post(this);
+                    mPendingSelectionNotifier = this;
                 }
             } else {
-                fireOnSelected();
-                performAccessibilityActionsOnSelected();
+                dispatchOnItemSelected();
             }
         }
     }
 
     void selectionChanged() {
+        // We're about to post or run the selection notifier, so we don't need
+        // a pending notifier.
+        mPendingSelectionNotifier = null;
+
         if (mOnItemSelectedListener != null
                 || AccessibilityManager.getInstance(mContext).isEnabled()) {
             if (mInLayout || mBlockLayoutRequests) {
                 // If we are in a layout traversal, defer notification
                 // by posting. This ensures that the view tree is
-                // in a consistent state and is able to accomodate
+                // in a consistent state and is able to accommodate
                 // new layout or invalidate requests.
                 if (mSelectionNotifier == null) {
                     mSelectionNotifier = new SelectionNotifier();
+                } else {
+                    removeCallbacks(mSelectionNotifier);
                 }
                 post(mSelectionNotifier);
             } else {
-                fireOnSelected();
-                performAccessibilityActionsOnSelected();
+                dispatchOnItemSelected();
             }
         }
+    }
+
+    private void dispatchOnItemSelected() {
+        fireOnSelected();
+        performAccessibilityActionsOnSelected();
     }
 
     private void fireOnSelected() {
@@ -1034,15 +1056,24 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
             checkSelectionChanged();
         }
 
-        //TODO: Hmm, we do not know the old state so this is sub-optimal
-        notifyAccessibilityStateChanged();
+        notifySubtreeAccessibilityStateChangedIfNeeded();
     }
 
+    /**
+     * Called after layout to determine whether the selection position needs to
+     * be updated. Also used to fire any pending selection events.
+     */
     void checkSelectionChanged() {
         if ((mSelectedPosition != mOldSelectedPosition) || (mSelectedRowId != mOldSelectedRowId)) {
             selectionChanged();
             mOldSelectedPosition = mSelectedPosition;
             mOldSelectedRowId = mSelectedRowId;
+        }
+
+        // If we have a pending selection notification -- and we won't if we
+        // just fired one in selectionChanged() -- run it now.
+        if (mPendingSelectionNotifier != null) {
+            mPendingSelectionNotifier.run();
         }
     }
 

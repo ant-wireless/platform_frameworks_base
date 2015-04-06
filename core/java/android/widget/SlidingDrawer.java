@@ -78,7 +78,12 @@ import android.view.accessibility.AccessibilityNodeInfo;
  * @attr ref android.R.styleable#SlidingDrawer_orientation
  * @attr ref android.R.styleable#SlidingDrawer_allowSingleTap
  * @attr ref android.R.styleable#SlidingDrawer_animateOnClick
+ * 
+ * @deprecated This class is not supported anymore. It is recommended you
+ * base your own implementation on the source code for the Android Open
+ * Source Project if you must use it in your application.
  */
+@Deprecated
 public class SlidingDrawer extends ViewGroup {
     public static final int ORIENTATION_HORIZONTAL = 0;
     public static final int ORIENTATION_VERTICAL = 1;
@@ -187,11 +192,32 @@ public class SlidingDrawer extends ViewGroup {
      *
      * @param context The application's environment.
      * @param attrs The attributes defined in XML.
-     * @param defStyle The style to apply to this widget.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
      */
-    public SlidingDrawer(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
-        TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.SlidingDrawer, defStyle, 0);
+    public SlidingDrawer(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    /**
+     * Creates a new SlidingDrawer from a specified set of attributes defined in XML.
+     *
+     * @param context The application's environment.
+     * @param attrs The attributes defined in XML.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
+     * @param defStyleRes A resource identifier of a style resource that
+     *        supplies default values for the view, used only if
+     *        defStyleAttr is 0 or can not be found in the theme. Can be 0
+     *        to not look for defaults.
+     */
+    public SlidingDrawer(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, R.styleable.SlidingDrawer, defStyleAttr, defStyleRes);
 
         int orientation = a.getInt(R.styleable.SlidingDrawer_orientation, ORIENTATION_VERTICAL);
         mVertical = orientation == ORIENTATION_VERTICAL;

@@ -18,15 +18,17 @@ package android.view;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.CanvasProperty;
 import android.graphics.Paint;
 import android.graphics.Rect;
 
 /**
  * Hardware accelerated canvas.
  *
- * @hide 
+ * @hide
  */
 public abstract class HardwareCanvas extends Canvas {
+
     @Override
     public boolean isHardwareAccelerated() {
         return true;
@@ -36,43 +38,49 @@ public abstract class HardwareCanvas extends Canvas {
     public void setBitmap(Bitmap bitmap) {
         throw new UnsupportedOperationException();
     }
-    
+
     /**
      * Invoked before any drawing operation is performed in this canvas.
-     * 
+     *
      * @param dirty The dirty rectangle to update, can be null.
-     * @return {@link DisplayList#STATUS_DREW} if anything was drawn (such as a call to clear
-     * the canvas).
+     * @return {@link RenderNode#STATUS_DREW} if anything was drawn (such as a call to clear
+     *         the canvas).
+     *
+     * @hide
      */
     public abstract int onPreDraw(Rect dirty);
 
     /**
      * Invoked after all drawing operation have been performed.
+     *
+     * @hide
      */
     public abstract void onPostDraw();
 
     /**
-     * Draws the specified display list onto this canvas.
+     * Draws the specified display list onto this canvas. The display list can only
+     * be drawn if {@link android.view.RenderNode#isValid()} returns true.
      *
-     * @param displayList The display list to replay.
-     * @param dirty The dirty region to redraw in the next pass, matters only
-     *        if this method returns true, can be null.
-     * @param flags Optional flags about drawing, see {@link DisplayList} for
-     *              the possible flags.
-     *
-     * @return One of {@link DisplayList#STATUS_DONE}, {@link DisplayList#STATUS_DRAW}, or
-     *         {@link DisplayList#STATUS_INVOKE}, or'd with {@link DisplayList#STATUS_DREW}
-     *         if anything was drawn.
+     * @param renderNode The RenderNode to replay.
      */
-    public abstract int drawDisplayList(DisplayList displayList, Rect dirty, int flags);
+    public void drawRenderNode(RenderNode renderNode) {
+        drawRenderNode(renderNode, null, RenderNode.FLAG_CLIP_CHILDREN);
+    }
 
     /**
-     * Outputs the specified display list to the log. This method exists for use by
-     * tools to output display lists for selected nodes to the log.
+     * Draws the specified display list onto this canvas.
      *
-     * @param displayList The display list to be logged.
+     * @param renderNode The RenderNode to replay.
+     * @param dirty Ignored, can be null.
+     * @param flags Optional flags about drawing, see {@link RenderNode} for
+     *              the possible flags.
+     *
+     * @return One of {@link RenderNode#STATUS_DONE} or {@link RenderNode#STATUS_DREW}
+     *         if anything was drawn.
+     *
+     * @hide
      */
-    abstract void outputDisplayList(DisplayList displayList);
+    public abstract int drawRenderNode(RenderNode renderNode, Rect dirty, int flags);
 
     /**
      * Draws the specified layer onto this canvas.
@@ -81,6 +89,8 @@ public abstract class HardwareCanvas extends Canvas {
      * @param x The left coordinate of the layer
      * @param y The top coordinate of the layer
      * @param paint The paint used to draw the layer
+     *
+     * @hide
      */
     abstract void drawHardwareLayer(HardwareLayer layer, float x, float y, Paint paint);
 
@@ -90,46 +100,22 @@ public abstract class HardwareCanvas extends Canvas {
      * This function may return true if an invalidation is needed after the call.
      *
      * @param drawGLFunction A native function pointer
-     *                       
-     * @return One of {@link DisplayList#STATUS_DONE}, {@link DisplayList#STATUS_DRAW} or
-     *         {@link DisplayList#STATUS_INVOKE}
+     *
+     * @return {@link RenderNode#STATUS_DONE}
+     *
+     * @hide
      */
-    public int callDrawGLFunction(int drawGLFunction) {
-        // Noop - this is done in the display list recorder subclass
-        return DisplayList.STATUS_DONE;
+    public abstract int callDrawGLFunction2(long drawGLFunction);
+
+    public abstract void drawCircle(CanvasProperty<Float> cx, CanvasProperty<Float> cy,
+            CanvasProperty<Float> radius, CanvasProperty<Paint> paint);
+
+    public abstract void drawRoundRect(CanvasProperty<Float> left, CanvasProperty<Float> top,
+            CanvasProperty<Float> right, CanvasProperty<Float> bottom,
+            CanvasProperty<Float> rx, CanvasProperty<Float> ry,
+            CanvasProperty<Paint> paint);
+
+    public static void setProperty(String name, String value) {
+        GLES20Canvas.setProperty(name, value);
     }
-
-    /**
-     * Invoke all the functors who requested to be invoked during the previous frame.
-     * 
-     * @param dirty The region to redraw when the functors return {@link DisplayList#STATUS_DRAW}
-     *              
-     * @return One of {@link DisplayList#STATUS_DONE}, {@link DisplayList#STATUS_DRAW} or
-     *         {@link DisplayList#STATUS_INVOKE}
-     */
-    public int invokeFunctors(Rect dirty) {
-        return DisplayList.STATUS_DONE;
-    }
-
-    /**
-     * Detaches the specified functor from the current functor execution queue.
-     *
-     * @param functor The native functor to remove from the execution queue.
-     *
-     * @see #invokeFunctors(android.graphics.Rect)
-     * @see #callDrawGLFunction(int)
-     * @see #detachFunctor(int) 
-     */
-    abstract void detachFunctor(int functor);
-
-    /**
-     * Attaches the specified functor to the current functor execution queue.
-     *
-     * @param functor The native functor to add to the execution queue.
-     *
-     * @see #invokeFunctors(android.graphics.Rect)
-     * @see #callDrawGLFunction(int)
-     * @see #detachFunctor(int) 
-     */
-    abstract void attachFunctor(int functor);
 }

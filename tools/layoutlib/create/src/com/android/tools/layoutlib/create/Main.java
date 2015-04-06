@@ -18,6 +18,8 @@ package com.android.tools.layoutlib.create;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,7 +50,6 @@ import java.util.Set;
 public class Main {
 
     public static class Options {
-        public boolean generatePublicAccess = true;
         public boolean listAllDeps = false;
         public boolean listOnlyMissingDeps = false;
     }
@@ -63,7 +64,7 @@ public class Main {
         String[] osDestJar = { null };
 
         if (!processArgs(log, args, osJarPath, osDestJar)) {
-            log.error("Usage: layoutlib_create [-v] [-p] output.jar input.jar ...");
+            log.error("Usage: layoutlib_create [-v] output.jar input.jar ...");
             log.error("Usage: layoutlib_create [-v] [--list-deps|--missing-deps] input.jar ...");
             System.exit(1);
         }
@@ -86,7 +87,9 @@ public class Main {
         }
 
         try {
-            AsmGenerator agen = new AsmGenerator(log, osDestJar, new CreateInfo());
+            CreateInfo info = new CreateInfo();
+            Set<String> excludeClasses = info.getExcludedClasses();
+            AsmGenerator agen = new AsmGenerator(log, osDestJar, info);
 
             AsmAnalyzer aa = new AsmAnalyzer(log, osJarPath, agen,
                     new String[] {                          // derived from
@@ -105,12 +108,21 @@ public class Main {
                         "android.graphics.drawable.*",
                         "android.content.*",
                         "android.content.res.*",
+                        "android.preference.*",
                         "org.apache.harmony.xml.*",
                         "com.android.internal.R**",
                         "android.pim.*", // for datepicker
                         "android.os.*",  // for android.os.Handler
                         "android.database.ContentObserver", // for Digital clock
-                        });
+                        "com.android.i18n.phonenumbers.*",  // for TextView with autolink attribute
+                        "android.app.DatePickerDialog",     // b.android.com/28318
+                        "android.app.TimePickerDialog",     // b.android.com/61515
+                        "com.android.internal.view.menu.ActionMenu",
+                    },
+                    excludeClasses,
+                    new String[] {
+                        "com/android/i18n/phonenumbers/data/*",
+                    });
             aa.analyze();
             agen.generate();
 
@@ -172,12 +184,9 @@ public class Main {
     private static boolean processArgs(Log log, String[] args,
             ArrayList<String> osJarPath, String[] osDestJar) {
         boolean needs_dest = true;
-        for (int i = 0; i < args.length; i++) {
-            String s = args[i];
+        for (String s : args) {
             if (s.equals("-v")) {
                 log.setVerbose(true);
-            } else if (s.equals("-p")) {
-                sOptions.generatePublicAccess = false;
             } else if (s.equals("--list-deps")) {
                 sOptions.listAllDeps = true;
                 needs_dest = false;
@@ -191,7 +200,7 @@ public class Main {
                     osJarPath.add(s);
                 }
             } else {
-                log.error("Unknow argument: %s", s);
+                log.error("Unknown argument: %s", s);
                 return false;
             }
         }
@@ -204,8 +213,6 @@ public class Main {
             log.error("Missing parameter: path to output jar");
             return false;
         }
-
-        sOptions.generatePublicAccess = false;
 
         return true;
     }

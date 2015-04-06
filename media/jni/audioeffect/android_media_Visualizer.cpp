@@ -43,6 +43,8 @@ using namespace android;
 
 // ----------------------------------------------------------------------------
 static const char* const kClassPathName = "android/media/audiofx/Visualizer";
+static const char* const kClassPeakRmsPathName =
+        "android/media/audiofx/Visualizer$MeasurementPeakRms";
 
 struct fields_t {
     // these fields provide access from C++ to the...
@@ -50,6 +52,8 @@ struct fields_t {
     jmethodID midPostNativeEvent;   // event post callback method
     jfieldID  fidNativeVisualizer; // stores in Java the native Visualizer object
     jfieldID  fidJniData;           // stores in Java additional resources used by the native Visualizer
+    jfieldID  fidPeak; // to access Visualizer.MeasurementPeakRms.mPeak
+    jfieldID  fidRms;  // to access Visualizer.MeasurementPeakRms.mRms
 };
 static fields_t fields;
 
@@ -158,23 +162,20 @@ static void captureCallback(void* user,
         uint8_t *fft,
         uint32_t samplingrate) {
 
-    int arg1 = 0;
-    int arg2 = 0;
-    size_t size;
-
     visualizer_callback_cookie *callbackInfo = (visualizer_callback_cookie *)user;
     JNIEnv *env = AndroidRuntime::getJNIEnv();
-    AutoMutex lock(&callbackInfo->callback_data_lock);
+
+    if (!user || !env) {
+        ALOGW("captureCallback error user %p, env %p", user, env);
+        return;
+    }
 
     ALOGV("captureCallback: callbackInfo %p, visualizer_ref %p visualizer_class %p",
             callbackInfo,
             callbackInfo->visualizer_ref,
             callbackInfo->visualizer_class);
 
-    if (!user || !env) {
-        ALOGW("captureCallback error user %p, env %p", user, env);
-        return;
-    }
+    AutoMutex lock(&callbackInfo->callback_data_lock);
 
     if (waveformSize != 0 && waveform != NULL) {
         jbyteArray jArray;
@@ -226,7 +227,7 @@ static void captureCallback(void* user,
 
 static Visualizer *getVisualizer(JNIEnv* env, jobject thiz)
 {
-    Visualizer *v = (Visualizer *)env->GetIntField(
+    Visualizer *v = (Visualizer *)env->GetLongField(
         thiz, fields.fidNativeVisualizer);
     if (v == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
@@ -256,6 +257,14 @@ android_media_visualizer_native_init(JNIEnv *env)
 
     fields.clazzEffect = (jclass)env->NewGlobalRef(clazz);
 
+    // Get the Visualizer.MeasurementPeakRms class
+    clazz = env->FindClass(kClassPeakRmsPathName);
+    if (clazz == NULL) {
+        ALOGE("Can't find %s", kClassPeakRmsPathName);
+        return;
+    }
+    jclass clazzMeasurementPeakRms = (jclass)env->NewGlobalRef(clazz);
+
     // Get the postEvent method
     fields.midPostNativeEvent = env->GetStaticMethodID(
             fields.clazzEffect,
@@ -269,7 +278,7 @@ android_media_visualizer_native_init(JNIEnv *env)
     //      nativeTrackInJavaObj
     fields.fidNativeVisualizer = env->GetFieldID(
             fields.clazzEffect,
-            "mNativeVisualizer", "I");
+            "mNativeVisualizer", "J");
     if (fields.fidNativeVisualizer == NULL) {
         ALOGE("Can't find Visualizer.%s", "mNativeVisualizer");
         return;
@@ -277,12 +286,29 @@ android_media_visualizer_native_init(JNIEnv *env)
     //      fidJniData;
     fields.fidJniData = env->GetFieldID(
             fields.clazzEffect,
-            "mJniData", "I");
+            "mJniData", "J");
     if (fields.fidJniData == NULL) {
         ALOGE("Can't find Visualizer.%s", "mJniData");
         return;
     }
+    //      fidPeak
+    fields.fidPeak = env->GetFieldID(
+            clazzMeasurementPeakRms,
+            "mPeak", "I");
+    if (fields.fidPeak == NULL) {
+        ALOGE("Can't find Visualizer.MeasurementPeakRms.%s", "mPeak");
+        return;
+    }
+    //      fidRms
+    fields.fidRms = env->GetFieldID(
+            clazzMeasurementPeakRms,
+            "mRms", "I");
+    if (fields.fidRms == NULL) {
+        ALOGE("Can't find Visualizer.MeasurementPeakRms.%s", "mPeak");
+        return;
+    }
 
+    env->DeleteGlobalRef(clazzMeasurementPeakRms);
 }
 
 static void android_media_visualizer_effect_callback(int32_t event,
@@ -299,7 +325,7 @@ static void android_media_visualizer_effect_callback(int32_t event,
             fields.midPostNativeEvent,
             callbackInfo->visualizer_ref,
             NATIVE_EVENT_SERVER_DIED,
-            0, 0, 0);
+            0, 0, NULL);
     }
 }
 
@@ -361,9 +387,9 @@ android_media_visualizer_native_setup(JNIEnv *env, jobject thiz, jobject weak_th
     env->ReleasePrimitiveArrayCritical(jId, nId, 0);
     nId = NULL;
 
-    env->SetIntField(thiz, fields.fidNativeVisualizer, (int)lpVisualizer);
+    env->SetLongField(thiz, fields.fidNativeVisualizer, (jlong)lpVisualizer);
 
-    env->SetIntField(thiz, fields.fidJniData, (int)lpJniStorage);
+    env->SetLongField(thiz, fields.fidJniData, (jlong)lpJniStorage);
 
     return VISUALIZER_SUCCESS;
 
@@ -377,33 +403,33 @@ setup_failure:
     if (lpVisualizer) {
         delete lpVisualizer;
     }
-    env->SetIntField(thiz, fields.fidNativeVisualizer, 0);
+    env->SetLongField(thiz, fields.fidNativeVisualizer, 0);
 
     if (lpJniStorage) {
         delete lpJniStorage;
     }
-    env->SetIntField(thiz, fields.fidJniData, 0);
+    env->SetLongField(thiz, fields.fidJniData, 0);
 
-    return lStatus;
+    return (jint) lStatus;
 }
 
 // ----------------------------------------------------------------------------
 static void android_media_visualizer_native_finalize(JNIEnv *env,  jobject thiz) {
-    ALOGV("android_media_visualizer_native_finalize jobject: %x\n", (int)thiz);
+    ALOGV("android_media_visualizer_native_finalize jobject: %p\n", thiz);
 
     // delete the Visualizer object
-    Visualizer* lpVisualizer = (Visualizer *)env->GetIntField(
+    Visualizer* lpVisualizer = (Visualizer *)env->GetLongField(
         thiz, fields.fidNativeVisualizer);
     if (lpVisualizer) {
-        ALOGV("deleting Visualizer: %x\n", (int)lpVisualizer);
+        ALOGV("deleting Visualizer: %p\n", lpVisualizer);
         delete lpVisualizer;
     }
 
     // delete the JNI data
-    visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetIntField(
+    visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetLongField(
         thiz, fields.fidJniData);
     if (lpJniStorage) {
-        ALOGV("deleting pJniStorage: %x\n", (int)lpJniStorage);
+        ALOGV("deleting pJniStorage: %p\n", lpJniStorage);
         delete lpJniStorage;
     }
 }
@@ -415,8 +441,8 @@ static void android_media_visualizer_native_release(JNIEnv *env,  jobject thiz) 
     android_media_visualizer_native_finalize(env, thiz);
     // + reset the native resources in the Java object so any attempt to access
     // them after a call to release fails.
-    env->SetIntField(thiz, fields.fidNativeVisualizer, 0);
-    env->SetIntField(thiz, fields.fidJniData, 0);
+    env->SetLongField(thiz, fields.fidNativeVisualizer, 0);
+    env->SetLongField(thiz, fields.fidJniData, 0);
 }
 
 static jint
@@ -430,7 +456,7 @@ android_media_visualizer_native_setEnabled(JNIEnv *env, jobject thiz, jboolean e
     jint retVal = translateError(lpVisualizer->setEnabled(enabled));
 
     if (!enabled) {
-        visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetIntField(
+        visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetLongField(
             thiz, fields.fidJniData);
 
         if (NULL != lpJniStorage)
@@ -445,14 +471,18 @@ android_media_visualizer_native_getEnabled(JNIEnv *env, jobject thiz)
 {
     Visualizer* lpVisualizer = getVisualizer(env, thiz);
     if (lpVisualizer == NULL) {
-        return false;
+        return JNI_FALSE;
     }
 
-    return (jboolean)lpVisualizer->getEnabled();
+    if (lpVisualizer->getEnabled()) {
+        return JNI_TRUE;
+    } else {
+        return JNI_FALSE;
+    }
 }
 
 static jintArray
-android_media_visualizer_native_getCaptureSizeRange(JNIEnv *env, jobject thiz)
+android_media_visualizer_native_getCaptureSizeRange(JNIEnv *env, jobject /* thiz */)
 {
     jintArray jRange = env->NewIntArray(2);
     jint *nRange = env->GetIntArrayElements(jRange, NULL);
@@ -464,9 +494,9 @@ android_media_visualizer_native_getCaptureSizeRange(JNIEnv *env, jobject thiz)
 }
 
 static jint
-android_media_visualizer_native_getMaxCaptureRate(JNIEnv *env, jobject thiz)
+android_media_visualizer_native_getMaxCaptureRate(JNIEnv* /* env */, jobject /* thiz */)
 {
-    return Visualizer::getMaxCaptureRate();
+    return (jint) Visualizer::getMaxCaptureRate();
 }
 
 static jint
@@ -487,7 +517,7 @@ android_media_visualizer_native_getCaptureSize(JNIEnv *env, jobject thiz)
     if (lpVisualizer == NULL) {
         return -1;
     }
-    return lpVisualizer->getCaptureSize();
+    return (jint) lpVisualizer->getCaptureSize();
 }
 
 static jint
@@ -508,7 +538,27 @@ android_media_visualizer_native_getScalingMode(JNIEnv *env, jobject thiz)
     if (lpVisualizer == NULL) {
         return -1;
     }
-    return lpVisualizer->getScalingMode();
+    return (jint)lpVisualizer->getScalingMode();
+}
+
+static jint
+android_media_visualizer_native_setMeasurementMode(JNIEnv *env, jobject thiz, jint mode)
+{
+    Visualizer* lpVisualizer = getVisualizer(env, thiz);
+    if (lpVisualizer == NULL) {
+        return VISUALIZER_ERROR_NO_INIT;
+    }
+    return translateError(lpVisualizer->setMeasurementMode(mode));
+}
+
+static jint
+android_media_visualizer_native_getMeasurementMode(JNIEnv *env, jobject thiz)
+{
+    Visualizer* lpVisualizer = getVisualizer(env, thiz);
+    if (lpVisualizer == NULL) {
+        return MEASUREMENT_MODE_NONE;
+    }
+    return lpVisualizer->getMeasurementMode();
 }
 
 static jint
@@ -518,7 +568,7 @@ android_media_visualizer_native_getSamplingRate(JNIEnv *env, jobject thiz)
     if (lpVisualizer == NULL) {
         return -1;
     }
-    return lpVisualizer->getSamplingRate();
+    return (jint) lpVisualizer->getSamplingRate();
 }
 
 static jint
@@ -559,13 +609,32 @@ android_media_visualizer_native_getFft(JNIEnv *env, jobject thiz, jbyteArray jFf
 }
 
 static jint
+android_media_visualizer_native_getPeakRms(JNIEnv *env, jobject thiz, jobject jPeakRmsObj)
+{
+    Visualizer* lpVisualizer = getVisualizer(env, thiz);
+    if (lpVisualizer == NULL) {
+        return VISUALIZER_ERROR_NO_INIT;
+    }
+    int32_t measurements[2];
+    jint status = translateError(
+                lpVisualizer->getIntMeasurements(MEASUREMENT_MODE_PEAK_RMS,
+                        2, measurements));
+    if (status == VISUALIZER_SUCCESS) {
+        // measurement worked, write the values to the java object
+        env->SetIntField(jPeakRmsObj, fields.fidPeak, measurements[MEASUREMENT_IDX_PEAK]);
+        env->SetIntField(jPeakRmsObj, fields.fidRms, measurements[MEASUREMENT_IDX_RMS]);
+    }
+    return status;
+}
+
+static jint
 android_media_setPeriodicCapture(JNIEnv *env, jobject thiz, jint rate, jboolean jWaveform, jboolean jFft)
 {
     Visualizer* lpVisualizer = getVisualizer(env, thiz);
     if (lpVisualizer == NULL) {
         return VISUALIZER_ERROR_NO_INIT;
     }
-    visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetIntField(thiz,
+    visualizerJniStorage* lpJniStorage = (visualizerJniStorage *)env->GetLongField(thiz,
             fields.fidJniData);
     if (lpJniStorage == NULL) {
         return VISUALIZER_ERROR_NO_INIT;
@@ -605,9 +674,13 @@ static JNINativeMethod gMethods[] = {
     {"native_getCaptureSize",    "()I",   (void *)android_media_visualizer_native_getCaptureSize},
     {"native_setScalingMode",    "(I)I",  (void *)android_media_visualizer_native_setScalingMode},
     {"native_getScalingMode",    "()I",   (void *)android_media_visualizer_native_getScalingMode},
+    {"native_setMeasurementMode","(I)I",  (void *)android_media_visualizer_native_setMeasurementMode},
+    {"native_getMeasurementMode","()I",   (void *)android_media_visualizer_native_getMeasurementMode},
     {"native_getSamplingRate",   "()I",   (void *)android_media_visualizer_native_getSamplingRate},
     {"native_getWaveForm",       "([B)I", (void *)android_media_visualizer_native_getWaveForm},
     {"native_getFft",            "([B)I", (void *)android_media_visualizer_native_getFft},
+    {"native_getPeakRms",      "(Landroid/media/audiofx/Visualizer$MeasurementPeakRms;)I",
+                                          (void *)android_media_visualizer_native_getPeakRms},
     {"native_setPeriodicCapture","(IZZ)I",(void *)android_media_setPeriodicCapture},
 };
 

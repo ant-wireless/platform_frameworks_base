@@ -25,7 +25,8 @@ import java.util.Set;
  * there is a single instance of this class that all clients share.
  * Modifications to the preferences must go through an {@link Editor} object
  * to ensure the preference values remain in a consistent state and control
- * when they are committed to storage.
+ * when they are committed to storage.  Objects that are returned from the
+ * various <code>get</code> methods must be treated as immutable by the application.
  *
  * <p><em>Note: currently this class does not support use across multiple
  * processes.  This will be added later.</em>
@@ -79,10 +80,12 @@ public interface SharedPreferences {
         
         /**
          * Set a set of String values in the preferences editor, to be written
-         * back once {@link #commit} is called.
+         * back once {@link #commit} or {@link #apply} is called.
          * 
          * @param key The name of the preference to modify.
-         * @param values The new values for the preference.
+         * @param values The set of new values for the preference.  Passing {@code null}
+         *    for this argument is equivalent to calling {@link #remove(String)} with
+         *    this key.
          * @return Returns a reference to the same Editor object, so you can
          * chain put calls together.
          */
@@ -226,6 +229,10 @@ public interface SharedPreferences {
     /**
      * Retrieve all values from the preferences.
      *
+     * <p>Note that you <em>must not</em> modify the collection returned
+     * by this method, or alter any of its contents.  The consistency of your
+     * stored data is not guaranteed if you do.
+     *
      * @return Returns a map containing a list of pairs key/value representing
      * the preferences.
      *
@@ -250,6 +257,10 @@ public interface SharedPreferences {
     /**
      * Retrieve a set of String values from the preferences.
      * 
+     * <p>Note that you <em>must not</em> modify the set instance returned
+     * by this call.  The consistency of the stored data is not guaranteed
+     * if you do, nor is your ability to modify the instance at all.
+     *
      * @param key The name of the preference to retrieve.
      * @param defValues Values to return if this preference does not exist.
      * 
@@ -342,7 +353,14 @@ public interface SharedPreferences {
     
     /**
      * Registers a callback to be invoked when a change happens to a preference.
-     * 
+     *
+     * <p class="caution"><strong>Caution:</strong> The preference manager does
+     * not currently store a strong reference to the listener. You must store a
+     * strong reference to the listener, or it will be susceptible to garbage
+     * collection. We recommend you keep a reference to the listener in the
+     * instance data of an object that will exist as long as you need the
+     * listener.</p>
+     *
      * @param listener The callback that will run.
      * @see #unregisterOnSharedPreferenceChangeListener
      */

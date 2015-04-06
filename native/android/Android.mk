@@ -17,8 +17,10 @@ LOCAL_SRC_FILES:= \
     storage_manager.cpp
 
 LOCAL_SHARED_LIBRARIES := \
+    liblog \
     libcutils \
     libandroidfw \
+    libinput \
     libutils \
     libbinder \
     libui \
@@ -32,6 +34,8 @@ LOCAL_C_INCLUDES += \
     frameworks/base/native/include \
     frameworks/base/core/jni/android
 
-LOCAL_MODULE:= libandroid
+LOCAL_MODULE := libandroid
+
+LOCAL_CFLAGS += -Wall -Werror -Wunused -Wunreachable-code
 
 include $(BUILD_SHARED_LIBRARY)

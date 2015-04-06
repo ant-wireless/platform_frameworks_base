@@ -192,7 +192,7 @@ import java.io.PrintWriter;
  * When running low on memory and needing to kill existing processes, the
  * priority of a process hosting the service will be the higher of the
  * following possibilities:
- * 
+ *
  * <ul>
  * <li><p>If the service is currently executing code in its
  * {@link #onCreate onCreate()}, {@link #onStartCommand onStartCommand()},
@@ -203,11 +203,19 @@ import java.io.PrintWriter;
  * to be less important than any processes that are currently visible to the
  * user on-screen, but more important than any process not visible.  Because
  * only a few processes are generally visible to the user, this means that
- * the service should not be killed except in extreme low memory conditions.
+ * the service should not be killed except in low memory conditions.  However, since
+ * the user is not directly aware of a background service, in that state it <em>is</em>
+ * considered a valid candidate to kill, and you should be prepared for this to
+ * happen.  In particular, long-running services will be increasingly likely to
+ * kill and are guaranteed to be killed (and restarted if appropriate) if they
+ * remain started long enough.
  * <li><p>If there are clients bound to the service, then the service's hosting
  * process is never less important than the most important client.  That is,
  * if one of its clients is visible to the user, then the service itself is
- * considered to be visible.
+ * considered to be visible.  The way a client's importance impacts the service's
+ * importance can be adjusted through {@link Context#BIND_ABOVE_CLIENT},
+ * {@link Context#BIND_ALLOW_OOM_MANAGEMENT}, {@link Context#BIND_WAIVE_PRIORITY},
+ * {@link Context#BIND_IMPORTANT}, and {@link Context#BIND_ADJUST_WITH_ACTIVITY}.
  * <li><p>A started service can use the {@link #startForeground(int, Notification)}
  * API to put the service in a foreground state, where the system considers
  * it to be something the user is actively aware of and thus not a candidate
@@ -401,7 +409,7 @@ public abstract class Service extends ContextWrapper implements ComponentCallbac
     
     /**
      * This flag is set in {@link #onStartCommand} if the Intent is a
-     * a retry because the original attempt never got to or returned from
+     * retry because the original attempt never got to or returned from
      * {@link #onStartCommand(Intent, int, int)}.
      */
     public static final int START_FLAG_RETRY = 0x0002;
@@ -633,7 +641,7 @@ public abstract class Service extends ContextWrapper implements ComponentCallbac
      * 
      * @param id The identifier for this notification as per
      * {@link NotificationManager#notify(int, Notification)
-     * NotificationManager.notify(int, Notification)}.
+     * NotificationManager.notify(int, Notification)}; must not be 0.
      * @param notification The Notification to be displayed.
      * 
      * @see #stopForeground(boolean)
@@ -666,7 +674,9 @@ public abstract class Service extends ContextWrapper implements ComponentCallbac
     
     /**
      * Print the Service's state into the given stream.  This gets invoked if
-     * you run "adb shell dumpsys activity service &lt;yourservicename&gt;".
+     * you run "adb shell dumpsys activity service &lt;yourservicename&gt;"
+     * (note that for this command to work, the service must be running, and
+     * you must specify a fully-qualified service name).
      * This is distinct from "dumpsys &lt;servicename&gt;", which only works for
      * named system services and which invokes the {@link IBinder#dump} method
      * on the {@link IBinder} interface registered with ServiceManager.

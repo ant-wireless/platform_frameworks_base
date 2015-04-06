@@ -21,8 +21,10 @@ import java.io.IOException;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 
+import android.annotation.NonNull;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
+import android.content.res.Resources.Theme;
 import android.util.AttributeSet;
 
 /**
@@ -56,7 +58,7 @@ import android.util.AttributeSet;
  * @attr ref android.R.styleable#LevelListDrawableItem_drawable
  */
 public class LevelListDrawable extends DrawableContainer {
-    private final LevelListState mLevelListState;
+    private LevelListState mLevelListState;
     private boolean mMutated;
 
     public LevelListDrawable() {
@@ -83,10 +85,9 @@ public class LevelListDrawable extends DrawableContainer {
     }
 
     @Override
-    public void inflate(Resources r, XmlPullParser parser, AttributeSet attrs)
+    public void inflate(Resources r, XmlPullParser parser, AttributeSet attrs, Theme theme)
             throws XmlPullParserException, IOException {
-
-        super.inflate(r, parser, attrs);
+        super.inflate(r, parser, attrs, theme);
 
         int type;
 
@@ -105,7 +106,7 @@ public class LevelListDrawable extends DrawableContainer {
                 continue;
             }
 
-            TypedArray a = r.obtainAttributes(attrs,
+            TypedArray a = obtainAttributes(r, theme, attrs,
                     com.android.internal.R.styleable.LevelListDrawableItem);
 
             low = a.getInt(
@@ -124,7 +125,7 @@ public class LevelListDrawable extends DrawableContainer {
 
             Drawable dr;
             if (drawableRes != 0) {
-                dr = r.getDrawable(drawableRes);
+                dr = r.getDrawable(drawableRes, theme);
             } else {
                 while ((type = parser.next()) == XmlPullParser.TEXT) {
                 }
@@ -134,7 +135,7 @@ public class LevelListDrawable extends DrawableContainer {
                                     + ": <item> tag requires a 'drawable' attribute or "
                                     + "child tag defining a drawable");
                 }
-                dr = Drawable.createFromXmlInner(r, parser, attrs);
+                dr = Drawable.createFromXmlInner(r, parser, attrs, theme);
             }
 
             mLevelListState.addLevel(low, high, dr);
@@ -146,11 +147,23 @@ public class LevelListDrawable extends DrawableContainer {
     @Override
     public Drawable mutate() {
         if (!mMutated && super.mutate() == this) {
-            mLevelListState.mLows = mLevelListState.mLows.clone();
-            mLevelListState.mHighs = mLevelListState.mHighs.clone();
+            mLevelListState.mutate();
             mMutated = true;
         }
         return this;
+    }
+
+    @Override
+    LevelListState cloneConstantState() {
+        return new LevelListState(mLevelListState, this, null);
+    }
+
+    /**
+     * @hide
+     */
+    public void clearMutated() {
+        super.clearMutated();
+        mMutated = false;
     }
 
     private final static class LevelListState extends DrawableContainerState {
@@ -161,12 +174,18 @@ public class LevelListDrawable extends DrawableContainer {
             super(orig, owner, res);
 
             if (orig != null) {
+                // Perform a shallow copy and rely on mutate() to deep-copy.
                 mLows = orig.mLows;
                 mHighs = orig.mHighs;
             } else {
-                mLows = new int[getChildren().length];
-                mHighs = new int[getChildren().length];
+                mLows = new int[getCapacity()];
+                mHighs = new int[getCapacity()];
             }
+        }
+
+        private void mutate() {
+            mLows = mLows.clone();
+            mHighs = mHighs.clone();
         }
 
         public void addLevel(int low, int high, Drawable drawable) {
@@ -209,9 +228,17 @@ public class LevelListDrawable extends DrawableContainer {
         }
     }
 
+    @Override
+    protected void setConstantState(@NonNull DrawableContainerState state) {
+        super.setConstantState(state);
+
+        if (state instanceof LevelListState) {
+            mLevelListState = (LevelListState) state;
+        }
+    }
+
     private LevelListDrawable(LevelListState state, Resources res) {
-        LevelListState as = new LevelListState(state, this, res);
-        mLevelListState = as;
+        final LevelListState as = new LevelListState(state, this, res);
         setConstantState(as);
         onLevelChange(getLevel());
     }

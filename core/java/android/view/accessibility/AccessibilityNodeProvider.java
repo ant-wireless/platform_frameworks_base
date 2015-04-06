@@ -70,9 +70,14 @@ import java.util.List;
 public abstract class AccessibilityNodeProvider {
 
     /**
+     * The virtual id for the hosting View.
+     */
+    public static final int HOST_VIEW_ID = -1;
+
+    /**
      * Returns an {@link AccessibilityNodeInfo} representing a virtual view,
      * i.e. a descendant of the host View, with the given <code>virtualViewId</code>
-     * or the host View itself if <code>virtualViewId</code> equals to {@link View#NO_ID}.
+     * or the host View itself if <code>virtualViewId</code> equals to {@link #HOST_VIEW_ID}.
      * <p>
      * A virtual descendant is an imaginary View that is reported as a part of the view
      * hierarchy for accessibility purposes. This enables custom views that draw complex
@@ -99,7 +104,7 @@ public abstract class AccessibilityNodeProvider {
     /**
      * Performs an accessibility action on a virtual view, i.e. a descendant of the
      * host View, with the given <code>virtualViewId</code> or the host View itself
-     * if <code>virtualViewId</code> equals to {@link View#NO_ID}.
+     * if <code>virtualViewId</code> equals to {@link #HOST_VIEW_ID}.
      *
      * @param virtualViewId A client defined virtual view id.
      * @param action The action to perform.
@@ -117,8 +122,8 @@ public abstract class AccessibilityNodeProvider {
     /**
      * Finds {@link AccessibilityNodeInfo}s by text. The match is case insensitive
      * containment. The search is relative to the virtual view, i.e. a descendant of the
-     * host View, with the given <code>virtualViewId</code> or the host View itself 
-     * <code>virtualViewId</code> equals to {@link View#NO_ID}.
+     * host View, with the given <code>virtualViewId</code> or the host View itself
+     * <code>virtualViewId</code> equals to {@link #HOST_VIEW_ID}.
      *
      * @param virtualViewId A client defined virtual view id which defined
      *     the root of the tree in which to perform the search.
@@ -134,58 +139,17 @@ public abstract class AccessibilityNodeProvider {
     }
 
     /**
-     * Finds the accessibility focused {@link AccessibilityNodeInfo}. The search is
-     * relative to the virtual view, i.e. a descendant of the host View, with the
-     * given <code>virtualViewId</code> or the host View itself
-     * <code>virtualViewId</code> equals to {@link View#NO_ID}.
+     * Find the virtual view, i.e. a descendant of the host View, that has the
+     * specified focus type.
      *
-     * <strong>Note:</strong> Normally the system is responsible to transparently find
-     *     accessibility focused view starting from a given root but for virtual view
-     *     hierarchies it is a responsibility of this provider's implementor to find
-     *     the accessibility focused virtual view.
-     *
-     * @param virtualViewId A client defined virtual view id which defined
-     *     the root of the tree in which to perform the search.
-     * @return A list of node info.
-     *
-     * @see #createAccessibilityNodeInfo(int)
-     * @see AccessibilityNodeInfo
-     *
-     * @hide
+     * @param focus The focus to find. One of
+     *            {@link AccessibilityNodeInfo#FOCUS_INPUT} or
+     *            {@link AccessibilityNodeInfo#FOCUS_ACCESSIBILITY}.
+     * @return The node info of the focused view or null.
+     * @see AccessibilityNodeInfo#FOCUS_INPUT
+     * @see AccessibilityNodeInfo#FOCUS_ACCESSIBILITY
      */
-    public AccessibilityNodeInfo findAccessibilityFocus(int virtualViewId) {
-        return null;
-    }
-
-    /**
-     * Finds {@link AccessibilityNodeInfo} to take accessibility focus in the given
-     * <code>direction</code>. The search is relative to the virtual view, i.e. a
-     * descendant of the host View, with the given <code>virtualViewId</code> or
-     * the host View itself <code>virtualViewId</code> equals to {@link View#NO_ID}.
-     *
-     * <strong>Note:</strong> Normally the system is responsible to transparently find
-     *     the next view to take accessibility focus but for virtual view hierarchies
-     *     it is a responsibility of this provider's implementor to compute the next
-     *     focusable.
-     *
-     * @param direction The direction in which to search for a focus candidate.
-     *     Values are
-     *     {@link View#ACCESSIBILITY_FOCUS_FORWARD},
-     *     {@link View#ACCESSIBILITY_FOCUS_BACKWARD},
-     *     {@link View#ACCESSIBILITY_FOCUS_UP},
-     *     {@link View#ACCESSIBILITY_FOCUS_DOWN},
-     *     {@link View#ACCESSIBILITY_FOCUS_LEFT},
-     *     {@link View#ACCESSIBILITY_FOCUS_RIGHT}.
-     * @param virtualViewId A client defined virtual view id which defined
-     *     the root of the tree in which to perform the search.
-     * @return A list of node info.
-     *
-     * @see #createAccessibilityNodeInfo(int)
-     * @see AccessibilityNodeInfo
-     *
-     * @hide
-     */
-    public AccessibilityNodeInfo accessibilityFocusSearch(int direction, int virtualViewId) {
+    public AccessibilityNodeInfo findFocus(int focus) {
         return null;
     }
 }

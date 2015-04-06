@@ -39,31 +39,26 @@ import com.android.internal.R;
  * <p>
  * Here is how to use the action provider with custom backing file in a {@link MenuItem}:
  * </p>
- * <p>
  * <pre>
- * <code>
- *  // In Activity#onCreateOptionsMenu
- *  public boolean onCreateOptionsMenu(Menu menu) {
- *      // Get the menu item.
- *      MenuItem menuItem = menu.findItem(R.id.my_menu_item);
- *      // Get the provider and hold onto it to set/change the share intent.
- *      mShareActionProvider = (ShareActionProvider) menuItem.getActionProvider();
- *      // Set history different from the default before getting the action
- *      // view since a call to {@link MenuItem#getActionView() MenuItem.getActionView()} calls
- *      // {@link ActionProvider#onCreateActionView()} which uses the backing file name. Omit this
- *      // line if using the default share history file is desired.
- *      mShareActionProvider.setShareHistoryFileName("custom_share_history.xml");
- *      . . .
- *  }
+ * // In Activity#onCreateOptionsMenu
+ * public boolean onCreateOptionsMenu(Menu menu) {
+ *     // Get the menu item.
+ *     MenuItem menuItem = menu.findItem(R.id.my_menu_item);
+ *     // Get the provider and hold onto it to set/change the share intent.
+ *     mShareActionProvider = (ShareActionProvider) menuItem.getActionProvider();
+ *     // Set history different from the default before getting the action
+ *     // view since a call to {@link MenuItem#getActionView() MenuItem.getActionView()} calls
+ *     // {@link ActionProvider#onCreateActionView()} which uses the backing file name. Omit this
+ *     // line if using the default share history file is desired.
+ *     mShareActionProvider.setShareHistoryFileName("custom_share_history.xml");
+ *     . . .
+ * }
  *
- *  // Somewhere in the application.
- *  public void doShare(Intent shareIntent) {
- *      // When you want to share set the share intent.
- *      mShareActionProvider.setShareIntent(shareIntent);
- *  }
- * </pre>
- * </code>
- * </p>
+ * // Somewhere in the application.
+ * public void doShare(Intent shareIntent) {
+ *     // When you want to share set the share intent.
+ *     mShareActionProvider.setShareIntent(shareIntent);
+ * }</pre>
  * <p>
  * <strong>Note:</strong> While the sample snippet demonstrates how to use this provider
  * in the context of a menu item, the use of the provider is not limited to menu items.
@@ -166,14 +161,16 @@ public class ShareActionProvider extends ActionProvider {
     @Override
     public View onCreateActionView() {
         // Create the view and set its data model.
-        ActivityChooserModel dataModel = ActivityChooserModel.get(mContext, mShareHistoryFileName);
         ActivityChooserView activityChooserView = new ActivityChooserView(mContext);
-        activityChooserView.setActivityChooserModel(dataModel);
+        if (!activityChooserView.isInEditMode()) {
+            ActivityChooserModel dataModel = ActivityChooserModel.get(mContext, mShareHistoryFileName);
+            activityChooserView.setActivityChooserModel(dataModel);
+        }
 
         // Lookup and set the expand action icon.
         TypedValue outTypedValue = new TypedValue();
         mContext.getTheme().resolveAttribute(R.attr.actionModeShareDrawable, outTypedValue, true);
-        Drawable drawable = mContext.getResources().getDrawable(outTypedValue.resourceId);
+        Drawable drawable = mContext.getDrawable(outTypedValue.resourceId);
         activityChooserView.setExpandActivityOverflowButtonDrawable(drawable);
         activityChooserView.setProvider(this);
 
@@ -245,9 +242,9 @@ public class ShareActionProvider extends ActionProvider {
      * call {@link android.app.Activity#invalidateOptionsMenu()} to recreate the
      * action view. You should <strong>not</strong> call
      * {@link android.app.Activity#invalidateOptionsMenu()} from
-     * {@link android.app.Activity#onCreateOptionsMenu(Menu)}."
-     * <p>
-     * <code>
+     * {@link android.app.Activity#onCreateOptionsMenu(Menu)}.
+     * </p>
+     * <pre>
      * private void doShare(Intent intent) {
      *     if (IMAGE.equals(intent.getMimeType())) {
      *         mShareActionProvider.setHistoryFileName(SHARE_IMAGE_HISTORY_FILE_NAME);
@@ -256,9 +253,7 @@ public class ShareActionProvider extends ActionProvider {
      *     }
      *     mShareActionProvider.setIntent(intent);
      *     invalidateOptionsMenu();
-     * }
-     * <code>
-     *
+     * }</pre>
      * @param shareHistoryFile The share history file name.
      */
     public void setShareHistoryFileName(String shareHistoryFile) {
@@ -269,16 +264,11 @@ public class ShareActionProvider extends ActionProvider {
     /**
      * Sets an intent with information about the share action. Here is a
      * sample for constructing a share intent:
-     * <p>
      * <pre>
-     * <code>
-     *  Intent shareIntent = new Intent(Intent.ACTION_SEND);
-     *  shareIntent.setType("image/*");
-     *  Uri uri = Uri.fromFile(new File(getFilesDir(), "foo.jpg"));
-     *  shareIntent.putExtra(Intent.EXTRA_STREAM, uri.toString());
-     * </pre>
-     * </code>
-     * </p>
+     * Intent shareIntent = new Intent(Intent.ACTION_SEND);
+     * shareIntent.setType("image/*");
+     * Uri uri = Uri.fromFile(new File(getFilesDir(), "foo.jpg"));
+     * shareIntent.putExtra(Intent.EXTRA_STREAM, uri));</pre>
      *
      * @param shareIntent The share intent.
      *
@@ -286,6 +276,13 @@ public class ShareActionProvider extends ActionProvider {
      * @see Intent#ACTION_SEND_MULTIPLE
      */
     public void setShareIntent(Intent shareIntent) {
+        if (shareIntent != null) {
+            final String action = shareIntent.getAction();
+            if (Intent.ACTION_SEND.equals(action) || Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+                shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT |
+                        Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            }
+        }
         ActivityChooserModel dataModel = ActivityChooserModel.get(mContext,
             mShareHistoryFileName);
         dataModel.setIntent(shareIntent);
@@ -302,7 +299,12 @@ public class ShareActionProvider extends ActionProvider {
             final int itemId = item.getItemId();
             Intent launchIntent = dataModel.chooseActivity(itemId);
             if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
+                final String action = launchIntent.getAction();
+                if (Intent.ACTION_SEND.equals(action) ||
+                        Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT |
+                            Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                }
                 mContext.startActivity(launchIntent);
             }
             return true;
@@ -318,7 +320,7 @@ public class ShareActionProvider extends ActionProvider {
             return;
         }
         if (mOnChooseActivityListener == null) {
-            mOnChooseActivityListener = new ShareAcitivityChooserModelPolicy();
+            mOnChooseActivityListener = new ShareActivityChooserModelPolicy();
         }
         ActivityChooserModel dataModel = ActivityChooserModel.get(mContext, mShareHistoryFileName);
         dataModel.setOnChooseActivityListener(mOnChooseActivityListener);
@@ -327,7 +329,7 @@ public class ShareActionProvider extends ActionProvider {
     /**
      * Policy that delegates to the {@link OnShareTargetSelectedListener}, if such.
      */
-    private class ShareAcitivityChooserModelPolicy implements OnChooseActivityListener {
+    private class ShareActivityChooserModelPolicy implements OnChooseActivityListener {
         @Override
         public boolean onChooseActivity(ActivityChooserModel host, Intent intent) {
             if (mOnShareTargetSelectedListener != null) {

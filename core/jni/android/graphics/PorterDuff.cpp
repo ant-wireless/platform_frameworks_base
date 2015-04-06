@@ -22,7 +22,7 @@
 
 #include "jni.h"
 #include "GraphicsJNI.h"
-#include <android_runtime/AndroidRuntime.h>
+#include "core_jni_helpers.h"
 
 #include "SkPorterDuff.h"
 
@@ -31,22 +31,19 @@ namespace android {
 class SkPorterDuffGlue {
 public:
 
-    static SkXfermode* CreateXfermode(JNIEnv* env, jobject,
-                                      SkPorterDuff::Mode mode) {
-        return SkPorterDuff::CreateXfermode(mode);
+    static jlong CreateXfermode(JNIEnv* env, jobject, jint modeHandle) {
+        SkPorterDuff::Mode mode = static_cast<SkPorterDuff::Mode>(modeHandle);
+        return reinterpret_cast<jlong>(SkPorterDuff::CreateXfermode(mode));
     }
  
 };
 
 static JNINativeMethod methods[] = {
-    {"nativeCreateXfermode","(I)I", (void*) SkPorterDuffGlue::CreateXfermode},
+    {"nativeCreateXfermode","(I)J", (void*) SkPorterDuffGlue::CreateXfermode},
 };
 
 int register_android_graphics_PorterDuff(JNIEnv* env) {
-    int result = AndroidRuntime::registerNativeMethods(env,
-                                "android/graphics/PorterDuffXfermode", methods,
-                                        sizeof(methods) / sizeof(methods[0]));
-    return result;
+    return RegisterMethodsOrDie(env, "android/graphics/PorterDuffXfermode", methods, NELEM(methods));
 }
 
 }

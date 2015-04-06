@@ -19,6 +19,7 @@ package android.animation;
 import android.animation.Keyframe.FloatKeyframe;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /**
  * This class holds a collection of FloatKeyframe objects and is called by ValueAnimator to calculate
@@ -30,7 +31,7 @@ import java.util.ArrayList;
  * TypeEvaluator set for the animation, so that values can be calculated without autoboxing to the
  * Object equivalents of these primitive types.</p>
  */
-class FloatKeyframeSet extends KeyframeSet {
+class FloatKeyframeSet extends KeyframeSet implements Keyframes.FloatKeyframes {
     private float firstValue;
     private float lastValue;
     private float deltaValue;
@@ -47,8 +48,8 @@ class FloatKeyframeSet extends KeyframeSet {
 
     @Override
     public FloatKeyframeSet clone() {
-        ArrayList<Keyframe> keyframes = mKeyframes;
-        int numKeyframes = mKeyframes.size();
+        final List<Keyframe> keyframes = mKeyframes;
+        final int numKeyframes = mKeyframes.size();
         FloatKeyframe[] newKeyframes = new FloatKeyframe[numKeyframes];
         for (int i = 0; i < numKeyframes; ++i) {
             newKeyframes[i] = (FloatKeyframe) keyframes.get(i).clone();
@@ -57,6 +58,12 @@ class FloatKeyframeSet extends KeyframeSet {
         return newSet;
     }
 
+    @Override
+    public void invalidateCache() {
+        firstTime = true;
+    }
+
+    @Override
     public float getFloatValue(float fraction) {
         if (mNumKeyframes == 2) {
             if (firstTime) {
@@ -130,5 +137,9 @@ class FloatKeyframeSet extends KeyframeSet {
         return ((Number)mKeyframes.get(mNumKeyframes - 1).getValue()).floatValue();
     }
 
+    @Override
+    public Class getType() {
+        return Float.class;
+    }
 }
 

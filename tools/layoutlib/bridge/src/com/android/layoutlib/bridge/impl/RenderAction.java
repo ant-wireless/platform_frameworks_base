@@ -20,15 +20,17 @@ import static com.android.ide.common.rendering.api.Result.Status.ERROR_LOCK_INTE
 import static com.android.ide.common.rendering.api.Result.Status.ERROR_TIMEOUT;
 import static com.android.ide.common.rendering.api.Result.Status.SUCCESS;
 
+import com.android.ide.common.rendering.api.HardwareConfig;
 import com.android.ide.common.rendering.api.LayoutLog;
 import com.android.ide.common.rendering.api.RenderParams;
 import com.android.ide.common.rendering.api.RenderResources;
-import com.android.ide.common.rendering.api.Result;
 import com.android.ide.common.rendering.api.RenderResources.FrameworkResourceIdProvider;
+import com.android.ide.common.rendering.api.Result;
 import com.android.layoutlib.bridge.Bridge;
 import com.android.layoutlib.bridge.android.BridgeContext;
 import com.android.resources.Density;
 import com.android.resources.ResourceType;
+import com.android.resources.ScreenOrientation;
 import com.android.resources.ScreenSize;
 
 import android.content.res.Configuration;
@@ -98,25 +100,29 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
             return result;
         }
 
+        HardwareConfig hardwareConfig = mParams.getHardwareConfig();
+
         // setup the display Metrics.
         DisplayMetrics metrics = new DisplayMetrics();
-        metrics.densityDpi = mParams.getDensity().getDpiValue();
+        metrics.densityDpi = metrics.noncompatDensityDpi =
+                hardwareConfig.getDensity().getDpiValue();
 
         metrics.density = metrics.noncompatDensity =
                 metrics.densityDpi / (float) DisplayMetrics.DENSITY_DEFAULT;
 
         metrics.scaledDensity = metrics.noncompatScaledDensity = metrics.density;
 
-        metrics.widthPixels = metrics.noncompatWidthPixels = mParams.getScreenWidth();
-        metrics.heightPixels = metrics.noncompatHeightPixels = mParams.getScreenHeight();
-        metrics.xdpi = metrics.noncompatXdpi = mParams.getXdpi();
-        metrics.ydpi = metrics.noncompatYdpi = mParams.getYdpi();
+        metrics.widthPixels = metrics.noncompatWidthPixels = hardwareConfig.getScreenWidth();
+        metrics.heightPixels = metrics.noncompatHeightPixels = hardwareConfig.getScreenHeight();
+        metrics.xdpi = metrics.noncompatXdpi = hardwareConfig.getXdpi();
+        metrics.ydpi = metrics.noncompatYdpi = hardwareConfig.getYdpi();
 
         RenderResources resources = mParams.getResources();
 
         // build the context
         mContext = new BridgeContext(mParams.getProjectKey(), metrics, resources,
-                mParams.getProjectCallback(), getConfiguration(), mParams.getTargetSdkVersion());
+                mParams.getProjectCallback(), getConfiguration(), mParams.getTargetSdkVersion(),
+                mParams.isRtlSupported());
 
         setUp();
 
@@ -228,7 +234,7 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
         sCurrentContext = mContext;
 
         // create an InputMethodManager
-        InputMethodManager.getInstance(Looper.myLooper());
+        InputMethodManager.getInstance();
 
         LayoutLog currentLog = mParams.getLog();
         Bridge.setLog(currentLog);
@@ -242,11 +248,16 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
      * The counterpart is {@link #setUp()}.
      */
     private void tearDown() {
-        // Make sure to remove static references, otherwise we could not unload the lib
-        mContext.disposeResources();
+        // The context may be null, if there was an error during init().
+        if (mContext != null) {
+            // Make sure to remove static references, otherwise we could not unload the lib
+            mContext.disposeResources();
+        }
 
-        // quit HandlerThread created during this session.
-        HandlerThread_Delegate.cleanUp(sCurrentContext);
+        if (sCurrentContext != null) {
+            // quit HandlerThread created during this session.
+            HandlerThread_Delegate.cleanUp(sCurrentContext);
+        }
 
         // clear the stored ViewConfiguration since the map is per density and not per context.
         ViewConfiguration_Accessor.clearConfigurations();
@@ -257,8 +268,11 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
         sCurrentContext = null;
 
         Bridge.setLog(null);
-        mContext.getRenderResources().setFrameworkResourceIdProvider(null);
-        mContext.getRenderResources().setLogger(null);
+        if (mContext != null) {
+            mContext.getRenderResources().setFrameworkResourceIdProvider(null);
+            mContext.getRenderResources().setLogger(null);
+        }
+
     }
 
     public static BridgeContext getCurrentContext() {
@@ -305,7 +319,9 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
     private Configuration getConfiguration() {
         Configuration config = new Configuration();
 
-        ScreenSize screenSize = mParams.getConfigScreenSize();
+        HardwareConfig hardwareConfig = mParams.getHardwareConfig();
+
+        ScreenSize screenSize = hardwareConfig.getScreenSize();
         if (screenSize != null) {
             switch (screenSize) {
                 case SMALL:
@@ -323,22 +339,40 @@ public abstract class RenderAction<T extends RenderParams> extends FrameworkReso
             }
         }
 
-        Density density = mParams.getDensity();
+        Density density = hardwareConfig.getDensity();
         if (density == null) {
             density = Density.MEDIUM;
         }
 
-        config.screenWidthDp = mParams.getScreenWidth() / density.getDpiValue();
-        config.screenHeightDp = mParams.getScreenHeight() / density.getDpiValue();
+        config.screenWidthDp = hardwareConfig.getScreenWidth() / density.getDpiValue();
+        config.screenHeightDp = hardwareConfig.getScreenHeight() / density.getDpiValue();
         if (config.screenHeightDp < config.screenWidthDp) {
             config.smallestScreenWidthDp = config.screenHeightDp;
         } else {
             config.smallestScreenWidthDp = config.screenWidthDp;
         }
+        config.densityDpi = density.getDpiValue();
 
         // never run in compat mode:
         config.compatScreenWidthDp = config.screenWidthDp;
         config.compatScreenHeightDp = config.screenHeightDp;
+
+        ScreenOrientation orientation = hardwareConfig.getOrientation();
+        if (orientation != null) {
+            switch (orientation) {
+            case PORTRAIT:
+                config.orientation = Configuration.ORIENTATION_PORTRAIT;
+                break;
+            case LANDSCAPE:
+                config.orientation = Configuration.ORIENTATION_LANDSCAPE;
+                break;
+            case SQUARE:
+                config.orientation = Configuration.ORIENTATION_SQUARE;
+                break;
+            }
+        } else {
+            config.orientation = Configuration.ORIENTATION_UNDEFINED;
+        }
 
         // TODO: fill in more config info.
 

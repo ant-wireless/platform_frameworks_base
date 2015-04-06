@@ -4,6 +4,8 @@
 #include <ui/PixelFormat.h>
 #include <hardware/hardware.h>
 
+#include "core_jni_helpers.h"
+
 #include <jni.h>
 
 YuvToJpegEncoder* YuvToJpegEncoder::create(int format, int* strides) {
@@ -90,8 +92,9 @@ void Yuv420SpToJpegEncoder::compress(jpeg_compress_struct* cinfo,
     // process 16 lines of Y and 8 lines of U/V each time.
     while (cinfo->next_scanline < cinfo->image_height) {
         //deitnerleave u and v
-        deinterleave(vuPlanar, uRows, vRows, cinfo->next_scanline, width);
+        deinterleave(vuPlanar, uRows, vRows, cinfo->next_scanline, width, height);
 
+        // Jpeg library ignores the rows whose indices are greater than height.
         for (int i = 0; i < 16; i++) {
             // y row
             y[i] = yPlanar + (cinfo->next_scanline + i) * fStrides[0];
@@ -112,8 +115,10 @@ void Yuv420SpToJpegEncoder::compress(jpeg_compress_struct* cinfo,
 }
 
 void Yuv420SpToJpegEncoder::deinterleave(uint8_t* vuPlanar, uint8_t* uRows,
-        uint8_t* vRows, int rowIndex, int width) {
-    for (int row = 0; row < 8; ++row) {
+        uint8_t* vRows, int rowIndex, int width, int height) {
+    int numRows = (height - rowIndex) / 2;
+    if (numRows > 8) numRows = 8;
+    for (int row = 0; row < numRows; ++row) {
         int offset = ((rowIndex >> 1) + row) * fStrides[1];
         uint8_t* vu = vuPlanar + offset;
         for (int i = 0; i < (width >> 1); ++i) {
@@ -164,6 +169,7 @@ void Yuv422IToJpegEncoder::compress(jpeg_compress_struct* cinfo,
     while (cinfo->next_scanline < cinfo->image_height) {
         deinterleave(yuvOffset, yRows, uRows, vRows, cinfo->next_scanline, width, height);
 
+        // Jpeg library ignores the rows whose indices are greater than height.
         for (int i = 0; i < 16; i++) {
             // y row
             y[i] = yRows + i * width;
@@ -185,7 +191,9 @@ void Yuv422IToJpegEncoder::compress(jpeg_compress_struct* cinfo,
 
 void Yuv422IToJpegEncoder::deinterleave(uint8_t* yuv, uint8_t* yRows, uint8_t* uRows,
         uint8_t* vRows, int rowIndex, int width, int height) {
-    for (int row = 0; row < 16; ++row) {
+    int numRows = height - rowIndex;
+    if (numRows > 16) numRows = 16;
+    for (int row = 0; row < numRows; ++row) {
         uint8_t* yuvSeg = yuv + (rowIndex + row) * fStrides[0];
         for (int i = 0; i < (width >> 1); ++i) {
             int indexY = row * width + (i << 1);
@@ -211,8 +219,8 @@ void Yuv422IToJpegEncoder::configSamplingFactors(jpeg_compress_struct* cinfo) {
 ///////////////////////////////////////////////////////////////////////////////
 
 static jboolean YuvImage_compressToJpeg(JNIEnv* env, jobject, jbyteArray inYuv,
-        int format, int width, int height, jintArray offsets,
-        jintArray strides, int jpegQuality, jobject jstream,
+        jint format, jint width, jint height, jintArray offsets,
+        jintArray strides, jint jpegQuality, jobject jstream,
         jbyteArray jstorage) {
     jbyte* yuv = env->GetByteArrayElements(inYuv, NULL);
     SkWStream* strm = CreateJavaOutputStreamAdaptor(env, jstream, jstorage);
@@ -220,30 +228,28 @@ static jboolean YuvImage_compressToJpeg(JNIEnv* env, jobject, jbyteArray inYuv,
     jint* imgOffsets = env->GetIntArrayElements(offsets, NULL);
     jint* imgStrides = env->GetIntArrayElements(strides, NULL);
     YuvToJpegEncoder* encoder = YuvToJpegEncoder::create(format, imgStrides);
-    if (encoder == NULL) {
-        return false;
+    jboolean result = JNI_FALSE;
+    if (encoder != NULL) {
+        encoder->encode(strm, yuv, width, height, imgOffsets, jpegQuality);
+        delete encoder;
+        result = JNI_TRUE;
     }
-    encoder->encode(strm, yuv, width, height, imgOffsets, jpegQuality);
 
-    delete encoder;
     env->ReleaseByteArrayElements(inYuv, yuv, 0);
     env->ReleaseIntArrayElements(offsets, imgOffsets, 0);
     env->ReleaseIntArrayElements(strides, imgStrides, 0);
-    return true;
+    delete strm;
+    return result;
 }
 ///////////////////////////////////////////////////////////////////////////////
-
-#include <android_runtime/AndroidRuntime.h>
 
 static JNINativeMethod gYuvImageMethods[] = {
     {   "nativeCompressToJpeg",  "([BIII[I[IILjava/io/OutputStream;[B)Z",
         (void*)YuvImage_compressToJpeg }
 };
 
-#define kClassPathName  "android/graphics/YuvImage"
-
 int register_android_graphics_YuvImage(JNIEnv* env)
 {
-    return android::AndroidRuntime::registerNativeMethods(env, kClassPathName,
-            gYuvImageMethods, SK_ARRAY_COUNT(gYuvImageMethods));
+    return android::RegisterMethodsOrDie(env, "android/graphics/YuvImage", gYuvImageMethods,
+                                         NELEM(gYuvImageMethods));
 }

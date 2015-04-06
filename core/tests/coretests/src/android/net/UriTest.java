@@ -19,12 +19,14 @@ package android.net;
 import android.content.ContentUris;
 import android.os.Parcel;
 import android.test.suitebuilder.annotation.SmallTest;
+
+import junit.framework.TestCase;
+
 import java.io.File;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
-import junit.framework.TestCase;
 
 public class UriTest extends TestCase {
 
@@ -751,5 +753,107 @@ public class UriTest extends TestCase {
     public void testPlusCharacterInQuery() {
         assertEquals("d e", Uri.parse("http://a/b?c=d%20e").getQueryParameter("c"));
         assertEquals("d e", Uri.parse("http://a/b?c=d+e").getQueryParameter("c"));
+    }
+
+    public void testPathPrefixMatch() {
+        // Exact match
+        assertTrue(Uri.parse("content://com.example/path").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+        assertTrue(Uri.parse("content://com.example/path").isPathPrefixMatch(
+                Uri.parse("content://com.example/path")));
+        assertTrue(Uri.parse("content://com.example///path///").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+        assertTrue(Uri.parse("content://com.example/path").isPathPrefixMatch(
+                Uri.parse("content://com.example///path///")));
+
+        // Child match
+        assertTrue(Uri.parse("content://com.example/path/to/child").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+        assertTrue(Uri.parse("content://com.example/path/to/child").isPathPrefixMatch(
+                Uri.parse("content://com.example/path")));
+
+        // Extra parameters
+        assertTrue(Uri.parse("content://com.example/path#fragment").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+        assertTrue(Uri.parse("content://com.example/path?q=v").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+        assertTrue(Uri.parse("content://com.example/path/?q=v").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/")));
+
+        // Different path
+        assertFalse(Uri.parse("content://com.example/path").isPathPrefixMatch(
+                Uri.parse("content://com.example/path/deeper/")));
+        assertFalse(Uri.parse("content://com.example/path2").isPathPrefixMatch(
+                Uri.parse("content://com.example/path")));
+
+        // Top-level match
+        assertTrue(Uri.parse("content://com.example/path/").isPathPrefixMatch(
+                Uri.parse("content://com.example/")));
+        assertTrue(Uri.parse("content://com.example/path/").isPathPrefixMatch(
+                Uri.parse("content://com.example")));
+
+        // Different prefixes
+        assertFalse(Uri.parse("content://com.example/path/").isPathPrefixMatch(
+                Uri.parse("file://com.example/path/")));
+        assertFalse(Uri.parse("content://com.example/path/").isPathPrefixMatch(
+                Uri.parse("content://org.example/path/")));
+
+        // Escaping
+        assertTrue(Uri.parse("content://com.example/path path/").isPathPrefixMatch(
+                Uri.parse("content://com.example/path%20path/")));
+        assertFalse(Uri.parse("content://com.example/path/path").isPathPrefixMatch(
+                Uri.parse("content://com.example/path%2Fpath")));
+    }
+
+    public void testToSafeString() {
+        checkToSafeString("tel:xxxxxx", "tel:Google");
+        checkToSafeString("tel:xxxxxxxxxx", "tel:1234567890");
+        checkToSafeString("tEl:xxx.xxx-xxxx", "tEl:123.456-7890");
+
+        checkToSafeString("sms:xxxxxx", "sms:123abc");
+        checkToSafeString("smS:xxx.xxx-xxxx", "smS:123.456-7890");
+
+        checkToSafeString("smsto:xxxxxx", "smsto:123abc");
+        checkToSafeString("SMSTo:xxx.xxx-xxxx", "SMSTo:123.456-7890");
+
+        checkToSafeString("mailto:xxxxxxx@xxxxxxx.xxx", "mailto:android@android.com");
+        checkToSafeString("Mailto:xxxxxxx@xxxxxxx.xxxxxxxxxx",
+                "Mailto:android@android.com/secret");
+
+        checkToSafeString("sip:xxxxxxx@xxxxxxx.xxxxxxxx", "sip:android@android.com:1234");
+        checkToSafeString("sIp:xxxxxxx@xxxxxxx.xxx", "sIp:android@android.com");
+
+        checkToSafeString("http://www.android.com/...", "http://www.android.com");
+        checkToSafeString("HTTP://www.android.com/...", "HTTP://www.android.com");
+        checkToSafeString("http://www.android.com/...", "http://www.android.com/");
+        checkToSafeString("http://www.android.com/...", "http://www.android.com/secretUrl?param");
+        checkToSafeString("http://www.android.com/...",
+                "http://user:pwd@www.android.com/secretUrl?param");
+        checkToSafeString("http://www.android.com/...",
+                "http://user@www.android.com/secretUrl?param");
+        checkToSafeString("http://www.android.com/...", "http://www.android.com/secretUrl?param");
+        checkToSafeString("http:///...", "http:///path?param");
+        checkToSafeString("http:///...", "http://");
+        checkToSafeString("http://:12345/...", "http://:12345/");
+
+        checkToSafeString("https://www.android.com/...", "https://www.android.com/secretUrl?param");
+        checkToSafeString("https://www.android.com:8443/...",
+                "https://user:pwd@www.android.com:8443/secretUrl?param");
+        checkToSafeString("https://www.android.com/...", "https://user:pwd@www.android.com");
+        checkToSafeString("Https://www.android.com/...", "Https://user:pwd@www.android.com");
+
+        checkToSafeString("ftp://ftp.android.com/...", "ftp://ftp.android.com/");
+        checkToSafeString("ftP://ftp.android.com/...", "ftP://anonymous@ftp.android.com/");
+        checkToSafeString("ftp://ftp.android.com:2121/...",
+                "ftp://root:love@ftp.android.com:2121/");
+
+        checkToSafeString("unsupported://ajkakjah/askdha/secret?secret",
+                "unsupported://ajkakjah/askdha/secret?secret");
+        checkToSafeString("unsupported:ajkakjah/askdha/secret?secret",
+                "unsupported:ajkakjah/askdha/secret?secret");
+    }
+
+    private void checkToSafeString(String expectedSafeString, String original) {
+        assertEquals(expectedSafeString, Uri.parse(original).toSafeString());
     }
 }

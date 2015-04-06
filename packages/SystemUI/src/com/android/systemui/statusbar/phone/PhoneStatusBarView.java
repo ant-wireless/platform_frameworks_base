@@ -17,150 +17,63 @@
 package com.android.systemui.statusbar.phone;
 
 import android.content.Context;
-import android.content.res.Configuration;
-import android.graphics.Canvas;
-import android.graphics.Rect;
-import android.os.SystemClock;
+import android.content.res.Resources;
 import android.util.AttributeSet;
-import android.view.KeyEvent;
+import android.util.EventLog;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.ViewParent;
 import android.view.accessibility.AccessibilityEvent;
-import android.widget.FrameLayout;
 
+import com.android.systemui.EventLogTags;
 import com.android.systemui.R;
-import com.android.systemui.statusbar.BaseStatusBar;
-import com.android.systemui.statusbar.policy.FixedSizeDrawable;
 
-public class PhoneStatusBarView extends FrameLayout {
+public class PhoneStatusBarView extends PanelBar {
     private static final String TAG = "PhoneStatusBarView";
+    private static final boolean DEBUG = PhoneStatusBar.DEBUG;
+    private static final boolean DEBUG_GESTURES = false;
 
-    static final int DIM_ANIM_TIME = 400;
-    
-    PhoneStatusBar mService;
-    boolean mTracking;
-    int mStartX, mStartY;
-    ViewGroup mNotificationIcons;
-    ViewGroup mStatusIcons;
-    
-    boolean mNightMode = false;
-    int mStartAlpha = 0, mEndAlpha = 0;
-    long mEndTime = 0;
+    PhoneStatusBar mBar;
 
-    Rect mButtonBounds = new Rect();
-    boolean mCapturingEvents = true;
+    PanelView mLastFullyOpenedPanel = null;
+    PanelView mNotificationPanel;
+    private final PhoneStatusBarTransitions mBarTransitions;
+    private ScrimController mScrimController;
 
     public PhoneStatusBarView(Context context, AttributeSet attrs) {
         super(context, attrs);
+
+        Resources res = getContext().getResources();
+        mBarTransitions = new PhoneStatusBarTransitions(this);
+    }
+
+    public BarTransitions getBarTransitions() {
+        return mBarTransitions;
+    }
+
+    public void setBar(PhoneStatusBar bar) {
+        mBar = bar;
+    }
+
+    public void setScrimController(ScrimController scrimController) {
+        mScrimController = scrimController;
     }
 
     @Override
-    protected void onFinishInflate() {
-        super.onFinishInflate();
-        mNotificationIcons = (ViewGroup)findViewById(R.id.notificationIcons);
-        mStatusIcons = (ViewGroup)findViewById(R.id.statusIcons);
+    public void onFinishInflate() {
+        mBarTransitions.init();
     }
 
     @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        //mService.onBarViewAttached();
-    }
-    
-    @Override
-    protected void onConfigurationChanged(Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        mService.updateDisplaySize();
-        boolean nightMode = (newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
-        if (mNightMode != nightMode) {
-            mNightMode = nightMode;
-            mStartAlpha = getCurAlpha();
-            mEndAlpha = mNightMode ? 0x80 : 0x00;
-            mEndTime = SystemClock.uptimeMillis() + DIM_ANIM_TIME;
-            invalidate();
+    public void addPanel(PanelView pv) {
+        super.addPanel(pv);
+        if (pv.getId() == R.id.notification_panel) {
+            mNotificationPanel = pv;
         }
     }
 
-    int getCurAlpha() {
-        long time = SystemClock.uptimeMillis();
-        if (time > mEndTime) {
-            return mEndAlpha;
-        }
-        return mEndAlpha
-                - (int)(((mEndAlpha-mStartAlpha) * (mEndTime-time) / DIM_ANIM_TIME));
-    }
-    
     @Override
-    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-        super.onSizeChanged(w, h, oldw, oldh);
-        mService.updateExpandedViewPos(BaseStatusBar.EXPANDED_LEAVE_ALONE);
-    }
-
-    @Override
-    protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        super.onLayout(changed, l, t, r, b);
-    }
-
-    @Override
-    protected void dispatchDraw(Canvas canvas) {
-        super.dispatchDraw(canvas);
-        int alpha = getCurAlpha();
-        if (alpha != 0) {
-            canvas.drawARGB(alpha, 0, 0, 0);
-        }
-        if (alpha != mEndAlpha) {
-            invalidate();
-        }
-    }
-
-    /**
-     * Gets the left position of v in this view.  Throws if v is not
-     * a child of this.
-     */
-    private int getViewOffset(View v) {
-        int offset = 0;
-        while (v != this) {
-            offset += v.getLeft();
-            ViewParent p = v.getParent();
-            if (v instanceof View) {
-                v = (View)p;
-            } else {
-                throw new RuntimeException(v + " is not a child of " + this);
-            }
-        }
-        return offset;
-    }
-
-    /**
-     * Ensure that, if there is no target under us to receive the touch,
-     * that we process it ourself.  This makes sure that onInterceptTouchEvent()
-     * is always called for the entire gesture.
-     */
-    @Override
-    public boolean onTouchEvent(MotionEvent event) {
-        if (!mCapturingEvents) {
-            return false;
-        }
-        if (event.getAction() != MotionEvent.ACTION_DOWN) {
-            mService.interceptTouchEvent(event);
-        }
-        return true;
-    }
-
-    @Override
-    public boolean onInterceptTouchEvent(MotionEvent event) {
-        if (event.getAction() == MotionEvent.ACTION_DOWN) {
-            if (mButtonBounds.contains((int)event.getX(), (int)event.getY())) {
-                mCapturingEvents = false;
-                return false;
-            }
-        }
-        mCapturingEvents = true;
-        return mService.interceptTouchEvent(event)
-                ? true : super.onInterceptTouchEvent(event);
+    public boolean panelsEnabled() {
+        return mBar.panelsEnabled();
     }
 
     @Override
@@ -176,5 +89,94 @@ public class PhoneStatusBarView extends FrameLayout {
             return true;
         }
         return false;
+    }
+
+    @Override
+    public PanelView selectPanelForTouch(MotionEvent touch) {
+        // No double swiping. If either panel is open, nothing else can be pulled down.
+        return mNotificationPanel.getExpandedHeight() > 0
+                ? null
+                : mNotificationPanel;
+    }
+
+    @Override
+    public void onPanelPeeked() {
+        super.onPanelPeeked();
+        mBar.makeExpandedVisible(false);
+    }
+
+    @Override
+    public void onAllPanelsCollapsed() {
+        super.onAllPanelsCollapsed();
+
+        // Close the status bar in the next frame so we can show the end of the animation.
+        postOnAnimation(new Runnable() {
+            @Override
+            public void run() {
+                mBar.makeExpandedInvisible();
+            }
+        });
+        mLastFullyOpenedPanel = null;
+    }
+
+    @Override
+    public void onPanelFullyOpened(PanelView openPanel) {
+        super.onPanelFullyOpened(openPanel);
+        if (openPanel != mLastFullyOpenedPanel) {
+            openPanel.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+        }
+        mLastFullyOpenedPanel = openPanel;
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        boolean barConsumedEvent = mBar.interceptTouchEvent(event);
+
+        if (DEBUG_GESTURES) {
+            if (event.getActionMasked() != MotionEvent.ACTION_MOVE) {
+                EventLog.writeEvent(EventLogTags.SYSUI_PANELBAR_TOUCH,
+                        event.getActionMasked(), (int) event.getX(), (int) event.getY(),
+                        barConsumedEvent ? 1 : 0);
+            }
+        }
+
+        return barConsumedEvent || super.onTouchEvent(event);
+    }
+
+    @Override
+    public void onTrackingStarted(PanelView panel) {
+        super.onTrackingStarted(panel);
+        mBar.onTrackingStarted();
+        mScrimController.onTrackingStarted();
+    }
+
+    @Override
+    public void onClosingFinished() {
+        super.onClosingFinished();
+        mBar.onClosingFinished();
+    }
+
+    @Override
+    public void onTrackingStopped(PanelView panel, boolean expand) {
+        super.onTrackingStopped(panel, expand);
+        mBar.onTrackingStopped(expand);
+    }
+
+    @Override
+    public void onExpandingFinished() {
+        super.onExpandingFinished();
+        mScrimController.onExpandingFinished();
+    }
+
+    @Override
+    public boolean onInterceptTouchEvent(MotionEvent event) {
+        return mBar.interceptTouchEvent(event) || super.onInterceptTouchEvent(event);
+    }
+
+    @Override
+    public void panelExpansionChanged(PanelView panel, float frac, boolean expanded) {
+        super.panelExpansionChanged(panel, frac, expanded);
+        mScrimController.setPanelExpansion(frac);
+        mBar.updateCarrierLabelVisibility(false);
     }
 }

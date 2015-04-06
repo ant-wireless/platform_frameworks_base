@@ -16,14 +16,13 @@
 package android.speech.tts;
 
 import android.media.AudioFormat;
-import android.os.FileUtils;
+import android.speech.tts.TextToSpeechService.UtteranceProgressDispatcher;
 import android.util.Log;
 
-import java.io.File;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 
 /**
  * Speech synthesis request that writes the audio to a WAV file.
@@ -39,23 +38,46 @@ class FileSynthesisCallback extends AbstractSynthesisCallback {
     private static final short WAV_FORMAT_PCM = 0x0001;
 
     private final Object mStateLock = new Object();
-    private final File mFileName;
+
     private int mSampleRateInHz;
     private int mAudioFormat;
     private int mChannelCount;
-    private RandomAccessFile mFile;
-    private boolean mStopped = false;
+
+    private FileChannel mFileChannel;
+
+    private final UtteranceProgressDispatcher mDispatcher;
+    private final Object mCallerIdentity;
+
+    private boolean mStarted = false;
     private boolean mDone = false;
 
-    FileSynthesisCallback(File fileName) {
-        mFileName = fileName;
+    /** Status code of synthesis */
+    protected int mStatusCode;
+
+    FileSynthesisCallback(FileChannel fileChannel, UtteranceProgressDispatcher dispatcher,
+            Object callerIdentity, boolean clientIsUsingV2) {
+        super(clientIsUsingV2);
+        mFileChannel = fileChannel;
+        mDispatcher = dispatcher;
+        mCallerIdentity = callerIdentity;
+        mStatusCode = TextToSpeech.SUCCESS;
     }
 
     @Override
     void stop() {
         synchronized (mStateLock) {
-            mStopped = true;
+            if (mDone) {
+                return;
+            }
+            if (mStatusCode == TextToSpeech.STOPPED) {
+                return;
+            }
+
+            mStatusCode = TextToSpeech.STOPPED;
             cleanUp();
+            if (mDispatcher != null) {
+                mDispatcher.dispatchOnStop();
+            }
         }
     }
 
@@ -63,36 +85,15 @@ class FileSynthesisCallback extends AbstractSynthesisCallback {
      * Must be called while holding the monitor on {@link #mStateLock}.
      */
     private void cleanUp() {
-        closeFileAndWidenPermissions();
-        if (mFile != null) {
-            mFileName.delete();
-        }
+        closeFile();
     }
 
     /**
      * Must be called while holding the monitor on {@link #mStateLock}.
      */
-    private void closeFileAndWidenPermissions() {
-        try {
-            if (mFile != null) {
-                mFile.close();
-                mFile = null;
-            }
-        } catch (IOException ex) {
-            Log.e(TAG, "Failed to close " + mFileName + ": " + ex);
-        }
-
-        try {
-            // Make the written file readable and writeable by everyone.
-            // This allows the app that requested synthesis to read the file.
-            //
-            // Note that the directory this file was written must have already
-            // been world writeable in order it to have been
-            // written to in the first place.
-            FileUtils.setPermissions(mFileName.getAbsolutePath(), 0666, -1, -1); //-rw-rw-rw
-        } catch (SecurityException se) {
-            Log.e(TAG, "Security exception setting rw permissions on : " + mFileName);
-        }
+    private void closeFile() {
+        // File will be closed by the SpeechItem in the speech service.
+        mFileChannel = null;
     }
 
     @Override
@@ -101,38 +102,46 @@ class FileSynthesisCallback extends AbstractSynthesisCallback {
     }
 
     @Override
-    boolean isDone() {
-        return mDone;
-    }
-
-    @Override
     public int start(int sampleRateInHz, int audioFormat, int channelCount) {
         if (DBG) {
             Log.d(TAG, "FileSynthesisRequest.start(" + sampleRateInHz + "," + audioFormat
                     + "," + channelCount + ")");
         }
+        FileChannel fileChannel = null;
         synchronized (mStateLock) {
-            if (mStopped) {
+            if (mStatusCode == TextToSpeech.STOPPED) {
                 if (DBG) Log.d(TAG, "Request has been aborted.");
+                return errorCodeOnStop();
+            }
+            if (mStatusCode != TextToSpeech.SUCCESS) {
+                if (DBG) Log.d(TAG, "Error was raised");
                 return TextToSpeech.ERROR;
             }
-            if (mFile != null) {
-                cleanUp();
-                throw new IllegalArgumentException("FileSynthesisRequest.start() called twice");
+            if (mStarted) {
+                Log.e(TAG, "Start called twice");
+                return TextToSpeech.ERROR;
             }
+            mStarted = true;
             mSampleRateInHz = sampleRateInHz;
             mAudioFormat = audioFormat;
             mChannelCount = channelCount;
-            try {
-                mFile = new RandomAccessFile(mFileName, "rw");
-                // Reserve space for WAV header
-                mFile.write(new byte[WAV_HEADER_LENGTH]);
-                return TextToSpeech.SUCCESS;
-            } catch (IOException ex) {
-                Log.e(TAG, "Failed to open " + mFileName + ": " + ex);
-                cleanUp();
-                return TextToSpeech.ERROR;
+
+            if (mDispatcher != null) {
+                mDispatcher.dispatchOnStart();
             }
+            fileChannel = mFileChannel;
+        }
+
+        try {
+            fileChannel.write(ByteBuffer.allocate(WAV_HEADER_LENGTH));
+                return TextToSpeech.SUCCESS;
+        } catch (IOException ex) {
+            Log.e(TAG, "Failed to write wav header to output file descriptor", ex);
+            synchronized (mStateLock) {
+                cleanUp();
+                mStatusCode = TextToSpeech.ERROR_OUTPUT;
+            }
+            return TextToSpeech.ERROR;
         }
     }
 
@@ -142,67 +151,134 @@ class FileSynthesisCallback extends AbstractSynthesisCallback {
             Log.d(TAG, "FileSynthesisRequest.audioAvailable(" + buffer + "," + offset
                     + "," + length + ")");
         }
+        FileChannel fileChannel = null;
         synchronized (mStateLock) {
-            if (mStopped) {
+            if (mStatusCode == TextToSpeech.STOPPED) {
                 if (DBG) Log.d(TAG, "Request has been aborted.");
+                return errorCodeOnStop();
+            }
+            if (mStatusCode != TextToSpeech.SUCCESS) {
+                if (DBG) Log.d(TAG, "Error was raised");
                 return TextToSpeech.ERROR;
             }
-            if (mFile == null) {
+            if (mFileChannel == null) {
                 Log.e(TAG, "File not open");
+                mStatusCode = TextToSpeech.ERROR_OUTPUT;
                 return TextToSpeech.ERROR;
             }
-            try {
-                mFile.write(buffer, offset, length);
-                return TextToSpeech.SUCCESS;
-            } catch (IOException ex) {
-                Log.e(TAG, "Failed to write to " + mFileName + ": " + ex);
+            if (!mStarted) {
+                Log.e(TAG, "Start method was not called");
+                return TextToSpeech.ERROR;
+            }
+            fileChannel = mFileChannel;
+        }
+
+        try {
+            fileChannel.write(ByteBuffer.wrap(buffer,  offset,  length));
+            return TextToSpeech.SUCCESS;
+        } catch (IOException ex) {
+            Log.e(TAG, "Failed to write to output file descriptor", ex);
+            synchronized (mStateLock) {
                 cleanUp();
-                return TextToSpeech.ERROR;
+                mStatusCode = TextToSpeech.ERROR_OUTPUT;
             }
+            return TextToSpeech.ERROR;
         }
     }
 
     @Override
     public int done() {
         if (DBG) Log.d(TAG, "FileSynthesisRequest.done()");
+        FileChannel fileChannel = null;
+
+        int sampleRateInHz = 0;
+        int audioFormat = 0;
+        int channelCount = 0;
+
         synchronized (mStateLock) {
-            if (mStopped) {
-                if (DBG) Log.d(TAG, "Request has been aborted.");
+            if (mDone) {
+                Log.w(TAG, "Duplicate call to done()");
+                // This is not an error that would prevent synthesis. Hence no
+                // setStatusCode is set.
                 return TextToSpeech.ERROR;
             }
-            if (mFile == null) {
+            if (mStatusCode == TextToSpeech.STOPPED) {
+                if (DBG) Log.d(TAG, "Request has been aborted.");
+                return errorCodeOnStop();
+            }
+            if (mDispatcher != null && mStatusCode != TextToSpeech.SUCCESS &&
+                    mStatusCode != TextToSpeech.STOPPED) {
+                mDispatcher.dispatchOnError(mStatusCode);
+                return TextToSpeech.ERROR;
+            }
+            if (mFileChannel == null) {
                 Log.e(TAG, "File not open");
                 return TextToSpeech.ERROR;
             }
-            try {
-                // Write WAV header at start of file
-                mFile.seek(0);
-                int dataLength = (int) (mFile.length() - WAV_HEADER_LENGTH);
-                mFile.write(
-                        makeWavHeader(mSampleRateInHz, mAudioFormat, mChannelCount, dataLength));
-                closeFileAndWidenPermissions();
-                mDone = true;
+            mDone = true;
+            fileChannel = mFileChannel;
+            sampleRateInHz = mSampleRateInHz;
+            audioFormat = mAudioFormat;
+            channelCount = mChannelCount;
+        }
+
+        try {
+            // Write WAV header at start of file
+            fileChannel.position(0);
+            int dataLength = (int) (fileChannel.size() - WAV_HEADER_LENGTH);
+            fileChannel.write(
+                    makeWavHeader(sampleRateInHz, audioFormat, channelCount, dataLength));
+
+            synchronized (mStateLock) {
+                closeFile();
+                if (mDispatcher != null) {
+                    mDispatcher.dispatchOnSuccess();
+                }
                 return TextToSpeech.SUCCESS;
-            } catch (IOException ex) {
-                Log.e(TAG, "Failed to write to " + mFileName + ": " + ex);
-                cleanUp();
-                return TextToSpeech.ERROR;
             }
+        } catch (IOException ex) {
+            Log.e(TAG, "Failed to write to output file descriptor", ex);
+            synchronized (mStateLock) {
+                cleanUp();
+            }
+            return TextToSpeech.ERROR;
         }
     }
 
     @Override
     public void error() {
+        error(TextToSpeech.ERROR_SYNTHESIS);
+    }
+
+    @Override
+    public void error(int errorCode) {
         if (DBG) Log.d(TAG, "FileSynthesisRequest.error()");
         synchronized (mStateLock) {
+            if (mDone) {
+                return;
+            }
             cleanUp();
+            mStatusCode = errorCode;
         }
     }
 
-    private byte[] makeWavHeader(int sampleRateInHz, int audioFormat, int channelCount,
+    @Override
+    public boolean hasStarted() {
+        synchronized (mStateLock) {
+            return mStarted;
+        }
+    }
+
+    @Override
+    public boolean hasFinished() {
+        synchronized (mStateLock) {
+            return mDone;
+        }
+    }
+
+    private ByteBuffer makeWavHeader(int sampleRateInHz, int audioFormat, int channelCount,
             int dataLength) {
-        // TODO: is AudioFormat.ENCODING_DEFAULT always the same as ENCODING_PCM_16BIT?
-        int sampleSizeInBytes = (audioFormat == AudioFormat.ENCODING_PCM_8BIT ? 1 : 2);
+        int sampleSizeInBytes = AudioFormat.getBytesPerSample(audioFormat);
         int byteRate = sampleRateInHz * sampleSizeInBytes * channelCount;
         short blockAlign = (short) (sampleSizeInBytes * channelCount);
         short bitsPerSample = (short) (sampleSizeInBytes * 8);
@@ -224,8 +300,8 @@ class FileSynthesisCallback extends AbstractSynthesisCallback {
         header.putShort(bitsPerSample);
         header.put(new byte[]{ 'd', 'a', 't', 'a' });
         header.putInt(dataLength);
+        header.flip();
 
-        return headerBuf;
+        return header;
     }
-
 }

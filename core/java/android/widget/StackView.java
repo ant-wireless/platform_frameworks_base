@@ -168,9 +168,16 @@ public class StackView extends AdapterViewAnimator {
      * {@inheritDoc}
      */
     public StackView(Context context, AttributeSet attrs, int defStyleAttr) {
-        super(context, attrs, defStyleAttr);
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.StackView, defStyleAttr, 0);
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public StackView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.StackView, defStyleAttr, defStyleRes);
 
         mResOutColor = a.getColor(
                 com.android.internal.R.styleable.StackView_resOutColor, 0);
@@ -1043,10 +1050,8 @@ public class StackView extends AdapterViewAnimator {
             if (mView != null) {
                 final LayoutParams viewLp = (LayoutParams) mView.getLayoutParams();
 
-                float d = (float) Math.sqrt(Math.pow(viewLp.horizontalOffset, 2) +
-                        Math.pow(viewLp.verticalOffset, 2));
-                float maxd = (float) Math.sqrt(Math.pow(mSlideAmount, 2) +
-                        Math.pow(0.4f * mSlideAmount, 2));
+                float d = (float) Math.hypot(viewLp.horizontalOffset, viewLp.verticalOffset);
+                float maxd = (float) Math.hypot(mSlideAmount, 0.4f * mSlideAmount);
 
                 if (velocity == 0) {
                     return (invert ? (1 - d / maxd) : d / maxd) * DEFAULT_ANIMATION_DURATION;
@@ -1412,8 +1417,8 @@ public class StackView extends AdapterViewAnimator {
                 return null;
             }
 
-            Bitmap bitmap = Bitmap.createBitmap(v.getMeasuredWidth(), v.getMeasuredHeight(),
-                    Bitmap.Config.ARGB_8888);
+            Bitmap bitmap = Bitmap.createBitmap(v.getResources().getDisplayMetrics(),
+                    v.getMeasuredWidth(), v.getMeasuredHeight(), Bitmap.Config.ARGB_8888);
             mCanvas.setBitmap(bitmap);
 
             float rotationX = v.getRotationX();

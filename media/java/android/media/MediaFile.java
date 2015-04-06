@@ -16,18 +16,14 @@
 
 package android.media;
 
-import android.content.ContentValues;
-import android.provider.MediaStore.Audio;
-import android.provider.MediaStore.Images;
-import android.provider.MediaStore.Video;
 import android.media.DecoderCapabilities;
 import android.media.DecoderCapabilities.VideoDecoder;
 import android.media.DecoderCapabilities.AudioDecoder;
 import android.mtp.MtpConstants;
 
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MediaScanner helper class.
@@ -276,10 +272,10 @@ public class MediaFile {
     }
 
     public static MediaFileType getFileType(String path) {
-        int lastDot = path.lastIndexOf(".");
+        int lastDot = path.lastIndexOf('.');
         if (lastDot < 0)
             return null;
-        return sFileTypeMap.get(path.substring(lastDot + 1).toUpperCase());
+        return sFileTypeMap.get(path.substring(lastDot + 1).toUpperCase(Locale.ROOT));
     }
 
     public static boolean isMimeTypeMedia(String mimeType) {
@@ -325,7 +321,7 @@ public class MediaFile {
         }
         int lastDot = fileName.lastIndexOf('.');
         if (lastDot > 0) {
-            String extension = fileName.substring(lastDot + 1);
+            String extension = fileName.substring(lastDot + 1).toUpperCase(Locale.ROOT);
             Integer value = sFileTypeToFormatMap.get(extension);
             if (value != null) {
                 return value.intValue();

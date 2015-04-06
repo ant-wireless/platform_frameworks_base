@@ -124,6 +124,8 @@ public abstract class PreferenceActivity extends ListActivity implements
         PreferenceManager.OnPreferenceTreeClickListener,
         PreferenceFragment.OnPreferenceStartFragmentCallback {
 
+    private static final String TAG = "PreferenceActivity";
+
     // Constants for state save/restore
     private static final String HEADERS_TAG = ":android:headers";
     private static final String CUR_HEADER_TAG = ":android:cur_header";
@@ -132,6 +134,9 @@ public abstract class PreferenceActivity extends ListActivity implements
     /**
      * When starting this activity, the invoking Intent can contain this extra
      * string to specify which fragment should be initially displayed.
+     * <p/>Starting from Key Lime Pie, when this argument is passed in, the PreferenceActivity
+     * will call isValidFragment() to confirm that the fragment class name is valid for this
+     * activity.
      */
     public static final String EXTRA_SHOW_FRAGMENT = ":android:show_fragment";
 
@@ -207,6 +212,9 @@ public abstract class PreferenceActivity extends ListActivity implements
 
     private Button mNextButton;
 
+    private int mPreferenceHeaderItemResId = 0;
+    private boolean mPreferenceHeaderRemoveEmptyIcon = false;
+
     /**
      * The starting request code given out to preference framework.
      */
@@ -253,10 +261,15 @@ public abstract class PreferenceActivity extends ListActivity implements
         }
 
         private LayoutInflater mInflater;
+        private int mLayoutResId;
+        private boolean mRemoveIconIfEmpty;
 
-        public HeaderAdapter(Context context, List<Header> objects) {
+        public HeaderAdapter(Context context, List<Header> objects, int layoutResId,
+                boolean removeIconBehavior) {
             super(context, 0, objects);
             mInflater = (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
+            mLayoutResId = layoutResId;
+            mRemoveIconIfEmpty = removeIconBehavior;
         }
 
         @Override
@@ -265,8 +278,7 @@ public abstract class PreferenceActivity extends ListActivity implements
             View view;
 
             if (convertView == null) {
-                view = mInflater.inflate(com.android.internal.R.layout.preference_header_item,
-                        parent, false);
+                view = mInflater.inflate(mLayoutResId, parent, false);
                 holder = new HeaderViewHolder();
                 holder.icon = (ImageView) view.findViewById(com.android.internal.R.id.icon);
                 holder.title = (TextView) view.findViewById(com.android.internal.R.id.title);
@@ -279,7 +291,16 @@ public abstract class PreferenceActivity extends ListActivity implements
 
             // All view fields must be updated every time, because the view may be recycled 
             Header header = getItem(position);
-            holder.icon.setImageResource(header.iconRes);
+            if (mRemoveIconIfEmpty) {
+                if (header.iconRes == 0) {
+                    holder.icon.setVisibility(View.GONE);
+                } else {
+                    holder.icon.setVisibility(View.VISIBLE);
+                    holder.icon.setImageResource(header.iconRes);
+                }
+            } else {
+                holder.icon.setImageResource(header.iconRes);
+            }
             holder.title.setText(header.getTitle(getContext().getResources()));
             CharSequence summary = header.getSummary(getContext().getResources());
             if (!TextUtils.isEmpty(summary)) {
@@ -299,7 +320,7 @@ public abstract class PreferenceActivity extends ListActivity implements
      * are valid.
      */
     public static final long HEADER_ID_UNDEFINED = -1;
-    
+
     /**
      * Description of a single Header item that the user can select.
      */
@@ -507,7 +528,26 @@ public abstract class PreferenceActivity extends ListActivity implements
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        setContentView(com.android.internal.R.layout.preference_list_content);
+        // Theming for the PreferenceActivity layout and for the Preference Header(s) layout
+        TypedArray sa = obtainStyledAttributes(null,
+                com.android.internal.R.styleable.PreferenceActivity,
+                com.android.internal.R.attr.preferenceActivityStyle,
+                0);
+
+        final int layoutResId = sa.getResourceId(
+                com.android.internal.R.styleable.PreferenceActivity_layout,
+                com.android.internal.R.layout.preference_list_content);
+
+        mPreferenceHeaderItemResId = sa.getResourceId(
+                com.android.internal.R.styleable.PreferenceActivity_headerLayout,
+                com.android.internal.R.layout.preference_header_item);
+        mPreferenceHeaderRemoveEmptyIcon = sa.getBoolean(
+                com.android.internal.R.styleable.PreferenceActivity_headerRemoveIconIfEmpty,
+                false);
+
+        sa.recycle();
+
+        setContentView(layoutResId);
 
         mListFooter = (FrameLayout)findViewById(com.android.internal.R.id.list_footer);
         mPrefsContainer = (ViewGroup) findViewById(com.android.internal.R.id.prefs_frame);
@@ -577,7 +617,8 @@ public abstract class PreferenceActivity extends ListActivity implements
                 showBreadCrumbs(initialTitleStr, initialShortTitleStr);
             }
         } else if (mHeaders.size() > 0) {
-            setListAdapter(new HeaderAdapter(this, mHeaders));
+            setListAdapter(new HeaderAdapter(this, mHeaders, mPreferenceHeaderItemResId,
+                    mPreferenceHeaderRemoveEmptyIcon));
             if (!mSinglePane) {
                 // Multi-pane.
                 getListView().setChoiceMode(AbsListView.CHOICE_MODE_SINGLE);
@@ -703,7 +744,13 @@ public abstract class PreferenceActivity extends ListActivity implements
      * show for the initial UI.
      */
     public Header onGetInitialHeader() {
-        return mHeaders.get(0);
+        for (int i=0; i<mHeaders.size(); i++) {
+            Header h = mHeaders.get(i);
+            if (h.fragment != null) {
+                return h;
+            }
+        }
+        throw new IllegalStateException("Must have at least one header with a fragment");
     }
 
     /**
@@ -782,8 +829,8 @@ public abstract class PreferenceActivity extends ListActivity implements
                 if ("header".equals(nodeName)) {
                     Header header = new Header();
 
-                    TypedArray sa = getResources().obtainAttributes(attrs,
-                            com.android.internal.R.styleable.PreferenceHeader);
+                    TypedArray sa = obtainStyledAttributes(
+                            attrs, com.android.internal.R.styleable.PreferenceHeader);
                     header.id = sa.getResourceId(
                             com.android.internal.R.styleable.PreferenceHeader_id,
                             (int)HEADER_ID_UNDEFINED);
@@ -871,7 +918,25 @@ public abstract class PreferenceActivity extends ListActivity implements
         } finally {
             if (parser != null) parser.close();
         }
+    }
 
+    /**
+     * Subclasses should override this method and verify that the given fragment is a valid type
+     * to be attached to this activity. The default implementation returns <code>true</code> for
+     * apps built for <code>android:targetSdkVersion</code> older than
+     * {@link android.os.Build.VERSION_CODES#KITKAT}. For later versions, it will throw an exception.
+     * @param fragmentName the class name of the Fragment about to be attached to this activity.
+     * @return true if the fragment class name is valid for this Activity and false otherwise.
+     */
+    protected boolean isValidFragment(String fragmentName) {
+        if (getApplicationInfo().targetSdkVersion  >= android.os.Build.VERSION_CODES.KITKAT) {
+            throw new RuntimeException(
+                    "Subclasses of PreferenceActivity must override isValidFragment(String)"
+                    + " to verify that the Fragment class is valid! " + this.getClass().getName()
+                    + " has not checked if fragment " + fragmentName + " is valid.");
+        } else {
+            return true;
+        }
     }
 
     /**
@@ -895,6 +960,8 @@ public abstract class PreferenceActivity extends ListActivity implements
 
     @Override
     protected void onDestroy() {
+        mHandler.removeMessages(MSG_BIND_PREFERENCES);
+        mHandler.removeMessages(MSG_BUILD_HEADERS);
         super.onDestroy();
 
         if (mPreferenceManager != null) {
@@ -965,6 +1032,9 @@ public abstract class PreferenceActivity extends ListActivity implements
 
     @Override
     protected void onListItemClick(ListView l, View v, int position, long id) {
+        if (!isResumed()) {
+            return;
+        }
         super.onListItemClick(l, v, position, id);
 
         if (mAdapter != null) {
@@ -1075,6 +1145,7 @@ public abstract class PreferenceActivity extends ListActivity implements
             try {
                 mFragmentBreadCrumbs = (FragmentBreadCrumbs)crumbs;
             } catch (ClassCastException e) {
+                setTitle(title);
                 return;
             }
             if (mFragmentBreadCrumbs == null) {
@@ -1083,11 +1154,22 @@ public abstract class PreferenceActivity extends ListActivity implements
                 }
                 return;
             }
+            if (mSinglePane) {
+                mFragmentBreadCrumbs.setVisibility(View.GONE);
+                // Hide the breadcrumb section completely for single-pane
+                View bcSection = findViewById(com.android.internal.R.id.breadcrumb_section);
+                if (bcSection != null) bcSection.setVisibility(View.GONE);
+                setTitle(title);
+            }
             mFragmentBreadCrumbs.setMaxVisible(2);
             mFragmentBreadCrumbs.setActivity(this);
         }
-        mFragmentBreadCrumbs.setTitle(title, shortTitle);
-        mFragmentBreadCrumbs.setParentTitle(null, null, null);
+        if (mFragmentBreadCrumbs.getVisibility() != View.VISIBLE) {
+            setTitle(title);
+        } else {
+            mFragmentBreadCrumbs.setTitle(title, shortTitle);
+            mFragmentBreadCrumbs.setParentTitle(null, null, null);
+        }
     }
 
     /**
@@ -1126,9 +1208,13 @@ public abstract class PreferenceActivity extends ListActivity implements
         }
     }
 
-    private void switchToHeaderInner(String fragmentName, Bundle args, int direction) {
+    private void switchToHeaderInner(String fragmentName, Bundle args) {
         getFragmentManager().popBackStack(BACK_STACK_PREFS,
                 FragmentManager.POP_BACK_STACK_INCLUSIVE);
+        if (!isValidFragment(fragmentName)) {
+            throw new IllegalArgumentException("Invalid fragment for this activity: "
+                    + fragmentName);
+        }
         Fragment f = Fragment.instantiate(this, fragmentName, args);
         FragmentTransaction transaction = getFragmentManager().beginTransaction();
         transaction.setTransition(FragmentTransaction.TRANSIT_FRAGMENT_FADE);
@@ -1144,8 +1230,15 @@ public abstract class PreferenceActivity extends ListActivity implements
      * @param args Optional arguments to supply to the fragment.
      */
     public void switchToHeader(String fragmentName, Bundle args) {
-        setSelectedHeader(null);
-        switchToHeaderInner(fragmentName, args, 0);
+        Header selectedHeader = null;
+        for (int i = 0; i < mHeaders.size(); i++) {
+            if (fragmentName.equals(mHeaders.get(i).fragment)) {
+                selectedHeader = mHeaders.get(i);
+                break;
+            }
+        }
+        setSelectedHeader(selectedHeader);
+        switchToHeaderInner(fragmentName, args);
     }
 
     /**
@@ -1161,8 +1254,10 @@ public abstract class PreferenceActivity extends ListActivity implements
             getFragmentManager().popBackStack(BACK_STACK_PREFS,
                     FragmentManager.POP_BACK_STACK_INCLUSIVE);
         } else {
-            int direction = mHeaders.indexOf(header) - mHeaders.indexOf(mCurHeader);
-            switchToHeaderInner(header.fragment, header.fragmentArguments, direction);
+            if (header.fragment == null) {
+                throw new IllegalStateException("can't switch to header that has no fragment");
+            }
+            switchToHeaderInner(header.fragment, header.fragmentArguments);
             setSelectedHeader(header);
         }
     }
@@ -1232,7 +1327,7 @@ public abstract class PreferenceActivity extends ListActivity implements
     }
 
     /**
-     * Start a new fragment containing a preference panel.  If the prefences
+     * Start a new fragment containing a preference panel.  If the preferences
      * are being displayed in multi-pane mode, the given fragment class will
      * be instantiated and placed in the appropriate pane.  If running in
      * single-pane mode, a new activity will be launched in which to show the
@@ -1271,7 +1366,7 @@ public abstract class PreferenceActivity extends ListActivity implements
             transaction.commitAllowingStateLoss();
         }
     }
-    
+
     /**
      * Called by a preference panel fragment to finish itself.
      * 

@@ -50,6 +50,7 @@ public class ExternalStorageFormatter extends Service
 
     private boolean mFactoryReset = false;
     private boolean mAlwaysReset = false;
+    private String mReason = null;
 
     StorageEventListener mStorageListener = new StorageEventListener() {
         @Override
@@ -84,6 +85,7 @@ public class ExternalStorageFormatter extends Service
             mAlwaysReset = true;
         }
 
+        mReason = intent.getStringExtra(Intent.EXTRA_REASON);
         mStorageVolume = intent.getParcelableExtra(StorageVolume.EXTRA_STORAGE_VOLUME);
 
         if (mProgressDialog == null) {
@@ -122,7 +124,7 @@ public class ExternalStorageFormatter extends Service
     public void onCancel(DialogInterface dialog) {
         IMountService mountService = getMountService();
         String extStoragePath = mStorageVolume == null ?
-                Environment.getExternalStorageDirectory().toString() :
+                Environment.getLegacyExternalStorageDirectory().toString() :
                 mStorageVolume.getPath();
         try {
             mountService.mountVolume(extStoragePath);
@@ -135,7 +137,10 @@ public class ExternalStorageFormatter extends Service
     void fail(int msg) {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
         if (mAlwaysReset) {
-            sendBroadcast(new Intent("android.intent.action.MASTER_CLEAR"));
+            Intent intent = new Intent(Intent.ACTION_MASTER_CLEAR);
+            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            intent.putExtra(Intent.EXTRA_REASON, mReason);
+            sendBroadcast(intent);
         }
         stopSelf();
     }
@@ -149,7 +154,7 @@ public class ExternalStorageFormatter extends Service
             updateProgressDialog(R.string.progress_unmounting);
             IMountService mountService = getMountService();
             final String extStoragePath = mStorageVolume == null ?
-                    Environment.getExternalStorageDirectory().toString() :
+                    Environment.getLegacyExternalStorageDirectory().toString() :
                     mStorageVolume.getPath();
             try {
                 // Remove encryption mapping if this is an unmount for a factory reset.
@@ -163,7 +168,7 @@ public class ExternalStorageFormatter extends Service
             updateProgressDialog(R.string.progress_erasing);
             final IMountService mountService = getMountService();
             final String extStoragePath = mStorageVolume == null ?
-                    Environment.getExternalStorageDirectory().toString() :
+                    Environment.getLegacyExternalStorageDirectory().toString() :
                     mStorageVolume.getPath();
             if (mountService != null) {
                 new Thread() {
@@ -179,7 +184,10 @@ public class ExternalStorageFormatter extends Service
                         }
                         if (success) {
                             if (mFactoryReset) {
-                                sendBroadcast(new Intent("android.intent.action.MASTER_CLEAR"));
+                                Intent intent = new Intent(Intent.ACTION_MASTER_CLEAR);
+                                intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+                                intent.putExtra(Intent.EXTRA_REASON, mReason);
+                                sendBroadcast(intent);
                                 // Intent handling is asynchronous -- assume it will happen soon.
                                 stopSelf();
                                 return;
@@ -188,7 +196,10 @@ public class ExternalStorageFormatter extends Service
                         // If we didn't succeed, or aren't doing a full factory
                         // reset, then it is time to remount the storage.
                         if (!success && mAlwaysReset) {
-                            sendBroadcast(new Intent("android.intent.action.MASTER_CLEAR"));
+                            Intent intent = new Intent(Intent.ACTION_MASTER_CLEAR);
+                            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+                            intent.putExtra(Intent.EXTRA_REASON, mReason);
+                            sendBroadcast(intent);
                         } else {
                             try {
                                 mountService.mountVolume(extStoragePath);

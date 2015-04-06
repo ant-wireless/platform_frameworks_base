@@ -69,6 +69,10 @@
     <uses-permission android:name="com.google.android.googleapps.permission.GOOGLE_AUTH" />
     <uses-permission android:name="com.google.android.googleapps.permission.GOOGLE_AUTH.ALL_SERVICES" />
 
+    <uses-permission android:name="android.permission.MANAGE_USERS" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
     <uses-permission android:name="android.permission.RECEIVE_SMS"/>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -90,7 +94,7 @@
     <uses-permission android:name="android.permission.MOVE_PACKAGE" />
     <uses-permission android:name="android.permission.PACKAGE_VERIFICATION_AGENT" />
 
-    <!--os storage test permissions -->
+    <!-- os storage test permissions -->
     <uses-permission android:name="android.permission.MOUNT_UNMOUNT_FILESYSTEMS" />
     <uses-permission android:name="android.permission.ASEC_ACCESS" />
     <uses-permission android:name="android.permission.ASEC_CREATE" />
@@ -98,6 +102,10 @@
     <uses-permission android:name="android.permission.ASEC_MOUNT_UNMOUNT" />
     <uses-permission android:name="android.permission.ASEC_RENAME" />
     <uses-permission android:name="android.permission.SHUTDOWN" />
+
+    <!-- virtual display test permissions -->
+    <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+    <uses-permission android:name="android.permission.CAPTURE_SECURE_VIDEO_OUTPUT" />
 
     <!-- accessibility test permissions -->
     <uses-permission android:name="android.permission.RETRIEVE_WINDOW_CONTENT" />
@@ -1237,14 +1245,14 @@
             </intent-filter>
         </activity>
 
-        <activity android:name="android.accessibilityservice.InterrogationActivity">
+        <activity android:name="android.animation.BasicAnimatorActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.FRAMEWORK_INSTRUMENTATION_TEST" />
             </intent-filter>
         </activity>
 
-        <activity android:name="android.animation.BasicAnimatorActivity">
+        <activity android:name="android.content.res.ResourceCacheActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.FRAMEWORK_INSTRUMENTATION_TEST" />
@@ -1256,4 +1264,11 @@
     <instrumentation android:name="android.test.InstrumentationTestRunner"
             android:targetPackage="com.android.frameworks.coretests"
             android:label="Frameworks Core Tests" />
+    <key-sets>
+        <key-set android:name="A" >
+          <public-key android:name="keyA"
+                      android:value="MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAJoN1Nsgqf0V4C/bbN8wo8O2X/S5D76+5Mb9mlIsHkUTUTbHCNk+LxHIUYLm89YbP9zImrV0bUHLUAZUyoMUCiMCAwEAAQ=="/>
+        </key-set>
+        <upgrade-key-set android:name="A"/>
+    </key-sets>
 </manifest>

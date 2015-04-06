@@ -10,6 +10,8 @@ LOCAL_SHARED_LIBRARIES := libcutils libutils libandroidfw
 LOCAL_MODULE:= btool
 
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
-LOCAL_MODULE_TAGS := debug
+LOCAL_MODULE_TAGS := optional
+
+LOCAL_CFLAGS += -Wall -Werror -Wunused -Wunreachable-code
 
 include $(BUILD_EXECUTABLE)

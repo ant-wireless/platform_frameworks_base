@@ -439,7 +439,7 @@ public class CompatibilityInfo implements Parcelable {
         if (isScalingRequired()) {
             float invertedRatio = applicationInvertedScale;
             inoutDm.density = inoutDm.noncompatDensity * invertedRatio;
-            inoutDm.densityDpi = (int)((inoutDm.density*DisplayMetrics.DENSITY_DEFAULT)+.5f);
+            inoutDm.densityDpi = (int)((inoutDm.noncompatDensityDpi * invertedRatio) + .5f);
             inoutDm.scaledDensity = inoutDm.noncompatScaledDensity * invertedRatio;
             inoutDm.xdpi = inoutDm.noncompatXdpi * invertedRatio;
             inoutDm.ydpi = inoutDm.noncompatYdpi * invertedRatio;
@@ -448,7 +448,7 @@ public class CompatibilityInfo implements Parcelable {
         }
     }
 
-    public void applyToConfiguration(Configuration inoutConfig) {
+    public void applyToConfiguration(int displayDensity, Configuration inoutConfig) {
         if (!supportsScreen()) {
             // This is a larger screen device and the app is not
             // compatible with large screens, so we are forcing it to
@@ -460,14 +460,18 @@ public class CompatibilityInfo implements Parcelable {
             inoutConfig.screenHeightDp = inoutConfig.compatScreenHeightDp;
             inoutConfig.smallestScreenWidthDp = inoutConfig.compatSmallestScreenWidthDp;
         }
+        inoutConfig.densityDpi = displayDensity;
+        if (isScalingRequired()) {
+            float invertedRatio = applicationInvertedScale;
+            inoutConfig.densityDpi = (int)((inoutConfig.densityDpi * invertedRatio) + .5f);
+        }
     }
 
     /**
      * Compute the frame Rect for applications runs under compatibility mode.
      *
      * @param dm the display metrics used to compute the frame size.
-     * @param orientation the orientation of the screen.
-     * @param outRect the output parameter which will contain the result.
+     * @param outDm If non-null the width and height will be set to their scaled values.
      * @return Returns the scaling factor for the window.
      */
     public static float computeCompatibleScaling(DisplayMetrics dm, DisplayMetrics outDm) {
@@ -513,6 +517,9 @@ public class CompatibilityInfo implements Parcelable {
 
     @Override
     public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
         try {
             CompatibilityInfo oc = (CompatibilityInfo)o;
             if (mCompatibilityFlags != oc.mCompatibilityFlags) return false;
@@ -574,10 +581,12 @@ public class CompatibilityInfo implements Parcelable {
 
     public static final Parcelable.Creator<CompatibilityInfo> CREATOR
             = new Parcelable.Creator<CompatibilityInfo>() {
+        @Override
         public CompatibilityInfo createFromParcel(Parcel source) {
             return new CompatibilityInfo(source);
         }
 
+        @Override
         public CompatibilityInfo[] newArray(int size) {
             return new CompatibilityInfo[size];
         }

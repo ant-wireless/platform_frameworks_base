@@ -16,12 +16,17 @@
 
 package android.app;
 
+import android.annotation.SdkConstant;
+import android.app.Notification.Builder;
+import android.content.ComponentName;
 import android.content.Context;
-import android.os.Binder;
-import android.os.RemoteException;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.StrictMode;
+import android.os.UserHandle;
 import android.util.Log;
 
 /**
@@ -70,6 +75,16 @@ public class NotificationManager
     private static String TAG = "NotificationManager";
     private static boolean localLOGV = false;
 
+    /**
+     * Intent that is broadcast when the state of {@link #getEffectsSuppressor()} changes.
+     * This broadcast is only sent to registered receivers.
+     *
+     * @hide
+     */
+    @SdkConstant(SdkConstant.SdkConstantType.BROADCAST_INTENT_ACTION)
+    public static final String ACTION_EFFECTS_SUPPRESSOR_CHANGED
+            = "android.os.action.ACTION_EFFECTS_SUPPRESSOR_CHANGED";
+
     private static INotificationManager sService;
 
     /** @hide */
@@ -86,6 +101,11 @@ public class NotificationManager
     /*package*/ NotificationManager(Context context, Handler handler)
     {
         mContext = context;
+    }
+
+    /** {@hide} */
+    public static NotificationManager from(Context context) {
+        return (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
     }
 
     /**
@@ -119,9 +139,45 @@ public class NotificationManager
         int[] idOut = new int[1];
         INotificationManager service = getService();
         String pkg = mContext.getPackageName();
+        if (notification.sound != null) {
+            notification.sound = notification.sound.getCanonicalUri();
+            if (StrictMode.vmFileUriExposureEnabled()) {
+                notification.sound.checkFileUriExposed("Notification.sound");
+            }
+        }
         if (localLOGV) Log.v(TAG, pkg + ": notify(" + id + ", " + notification + ")");
+        Notification stripped = notification.clone();
+        Builder.stripForDelivery(stripped);
         try {
-            service.enqueueNotificationWithTag(pkg, tag, id, notification, idOut);
+            service.enqueueNotificationWithTag(pkg, mContext.getOpPackageName(), tag, id,
+                    stripped, idOut, UserHandle.myUserId());
+            if (id != idOut[0]) {
+                Log.w(TAG, "notify: id corrupted: sent " + id + ", got back " + idOut[0]);
+            }
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public void notifyAsUser(String tag, int id, Notification notification, UserHandle user)
+    {
+        int[] idOut = new int[1];
+        INotificationManager service = getService();
+        String pkg = mContext.getPackageName();
+        if (notification.sound != null) {
+            notification.sound = notification.sound.getCanonicalUri();
+            if (StrictMode.vmFileUriExposureEnabled()) {
+                notification.sound.checkFileUriExposed("Notification.sound");
+            }
+        }
+        if (localLOGV) Log.v(TAG, pkg + ": notify(" + id + ", " + notification + ")");
+        Notification stripped = notification.clone();
+        Builder.stripForDelivery(stripped);
+        try {
+            service.enqueueNotificationWithTag(pkg, mContext.getOpPackageName(), tag, id,
+                    stripped, idOut, user.getIdentifier());
             if (id != idOut[0]) {
                 Log.w(TAG, "notify: id corrupted: sent " + id + ", got back " + idOut[0]);
             }
@@ -150,7 +206,21 @@ public class NotificationManager
         String pkg = mContext.getPackageName();
         if (localLOGV) Log.v(TAG, pkg + ": cancel(" + id + ")");
         try {
-            service.cancelNotificationWithTag(pkg, tag, id);
+            service.cancelNotificationWithTag(pkg, tag, id, UserHandle.myUserId());
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public void cancelAsUser(String tag, int id, UserHandle user)
+    {
+        INotificationManager service = getService();
+        String pkg = mContext.getPackageName();
+        if (localLOGV) Log.v(TAG, pkg + ": cancel(" + id + ")");
+        try {
+            service.cancelNotificationWithTag(pkg, tag, id, user.getIdentifier());
         } catch (RemoteException e) {
         }
     }
@@ -165,8 +235,44 @@ public class NotificationManager
         String pkg = mContext.getPackageName();
         if (localLOGV) Log.v(TAG, pkg + ": cancelAll()");
         try {
-            service.cancelAllNotifications(pkg);
+            service.cancelAllNotifications(pkg, UserHandle.myUserId());
         } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public ComponentName getEffectsSuppressor() {
+        INotificationManager service = getService();
+        try {
+            return service.getEffectsSuppressor();
+        } catch (RemoteException e) {
+            return null;
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public boolean matchesCallFilter(Bundle extras) {
+        INotificationManager service = getService();
+        try {
+            return service.matchesCallFilter(extras);
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public boolean isSystemConditionProviderEnabled(String path) {
+        INotificationManager service = getService();
+        try {
+            return service.isSystemConditionProviderEnabled(path);
+        } catch (RemoteException e) {
+            return false;
         }
     }
 

@@ -738,14 +738,16 @@ public final class SQLiteDatabase extends SQLiteClosable {
         File dir = file.getParentFile();
         if (dir != null) {
             final String prefix = file.getName() + "-mj";
-            final FileFilter filter = new FileFilter() {
+            File[] files = dir.listFiles(new FileFilter() {
                 @Override
                 public boolean accept(File candidate) {
                     return candidate.getName().startsWith(prefix);
                 }
-            };
-            for (File masterJournal : dir.listFiles(filter)) {
-                deleted |= masterJournal.delete();
+            });
+            if (files != null) {
+                for (File masterJournal : files) {
+                    deleted |= masterJournal.delete();
+                }
             }
         }
         return deleted;
@@ -1481,6 +1483,9 @@ public final class SQLiteDatabase extends SQLiteClosable {
      * @param table the table to delete from
      * @param whereClause the optional WHERE clause to apply when deleting.
      *            Passing null will delete all rows.
+     * @param whereArgs You may include ?s in the where clause, which
+     *            will be replaced by the values from whereArgs. The values
+     *            will be bound as Strings.
      * @return the number of rows affected if a whereClause is passed in, 0
      *         otherwise. To remove all rows and get a count pass "1" as the
      *         whereClause.
@@ -1508,6 +1513,9 @@ public final class SQLiteDatabase extends SQLiteClosable {
      *            valid value that will be translated to NULL.
      * @param whereClause the optional WHERE clause to apply when updating.
      *            Passing null will update all rows.
+     * @param whereArgs You may include ?s in the where clause, which
+     *            will be replaced by the values from whereArgs. The values
+     *            will be bound as Strings.
      * @return the number of rows affected
      */
     public int update(String table, ContentValues values, String whereClause, String[] whereArgs) {
@@ -1522,6 +1530,9 @@ public final class SQLiteDatabase extends SQLiteClosable {
      *            valid value that will be translated to NULL.
      * @param whereClause the optional WHERE clause to apply when updating.
      *            Passing null will update all rows.
+     * @param whereArgs You may include ?s in the where clause, which
+     *            will be replaced by the values from whereArgs. The values
+     *            will be bound as Strings.
      * @param conflictAlgorithm for update conflict resolver
      * @return the number of rows affected
      */

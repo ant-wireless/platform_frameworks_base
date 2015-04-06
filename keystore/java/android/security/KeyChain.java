@@ -23,26 +23,25 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.Process;
 import android.os.RemoteException;
+import android.os.UserHandle;
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
-import java.io.IOException;
 import java.security.InvalidKeyException;
-import java.security.KeyPair;
 import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import libcore.util.Objects;
 
-import org.apache.harmony.xnet.provider.jsse.OpenSSLEngine;
-import org.apache.harmony.xnet.provider.jsse.TrustedCertificateStore;
+import com.android.org.conscrypt.OpenSSLEngine;
+import com.android.org.conscrypt.TrustedCertificateStore;
 
 /**
  * The {@code KeyChain} class provides access to private keys and
@@ -92,9 +91,19 @@ public final class KeyChain {
     public static final String ACCOUNT_TYPE = "com.android.keychain";
 
     /**
+     * Package name for KeyChain chooser.
+     */
+    private static final String KEYCHAIN_PACKAGE = "com.android.keychain";
+
+    /**
      * Action to bring up the KeyChainActivity
      */
     private static final String ACTION_CHOOSER = "com.android.keychain.CHOOSER";
+
+    /**
+     * Package name for the Certificate Installer.
+     */
+    private static final String CERT_INSTALLER_PACKAGE = "com.android.certinstaller";
 
     /**
      * Extra for use with {@link #ACTION_CHOOSER}
@@ -204,7 +213,7 @@ public final class KeyChain {
      */
     public static Intent createInstallIntent() {
         Intent intent = new Intent(ACTION_INSTALL);
-        intent.setClassName("com.android.certinstaller",
+        intent.setClassName(CERT_INSTALLER_PACKAGE,
                             "com.android.certinstaller.CertInstallerMain");
         return intent;
     }
@@ -233,7 +242,7 @@ public final class KeyChain {
      * @param response Callback to invoke when the request completes;
      *     must not be null
      * @param keyTypes The acceptable types of asymmetric keys such as
-     *     "RSA" or "DSA", or a null array.
+     *     "EC" or "RSA", or a null array.
      * @param issuers The acceptable certificate issuers for the
      *     certificate matching the private key, or null.
      * @param host The host name of the server requesting the
@@ -254,7 +263,7 @@ public final class KeyChain {
          *
          * keyTypes would allow the list to be filtered and typically
          * will be set correctly by the server. In practice today,
-         * most all users will want only RSA, rarely DSA, and usually
+         * most all users will want only RSA or EC, and usually
          * only a small number of certs will be available.
          *
          * issuers is typically not useful. Some servers historically
@@ -270,6 +279,7 @@ public final class KeyChain {
             throw new NullPointerException("response == null");
         }
         Intent intent = new Intent(ACTION_CHOOSER);
+        intent.setPackage(KEYCHAIN_PACKAGE);
         intent.putExtra(EXTRA_RESPONSE, new AliasResponse(response));
         intent.putExtra(EXTRA_HOST, host);
         intent.putExtra(EXTRA_PORT, port);
@@ -340,22 +350,18 @@ public final class KeyChain {
         KeyChainConnection keyChainConnection = bind(context);
         try {
             IKeyChainService keyChainService = keyChainConnection.getService();
-            byte[] certificateBytes = keyChainService.getCertificate(alias);
-            List<X509Certificate> chain = new ArrayList<X509Certificate>();
-            chain.add(toCertificate(certificateBytes));
-            TrustedCertificateStore store = new TrustedCertificateStore();
-            for (int i = 0; true; i++) {
-                X509Certificate cert = chain.get(i);
-                if (Objects.equal(cert.getSubjectX500Principal(), cert.getIssuerX500Principal())) {
-                    break;
-                }
-                X509Certificate issuer = store.findIssuer(cert);
-                if (issuer == null) {
-                    break;
-                }
-                chain.add(issuer);
+
+            final byte[] certificateBytes = keyChainService.getCertificate(alias);
+            if (certificateBytes == null) {
+                return null;
             }
+
+            TrustedCertificateStore store = new TrustedCertificateStore();
+            List<X509Certificate> chain = store
+                    .getCertificateChain(toCertificate(certificateBytes));
             return chain.toArray(new X509Certificate[chain.size()]);
+        } catch (CertificateException e) {
+            throw new KeyChainException(e);
         } catch (RemoteException e) {
             throw new KeyChainException(e);
         } catch (RuntimeException e) {
@@ -366,7 +372,33 @@ public final class KeyChain {
         }
     }
 
-    private static X509Certificate toCertificate(byte[] bytes) {
+    /**
+     * Returns {@code true} if the current device's {@code KeyChain} supports a
+     * specific {@code PrivateKey} type indicated by {@code algorithm} (e.g.,
+     * "RSA").
+     */
+    public static boolean isKeyAlgorithmSupported(String algorithm) {
+        final String algUpper = algorithm.toUpperCase(Locale.US);
+        return "EC".equals(algUpper) || "RSA".equals(algUpper);
+    }
+
+    /**
+     * Returns {@code true} if the current device's {@code KeyChain} binds any
+     * {@code PrivateKey} of the given {@code algorithm} to the device once
+     * imported or generated. This can be used to tell if there is special
+     * hardware support that can be used to bind keys to the device in a way
+     * that makes it non-exportable.
+     */
+    public static boolean isBoundKeyAlgorithm(String algorithm) {
+        if (!isKeyAlgorithmSupported(algorithm)) {
+            return false;
+        }
+
+        return KeyStore.getInstance().isHardwareBacked(algorithm);
+    }
+
+    /** @hide */
+    public static X509Certificate toCertificate(byte[] bytes) {
         if (bytes == null) {
             throw new IllegalArgumentException("bytes == null");
         }
@@ -408,6 +440,14 @@ public final class KeyChain {
      * Caller should call unbindService on the result when finished.
      */
     public static KeyChainConnection bind(Context context) throws InterruptedException {
+        return bindAsUser(context, Process.myUserHandle());
+    }
+
+    /**
+     * @hide
+     */
+    public static KeyChainConnection bindAsUser(Context context, UserHandle user)
+            throws InterruptedException {
         if (context == null) {
             throw new NullPointerException("context == null");
         }
@@ -427,9 +467,13 @@ public final class KeyChain {
             }
             @Override public void onServiceDisconnected(ComponentName name) {}
         };
-        boolean isBound = context.bindService(new Intent(IKeyChainService.class.getName()),
-                                              keyChainServiceConnection,
-                                              Context.BIND_AUTO_CREATE);
+        Intent intent = new Intent(IKeyChainService.class.getName());
+        ComponentName comp = intent.resolveSystemService(context.getPackageManager(), 0);
+        intent.setComponent(comp);
+        boolean isBound = context.bindServiceAsUser(intent,
+                                                    keyChainServiceConnection,
+                                                    Context.BIND_AUTO_CREATE,
+                                                    user);
         if (!isBound) {
             throw new AssertionError("could not bind to KeyChainService");
         }

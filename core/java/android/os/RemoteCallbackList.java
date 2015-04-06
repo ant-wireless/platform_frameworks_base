@@ -16,7 +16,7 @@
 
 package android.os;
 
-import java.util.HashMap;
+import android.util.ArrayMap;
 
 /**
  * Takes care of the grunt work of maintaining a list of remote interfaces,
@@ -47,8 +47,8 @@ import java.util.HashMap;
  * implements the {@link #onCallbackDied} method.
  */
 public class RemoteCallbackList<E extends IInterface> {
-    /*package*/ HashMap<IBinder, Callback> mCallbacks
-            = new HashMap<IBinder, Callback>();
+    /*package*/ ArrayMap<IBinder, Callback> mCallbacks
+            = new ArrayMap<IBinder, Callback>();
     private Object[] mActiveBroadcast;
     private int mBroadcastCount = -1;
     private boolean mKilled = false;
@@ -159,7 +159,8 @@ public class RemoteCallbackList<E extends IInterface> {
      */
     public void kill() {
         synchronized (mCallbacks) {
-            for (Callback cb : mCallbacks.values()) {
+            for (int cbi=mCallbacks.size()-1; cbi>=0; cbi--) {
+                Callback cb = mCallbacks.valueAt(cbi);
                 cb.mCallback.asBinder().unlinkToDeath(cb, 0);
             }
             mCallbacks.clear();
@@ -238,11 +239,10 @@ public class RemoteCallbackList<E extends IInterface> {
             if (active == null || active.length < N) {
                 mActiveBroadcast = active = new Object[N];
             }
-            int i=0;
-            for (Callback cb : mCallbacks.values()) {
-                active[i++] = cb;
+            for (int i=0; i<N; i++) {
+                active[i] = mCallbacks.valueAt(i);
             }
-            return i;
+            return N;
         }
     }
 
@@ -303,5 +303,26 @@ public class RemoteCallbackList<E extends IInterface> {
         }
         
         mBroadcastCount = -1;
+    }
+
+    /**
+     * Returns the number of registered callbacks. Note that the number of registered
+     * callbacks may differ from the value returned by {@link #beginBroadcast()} since
+     * the former returns the number of callbacks registered at the time of the call
+     * and the second the number of callback to which the broadcast will be delivered.
+     * <p>
+     * This function is useful to decide whether to schedule a broadcast if this
+     * requires doing some work which otherwise would not be performed.
+     * </p>
+     *
+     * @return The size.
+     */
+    public int getRegisteredCallbackCount() {
+        synchronized (mCallbacks) {
+            if (mKilled) {
+                return 0;
+            }
+            return mCallbacks.size();
+        }
     }
 }

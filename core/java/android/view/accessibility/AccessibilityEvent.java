@@ -19,6 +19,7 @@ package android.view.accessibility;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.text.TextUtils;
+import android.util.Pools.SynchronizedPool;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -325,6 +326,7 @@ import java.util.List;
  * <em>Properties:</em></br>
  * <ul>
  *   <li>{@link #getEventType()} - The type of the event.</li>
+ *   <li>{@link #getContentChangeTypes()} - The type of content changes.</li>
  *   <li>{@link #getSource()} - The source info (for registered clients).</li>
  *   <li>{@link #getClassName()} - The class name of the source.</li>
  *   <li>{@link #getPackageName()} - The package name of the source.</li>
@@ -339,6 +341,23 @@ import java.util.List;
  * text content to such events is by setting the
  * {@link android.R.styleable#View_contentDescription contentDescription} of the source
  * view.</br>
+ * </p>
+ * <p>
+ * <b>Windows changed</b> - represents the event of changes in the windows shown on
+ * the screen such as a window appeared, a window disappeared, a window size changed,
+ * a window layer changed, etc.</br>
+ * <em>Type:</em> {@link #TYPE_WINDOWS_CHANGED}</br>
+ * <em>Properties:</em></br>
+ * <ul>
+ *   <li>{@link #getEventType()} - The type of the event.</li>
+ *   <li>{@link #getEventTime()} - The event time.</li>
+ * </ul>
+ * <em>Note:</em> You can retrieve the {@link AccessibilityWindowInfo} for the window
+ * source of the event via {@link AccessibilityEvent#getSource()} to get the source
+ * node on which then call {@link AccessibilityNodeInfo#getWindow()
+ * AccessibilityNodeInfo.getWindow()} to get the window. Also all windows on the screen can
+ * be retrieved by a call to {@link android.accessibilityservice.AccessibilityService#getWindows()
+ * android.accessibilityservice.AccessibilityService.getWindows()}.
  * </p>
  * <p>
  * <b>NOTIFICATION TYPES</b></br>
@@ -424,6 +443,28 @@ import java.util.List;
  * </ul>
  * </p>
  * <p>
+ * <b>Touch interaction start</b> - represents the event of starting a touch
+ * interaction, which is the user starts touching the screen.</br>
+ * <em>Type:</em> {@link #TYPE_TOUCH_INTERACTION_START}</br>
+ * <em>Properties:</em></br>
+ * <ul>
+ *   <li>{@link #getEventType()} - The type of the event.</li>
+ * </ul>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
+ * </p>
+ * <p>
+ * <b>Touch interaction end</b> - represents the event of ending a touch
+ * interaction, which is the user stops touching the screen.</br>
+ * <em>Type:</em> {@link #TYPE_TOUCH_INTERACTION_END}</br>
+ * <em>Properties:</em></br>
+ * <ul>
+ *   <li>{@link #getEventType()} - The type of the event.</li>
+ * </ul>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
+ * </p>
+ * <p>
  * <b>Touch exploration gesture start</b> - represents the event of starting a touch
  * exploring gesture.</br>
  * <em>Type:</em> {@link #TYPE_TOUCH_EXPLORATION_GESTURE_START}</br>
@@ -431,15 +472,8 @@ import java.util.List;
  * <ul>
  *   <li>{@link #getEventType()} - The type of the event.</li>
  * </ul>
- * <em>Note:</em> This event type is not dispatched to descendants though
- * {@link android.view.View#dispatchPopulateAccessibilityEvent(AccessibilityEvent)
- * View.dispatchPopulateAccessibilityEvent(AccessibilityEvent)}, hence the event
- * source {@link android.view.View} and the sub-tree rooted at it will not receive
- * calls to {@link android.view.View#onPopulateAccessibilityEvent(AccessibilityEvent)
- * View.onPopulateAccessibilityEvent(AccessibilityEvent)}. The preferred way to add
- * text content to such events is by setting the
- * {@link android.R.styleable#View_contentDescription contentDescription} of the source
- * view.</br>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
  * </p>
  * <p>
  * <b>Touch exploration gesture end</b> - represents the event of ending a touch
@@ -449,15 +483,30 @@ import java.util.List;
  * <ul>
  *   <li>{@link #getEventType()} - The type of the event.</li>
  * </ul>
- * <em>Note:</em> This event type is not dispatched to descendants though
- * {@link android.view.View#dispatchPopulateAccessibilityEvent(AccessibilityEvent)
- * View.dispatchPopulateAccessibilityEvent(AccessibilityEvent)}, hence the event
- * source {@link android.view.View} and the sub-tree rooted at it will not receive
- * calls to {@link android.view.View#onPopulateAccessibilityEvent(AccessibilityEvent)
- * View.onPopulateAccessibilityEvent(AccessibilityEvent)}. The preferred way to add
- * text content to such events is by setting the
- * {@link android.R.styleable#View_contentDescription contentDescription} of the source
- * view.</br>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
+ * </p>
+ * <p>
+ * <b>Touch gesture detection start</b> - represents the event of starting a user
+ * gesture detection.</br>
+ * <em>Type:</em> {@link #TYPE_GESTURE_DETECTION_START}</br>
+ * <em>Properties:</em></br>
+ * <ul>
+ *   <li>{@link #getEventType()} - The type of the event.</li>
+ * </ul>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
+ * </p>
+ * <p>
+ * <b>Touch gesture detection end</b> - represents the event of ending a user
+ * gesture detection.</br>
+ * <em>Type:</em> {@link #TYPE_GESTURE_DETECTION_END}</br>
+ * <em>Properties:</em></br>
+ * <ul>
+ *   <li>{@link #getEventType()} - The type of the event.</li>
+ * </ul>
+ * <em>Note:</em> This event is fired only by the system and is not passed to the
+ * view tree to be populated.</br>
  * </p>
  * <p>
  * <b>MISCELLANEOUS TYPES</b></br>
@@ -610,6 +659,55 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
     public static final int TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY = 0x00020000;
 
     /**
+     * Represents the event of beginning gesture detection.
+     */
+    public static final int TYPE_GESTURE_DETECTION_START = 0x00040000;
+
+    /**
+     * Represents the event of ending gesture detection.
+     */
+    public static final int TYPE_GESTURE_DETECTION_END = 0x00080000;
+
+    /**
+     * Represents the event of the user starting to touch the screen.
+     */
+    public static final int TYPE_TOUCH_INTERACTION_START = 0x00100000;
+
+    /**
+     * Represents the event of the user ending to touch the screen.
+     */
+    public static final int TYPE_TOUCH_INTERACTION_END = 0x00200000;
+
+    /**
+     * Represents the event change in the windows shown on the screen.
+     */
+    public static final int TYPE_WINDOWS_CHANGED = 0x00400000;
+
+    /**
+     * Change type for {@link #TYPE_WINDOW_CONTENT_CHANGED} event:
+     * The type of change is not defined.
+     */
+    public static final int CONTENT_CHANGE_TYPE_UNDEFINED = 0x00000000;
+
+    /**
+     * Change type for {@link #TYPE_WINDOW_CONTENT_CHANGED} event:
+     * A node in the subtree rooted at the source node was added or removed.
+     */
+    public static final int CONTENT_CHANGE_TYPE_SUBTREE = 0x00000001;
+
+    /**
+     * Change type for {@link #TYPE_WINDOW_CONTENT_CHANGED} event:
+     * The node's text changed.
+     */
+    public static final int CONTENT_CHANGE_TYPE_TEXT = 0x00000002;
+
+    /**
+     * Change type for {@link #TYPE_WINDOW_CONTENT_CHANGED} event:
+     * The node's content description changed.
+     */
+    public static final int CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION = 0x00000004;
+
+    /**
      * Mask for {@link AccessibilityEvent} all types.
      *
      * @see #TYPE_VIEW_CLICKED
@@ -628,23 +726,26 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      * @see #TYPE_VIEW_TEXT_SELECTION_CHANGED
      * @see #TYPE_ANNOUNCEMENT
      * @see #TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY
+     * @see #TYPE_GESTURE_DETECTION_START
+     * @see #TYPE_GESTURE_DETECTION_END
+     * @see #TYPE_TOUCH_INTERACTION_START
+     * @see #TYPE_TOUCH_INTERACTION_END
+     * @see #TYPE_WINDOWS_CHANGED
      */
     public static final int TYPES_ALL_MASK = 0xFFFFFFFF;
 
     private static final int MAX_POOL_SIZE = 10;
-    private static final Object sPoolLock = new Object();
-    private static AccessibilityEvent sPool;
-    private static int sPoolSize;
-    private AccessibilityEvent mNext;
-    private boolean mIsInPool;
+    private static final SynchronizedPool<AccessibilityEvent> sPool =
+            new SynchronizedPool<AccessibilityEvent>(MAX_POOL_SIZE);
 
     private int mEventType;
     private CharSequence mPackageName;
     private long mEventTime;
     int mMovementGranularity;
     int mAction;
+    int mContentChangeTypes;
 
-    private final ArrayList<AccessibilityRecord> mRecords = new ArrayList<AccessibilityRecord>();
+    private ArrayList<AccessibilityRecord> mRecords;
 
     /*
      * Hide constructor from clients.
@@ -662,6 +763,7 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         mEventType = event.mEventType;
         mMovementGranularity = event.mMovementGranularity;
         mAction = event.mAction;
+        mContentChangeTypes = event.mContentChangeTypes;
         mEventTime = event.mEventTime;
         mPackageName = event.mPackageName;
     }
@@ -676,11 +778,13 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
     @Override
     public void setSealed(boolean sealed) {
         super.setSealed(sealed);
-        List<AccessibilityRecord> records = mRecords;
-        final int recordCount = records.size();
-        for (int i = 0; i < recordCount; i++) {
-            AccessibilityRecord record = records.get(i);
-            record.setSealed(sealed);
+        final List<AccessibilityRecord> records = mRecords;
+        if (records != null) {
+            final int recordCount = records.size();
+            for (int i = 0; i < recordCount; i++) {
+                AccessibilityRecord record = records.get(i);
+                record.setSealed(sealed);
+            }
         }
     }
 
@@ -690,7 +794,7 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      * @return The number of records.
      */
     public int getRecordCount() {
-        return mRecords.size();
+        return mRecords == null ? 0 : mRecords.size();
     }
 
     /**
@@ -702,6 +806,9 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      */
     public void appendRecord(AccessibilityRecord record) {
         enforceNotSealed();
+        if (mRecords == null) {
+            mRecords = new ArrayList<AccessibilityRecord>();
+        }
         mRecords.add(record);
     }
 
@@ -712,6 +819,9 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      * @return The record at the specified index.
      */
     public AccessibilityRecord getRecord(int index) {
+        if (mRecords == null) {
+            throw new IndexOutOfBoundsException("Invalid index " + index + ", size is 0");
+        }
         return mRecords.get(index);
     }
 
@@ -722,6 +832,36 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      */
     public int getEventType() {
         return mEventType;
+    }
+
+    /**
+     * Gets the bit mask of change types signaled by an
+     * {@link #TYPE_WINDOW_CONTENT_CHANGED} event. A single event may represent
+     * multiple change types.
+     *
+     * @return The bit mask of change types. One or more of:
+     *         <ul>
+     *         <li>{@link AccessibilityEvent#CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION}
+     *         <li>{@link AccessibilityEvent#CONTENT_CHANGE_TYPE_SUBTREE}
+     *         <li>{@link AccessibilityEvent#CONTENT_CHANGE_TYPE_TEXT}
+     *         <li>{@link AccessibilityEvent#CONTENT_CHANGE_TYPE_UNDEFINED}
+     *         </ul>
+     */
+    public int getContentChangeTypes() {
+        return mContentChangeTypes;
+    }
+
+    /**
+     * Sets the bit mask of node tree changes signaled by an
+     * {@link #TYPE_WINDOW_CONTENT_CHANGED} event.
+     *
+     * @param changeTypes The bit mask of change types.
+     * @throws IllegalStateException If called from an AccessibilityService.
+     * @see #getContentChangeTypes()
+     */
+    public void setContentChangeTypes(int changeTypes) {
+        enforceNotSealed();
+        mContentChangeTypes = changeTypes;
     }
 
     /**
@@ -801,10 +941,20 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
 
     /**
      * Sets the performed action that triggered this event.
+     * <p>
+     * Valid actions are defined in {@link AccessibilityNodeInfo}:
+     * <ul>
+     * <li>{@link AccessibilityNodeInfo#ACTION_ACCESSIBILITY_FOCUS}
+     * <li>{@link AccessibilityNodeInfo#ACTION_CLEAR_ACCESSIBILITY_FOCUS}
+     * <li>{@link AccessibilityNodeInfo#ACTION_CLEAR_FOCUS}
+     * <li>{@link AccessibilityNodeInfo#ACTION_CLEAR_SELECTION}
+     * <li>{@link AccessibilityNodeInfo#ACTION_CLICK}
+     * <li>etc.
+     * </ul>
      *
      * @param action The action.
-     *
      * @throws IllegalStateException If called from an AccessibilityService.
+     * @see AccessibilityNodeInfo#performAction(int)
      */
     public void setAction(int action) {
         enforceNotSealed();
@@ -845,11 +995,14 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         AccessibilityEvent eventClone = AccessibilityEvent.obtain();
         eventClone.init(event);
 
-        final int recordCount = event.mRecords.size();
-        for (int i = 0; i < recordCount; i++) {
-            AccessibilityRecord record = event.mRecords.get(i);
-            AccessibilityRecord recordClone = AccessibilityRecord.obtain(record);
-            eventClone.mRecords.add(recordClone);
+        if (event.mRecords != null) {
+            final int recordCount = event.mRecords.size();
+            eventClone.mRecords = new ArrayList<AccessibilityRecord>(recordCount);
+            for (int i = 0; i < recordCount; i++) {
+                final AccessibilityRecord record = event.mRecords.get(i);
+                final AccessibilityRecord recordClone = AccessibilityRecord.obtain(record);
+                eventClone.mRecords.add(recordClone);
+            }
         }
 
         return eventClone;
@@ -862,17 +1015,8 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      * @return An instance.
      */
     public static AccessibilityEvent obtain() {
-        synchronized (sPoolLock) {
-            if (sPool != null) {
-                AccessibilityEvent event = sPool;
-                sPool = sPool.mNext;
-                sPoolSize--;
-                event.mNext = null;
-                event.mIsInPool = false;
-                return event;
-            }
-            return new AccessibilityEvent();
-        }
+        AccessibilityEvent event = sPool.acquire();
+        return (event != null) ? event : new AccessibilityEvent();
     }
 
     /**
@@ -885,18 +1029,8 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      */
     @Override
     public void recycle() {
-        if (mIsInPool) {
-            throw new IllegalStateException("Event already recycled!");
-        }
         clear();
-        synchronized (sPoolLock) {
-            if (sPoolSize <= MAX_POOL_SIZE) {
-                mNext = sPool;
-                sPool = this;
-                mIsInPool = true;
-                sPoolSize++;
-            }
-        }
+        sPool.release(this);
     }
 
     /**
@@ -910,11 +1044,14 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         mEventType = 0;
         mMovementGranularity = 0;
         mAction = 0;
+        mContentChangeTypes = 0;
         mPackageName = null;
         mEventTime = 0;
-        while (!mRecords.isEmpty()) {
-            AccessibilityRecord record = mRecords.remove(0);
-            record.recycle();
+        if (mRecords != null) {
+            while (!mRecords.isEmpty()) {
+                AccessibilityRecord record = mRecords.remove(0);
+                record.recycle();
+            }
         }
     }
 
@@ -928,6 +1065,7 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         mEventType = parcel.readInt();
         mMovementGranularity = parcel.readInt();
         mAction = parcel.readInt();
+        mContentChangeTypes = parcel.readInt();
         mPackageName = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(parcel);
         mEventTime = parcel.readLong();
         mConnectionId = parcel.readInt();
@@ -935,11 +1073,14 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
 
         // Read the records.
         final int recordCount = parcel.readInt();
-        for (int i = 0; i < recordCount; i++) {
-            AccessibilityRecord record = AccessibilityRecord.obtain();
-            readAccessibilityRecordFromParcel(record, parcel);
-            record.mConnectionId = mConnectionId;
-            mRecords.add(record);
+        if (recordCount > 0) {
+            mRecords = new ArrayList<AccessibilityRecord>(recordCount);
+            for (int i = 0; i < recordCount; i++) {
+                AccessibilityRecord record = AccessibilityRecord.obtain();
+                readAccessibilityRecordFromParcel(record, parcel);
+                record.mConnectionId = mConnectionId;
+                mRecords.add(record);
+            }
         }
     }
 
@@ -980,6 +1121,7 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         parcel.writeInt(mEventType);
         parcel.writeInt(mMovementGranularity);
         parcel.writeInt(mAction);
+        parcel.writeInt(mContentChangeTypes);
         TextUtils.writeToParcel(mPackageName, parcel, 0);
         parcel.writeLong(mEventTime);
         parcel.writeInt(mConnectionId);
@@ -1041,10 +1183,11 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
         builder.append(super.toString());
         if (DEBUG) {
             builder.append("\n");
+            builder.append("; ContentChangeTypes: ").append(mContentChangeTypes);
             builder.append("; sourceWindowId: ").append(mSourceWindowId);
             builder.append("; mSourceNodeId: ").append(mSourceNodeId);
-            for (int i = 0; i < mRecords.size(); i++) {
-                AccessibilityRecord record = mRecords.get(i);
+            for (int i = 0; i < getRecordCount(); i++) {
+                final AccessibilityRecord record = getRecord(i);
                 builder.append("  Record ");
                 builder.append(i);
                 builder.append(":");
@@ -1083,46 +1226,183 @@ public final class AccessibilityEvent extends AccessibilityRecord implements Par
      * @return The string representation.
      */
     public static String eventTypeToString(int eventType) {
-        switch (eventType) {
-            case TYPE_VIEW_CLICKED:
-                return "TYPE_VIEW_CLICKED";
-            case TYPE_VIEW_LONG_CLICKED:
-                return "TYPE_VIEW_LONG_CLICKED";
-            case TYPE_VIEW_SELECTED:
-                return "TYPE_VIEW_SELECTED";
-            case TYPE_VIEW_FOCUSED:
-                return "TYPE_VIEW_FOCUSED";
-            case TYPE_VIEW_TEXT_CHANGED:
-                return "TYPE_VIEW_TEXT_CHANGED";
-            case TYPE_WINDOW_STATE_CHANGED:
-                return "TYPE_WINDOW_STATE_CHANGED";
-            case TYPE_VIEW_HOVER_ENTER:
-                return "TYPE_VIEW_HOVER_ENTER";
-            case TYPE_VIEW_HOVER_EXIT:
-                return "TYPE_VIEW_HOVER_EXIT";
-            case TYPE_NOTIFICATION_STATE_CHANGED:
-                return "TYPE_NOTIFICATION_STATE_CHANGED";  
-            case TYPE_TOUCH_EXPLORATION_GESTURE_START:
-                return "TYPE_TOUCH_EXPLORATION_GESTURE_START";
-            case TYPE_TOUCH_EXPLORATION_GESTURE_END:
-                return "TYPE_TOUCH_EXPLORATION_GESTURE_END";
-            case TYPE_WINDOW_CONTENT_CHANGED:
-                return "TYPE_WINDOW_CONTENT_CHANGED";
-            case TYPE_VIEW_TEXT_SELECTION_CHANGED:
-                return "TYPE_VIEW_TEXT_SELECTION_CHANGED";
-            case TYPE_VIEW_SCROLLED:
-                return "TYPE_VIEW_SCROLLED";
-            case TYPE_ANNOUNCEMENT:
-                return "TYPE_ANNOUNCEMENT";
-            case TYPE_VIEW_ACCESSIBILITY_FOCUSED:
-                return "TYPE_VIEW_ACCESSIBILITY_FOCUSED";
-            case TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED:
-                return "TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED";
-            case TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY:
-                return "TYPE_CURRENT_AT_GRANULARITY_MOVEMENT_CHANGED";
-            default:
-                return null;
+        if (eventType == TYPES_ALL_MASK) {
+            return "TYPES_ALL_MASK";
         }
+        StringBuilder builder = new StringBuilder();
+        int eventTypeCount = 0;
+        while (eventType != 0) {
+            final int eventTypeFlag = 1 << Integer.numberOfTrailingZeros(eventType);
+            eventType &= ~eventTypeFlag;
+            switch (eventTypeFlag) {
+                case TYPE_VIEW_CLICKED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_CLICKED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_LONG_CLICKED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_LONG_CLICKED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_SELECTED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_SELECTED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_FOCUSED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_FOCUSED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_TEXT_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_TEXT_CHANGED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_WINDOW_STATE_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_WINDOW_STATE_CHANGED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_HOVER_ENTER: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_HOVER_ENTER");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_HOVER_EXIT: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_HOVER_EXIT");
+                    eventTypeCount++;
+                } break;
+                case TYPE_NOTIFICATION_STATE_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_NOTIFICATION_STATE_CHANGED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_TOUCH_EXPLORATION_GESTURE_START: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_TOUCH_EXPLORATION_GESTURE_START");
+                    eventTypeCount++;
+                } break;
+                case TYPE_TOUCH_EXPLORATION_GESTURE_END: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_TOUCH_EXPLORATION_GESTURE_END");
+                    eventTypeCount++;
+                } break;
+                case TYPE_WINDOW_CONTENT_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_WINDOW_CONTENT_CHANGED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_TEXT_SELECTION_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_TEXT_SELECTION_CHANGED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_SCROLLED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_SCROLLED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_ANNOUNCEMENT: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_ANNOUNCEMENT");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_ACCESSIBILITY_FOCUSED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_ACCESSIBILITY_FOCUSED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED");
+                    eventTypeCount++;
+                } break;
+                case TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY");
+                    eventTypeCount++;
+                } break;
+                case TYPE_GESTURE_DETECTION_START: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_GESTURE_DETECTION_START");
+                    eventTypeCount++;
+                } break;
+                case TYPE_GESTURE_DETECTION_END: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_GESTURE_DETECTION_END");
+                    eventTypeCount++;
+                } break;
+                case TYPE_TOUCH_INTERACTION_START: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_TOUCH_INTERACTION_START");
+                    eventTypeCount++;
+                } break;
+                case TYPE_TOUCH_INTERACTION_END: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_TOUCH_INTERACTION_END");
+                    eventTypeCount++;
+                } break;
+                case TYPE_WINDOWS_CHANGED: {
+                    if (eventTypeCount > 0) {
+                        builder.append(", ");
+                    }
+                    builder.append("TYPE_WINDOWS_CHANGED");
+                    eventTypeCount++;
+                } break;
+            }
+        }
+        if (eventTypeCount > 1) {
+            builder.insert(0, '[');
+            builder.append(']');
+        }
+        return builder.toString();
     }
 
     /**

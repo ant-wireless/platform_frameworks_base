@@ -18,18 +18,19 @@ package android.view;
 
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.res.Configuration;
 import android.content.res.Resources;
-import android.os.Build;
 
 /**
  * A ContextWrapper that allows you to modify the theme from what is in the 
  * wrapped context. 
  */
 public class ContextThemeWrapper extends ContextWrapper {
-    private Context mBase;
     private int mThemeResource;
     private Resources.Theme mTheme;
     private LayoutInflater mInflater;
+    private Configuration mOverrideConfiguration;
+    private Resources mResources;
 
     public ContextThemeWrapper() {
         super(null);
@@ -37,13 +38,46 @@ public class ContextThemeWrapper extends ContextWrapper {
     
     public ContextThemeWrapper(Context base, int themeres) {
         super(base);
-        mBase = base;
         mThemeResource = themeres;
     }
 
     @Override protected void attachBaseContext(Context newBase) {
         super.attachBaseContext(newBase);
-        mBase = newBase;
+    }
+
+    /**
+     * Call to set an "override configuration" on this context -- this is
+     * a configuration that replies one or more values of the standard
+     * configuration that is applied to the context.  See
+     * {@link Context#createConfigurationContext(Configuration)} for more
+     * information.
+     *
+     * <p>This method can only be called once, and must be called before any
+     * calls to {@link #getResources()} are made.
+     */
+    public void applyOverrideConfiguration(Configuration overrideConfiguration) {
+        if (mResources != null) {
+            throw new IllegalStateException("getResources() has already been called");
+        }
+        if (mOverrideConfiguration != null) {
+            throw new IllegalStateException("Override configuration has already been set");
+        }
+        mOverrideConfiguration = new Configuration(overrideConfiguration);
+    }
+
+    @Override
+    public Resources getResources() {
+        if (mResources != null) {
+            return mResources;
+        }
+        if (mOverrideConfiguration == null) {
+            mResources = super.getResources();
+            return mResources;
+        } else {
+            Context resc = createConfigurationContext(mOverrideConfiguration);
+            mResources = resc.getResources();
+            return mResources;
+        }
     }
     
     @Override public void setTheme(int resid) {
@@ -72,11 +106,11 @@ public class ContextThemeWrapper extends ContextWrapper {
     @Override public Object getSystemService(String name) {
         if (LAYOUT_INFLATER_SERVICE.equals(name)) {
             if (mInflater == null) {
-                mInflater = LayoutInflater.from(mBase).cloneInContext(this);
+                mInflater = LayoutInflater.from(getBaseContext()).cloneInContext(this);
             }
             return mInflater;
         }
-        return mBase.getSystemService(name);
+        return getBaseContext().getSystemService(name);
     }
     
     /**
@@ -98,7 +132,7 @@ public class ContextThemeWrapper extends ContextWrapper {
         final boolean first = mTheme == null;
         if (first) {
             mTheme = getResources().newTheme();
-            Resources.Theme theme = mBase.getTheme();
+            Resources.Theme theme = getBaseContext().getTheme();
             if (theme != null) {
                 mTheme.setTo(theme);
             }

@@ -23,14 +23,9 @@ import android.database.DataSetObserver;
 import android.graphics.Canvas;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
-import android.util.FloatMath;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.View.MeasureSpec;
-import android.view.View.OnClickListener;
-import android.view.View.OnLongClickListener;
-import android.view.View.OnTouchListener;
 import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
 import android.view.ViewTreeObserver.OnGlobalLayoutListener;
@@ -53,32 +48,42 @@ public class RecentsVerticalScrollView extends ScrollView
     private RecentsCallback mCallback;
     protected int mLastScrollPosition;
     private SwipeHelper mSwipeHelper;
-    private RecentsScrollViewPerformanceHelper mPerformanceHelper;
+    private FadedEdgeDrawHelper mFadedEdgeDrawHelper;
     private HashSet<View> mRecycledViews;
     private int mNumItemsInOneScreenful;
+    private Runnable mOnScrollListener;
 
     public RecentsVerticalScrollView(Context context, AttributeSet attrs) {
         super(context, attrs, 0);
-        float densityScale = getResources().getDisplayMetrics().density;
-        float pagingTouchSlop = ViewConfiguration.get(mContext).getScaledPagingTouchSlop();
-        mSwipeHelper = new SwipeHelper(SwipeHelper.X, this, densityScale, pagingTouchSlop);
+        mSwipeHelper = new SwipeHelper(SwipeHelper.X, this, context);
 
-        mPerformanceHelper = RecentsScrollViewPerformanceHelper.create(context, attrs, this, true);
+        mFadedEdgeDrawHelper = FadedEdgeDrawHelper.create(context, attrs, this, true);
         mRecycledViews = new HashSet<View>();
     }
 
     public void setMinSwipeAlpha(float minAlpha) {
-        mSwipeHelper.setMinAlpha(minAlpha);
+        mSwipeHelper.setMinSwipeProgress(minAlpha);
     }
 
     private int scrollPositionOfMostRecent() {
-        return mLinearLayout.getHeight() - getHeight();
+        return mLinearLayout.getHeight() - getHeight() + getPaddingTop();
     }
 
     private void addToRecycledViews(View v) {
         if (mRecycledViews.size() < mNumItemsInOneScreenful) {
             mRecycledViews.add(v);
         }
+    }
+
+    public View findViewForTask(int persistentTaskId) {
+        for (int i = 0; i < mLinearLayout.getChildCount(); i++) {
+            View v = mLinearLayout.getChildAt(i);
+            RecentsPanelView.ViewHolder holder = (RecentsPanelView.ViewHolder) v.getTag();
+            if (holder.taskDescription.persistentTaskId == persistentTaskId) {
+                return v;
+            }
+        }
+        return null;
     }
 
     private void update() {
@@ -105,8 +110,8 @@ public class RecentsVerticalScrollView extends ScrollView
             }
             final View view = mAdapter.getView(i, old, mLinearLayout);
 
-            if (mPerformanceHelper != null) {
-                mPerformanceHelper.addViewCallback(view);
+            if (mFadedEdgeDrawHelper != null) {
+                mFadedEdgeDrawHelper.addViewCallback(view);
             }
 
             OnTouchListener noOpListener = new OnTouchListener() {
@@ -150,25 +155,26 @@ public class RecentsVerticalScrollView extends ScrollView
             appTitle.setContentDescription(" ");
             appTitle.setOnTouchListener(noOpListener);
             final View calloutLine = view.findViewById(R.id.recents_callout_line);
-            calloutLine.setOnTouchListener(noOpListener);
+            if (calloutLine != null) {
+                calloutLine.setOnTouchListener(noOpListener);
+            }
 
             mLinearLayout.addView(view);
         }
         setLayoutTransition(transitioner);
 
-        // Scroll to end after layout.
-        final ViewTreeObserver observer = getViewTreeObserver();
-
+        // Scroll to end after initial layout.
         final OnGlobalLayoutListener updateScroll = new OnGlobalLayoutListener() {
                 public void onGlobalLayout() {
                     mLastScrollPosition = scrollPositionOfMostRecent();
                     scrollTo(0, mLastScrollPosition);
+                    final ViewTreeObserver observer = getViewTreeObserver();
                     if (observer.isAlive()) {
                         observer.removeOnGlobalLayoutListener(this);
                     }
                 }
             };
-        observer.addOnGlobalLayoutListener(updateScroll);
+        getViewTreeObserver().addOnGlobalLayoutListener(updateScroll);
     }
 
     @Override
@@ -190,6 +196,16 @@ public class RecentsVerticalScrollView extends ScrollView
 
     public boolean canChildBeDismissed(View v) {
         return true;
+    }
+
+    @Override
+    public boolean isAntiFalsingNeeded() {
+        return false;
+    }
+
+    @Override
+    public float getFalsingThresholdFactor() {
+        return 1.0f;
     }
 
     public void dismissChild(View v) {
@@ -216,6 +232,15 @@ public class RecentsVerticalScrollView extends ScrollView
     public void onDragCancelled(View v) {
     }
 
+    @Override
+    public void onChildSnappedBack(View animView) {
+    }
+
+    @Override
+    public boolean updateSwipeProgress(View animView, boolean dismissable, float swipeProgress) {
+        return false;
+    }
+
     public View getChildAtPosition(MotionEvent ev) {
         final float x = ev.getX() + getScrollX();
         final float y = ev.getY() + getScrollY();
@@ -235,36 +260,32 @@ public class RecentsVerticalScrollView extends ScrollView
     }
 
     @Override
-    public void draw(Canvas canvas) {
-        super.draw(canvas);
-
-        if (mPerformanceHelper != null) {
-            int paddingLeft = mPaddingLeft;
+    public void drawFadedEdges(Canvas canvas, int left, int right, int top, int bottom) {
+        if (mFadedEdgeDrawHelper != null) {
             final boolean offsetRequired = isPaddingOffsetRequired();
-            if (offsetRequired) {
-                paddingLeft += getLeftPaddingOffset();
-            }
-
-            int left = mScrollX + paddingLeft;
-            int right = left + mRight - mLeft - mPaddingRight - paddingLeft;
-            int top = mScrollY + getFadeTop(offsetRequired);
-            int bottom = top + getFadeHeight(offsetRequired);
-
-            if (offsetRequired) {
-                right += getRightPaddingOffset();
-                bottom += getBottomPaddingOffset();
-            }
-            mPerformanceHelper.drawCallback(canvas,
-                    left, right, top, bottom, mScrollX, mScrollY,
+            mFadedEdgeDrawHelper.drawCallback(canvas,
+                    left, right, top + getFadeTop(offsetRequired), bottom, getScrollX(), getScrollY(),
                     getTopFadingEdgeStrength(), getBottomFadingEdgeStrength(),
-                    0, 0);
+                    0, 0, getPaddingTop());
         }
     }
 
     @Override
+    protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+       super.onScrollChanged(l, t, oldl, oldt);
+       if (mOnScrollListener != null) {
+           mOnScrollListener.run();
+       }
+    }
+
+    public void setOnScrollListener(Runnable listener) {
+        mOnScrollListener = listener;
+    }
+
+    @Override
     public int getVerticalFadingEdgeLength() {
-        if (mPerformanceHelper != null) {
-            return mPerformanceHelper.getVerticalFadingEdgeLengthCallback();
+        if (mFadedEdgeDrawHelper != null) {
+            return mFadedEdgeDrawHelper.getVerticalFadingEdgeLength();
         } else {
             return super.getVerticalFadingEdgeLength();
         }
@@ -272,8 +293,8 @@ public class RecentsVerticalScrollView extends ScrollView
 
     @Override
     public int getHorizontalFadingEdgeLength() {
-        if (mPerformanceHelper != null) {
-            return mPerformanceHelper.getHorizontalFadingEdgeLengthCallback();
+        if (mFadedEdgeDrawHelper != null) {
+            return mFadedEdgeDrawHelper.getHorizontalFadingEdgeLength();
         } else {
             return super.getHorizontalFadingEdgeLength();
         }
@@ -284,16 +305,15 @@ public class RecentsVerticalScrollView extends ScrollView
         super.onFinishInflate();
         setScrollbarFadingEnabled(true);
         mLinearLayout = (LinearLayout) findViewById(R.id.recents_linear_layout);
-        final int leftPadding = mContext.getResources()
+        final int leftPadding = getContext().getResources()
             .getDimensionPixelOffset(R.dimen.status_bar_recents_thumbnail_left_margin);
         setOverScrollEffectPadding(leftPadding, 0);
     }
 
     @Override
     public void onAttachedToWindow() {
-        if (mPerformanceHelper != null) {
-            mPerformanceHelper.onAttachedToWindowCallback(
-                    mCallback, mLinearLayout, isHardwareAccelerated());
+        if (mFadedEdgeDrawHelper != null) {
+            mFadedEdgeDrawHelper.onAttachedToWindowCallback(mLinearLayout, isHardwareAccelerated());
         }
     }
 
@@ -302,7 +322,7 @@ public class RecentsVerticalScrollView extends ScrollView
         super.onConfigurationChanged(newConfig);
         float densityScale = getResources().getDisplayMetrics().density;
         mSwipeHelper.setDensityScale(densityScale);
-        float pagingTouchSlop = ViewConfiguration.get(mContext).getScaledPagingTouchSlop();
+        float pagingTouchSlop = ViewConfiguration.get(getContext()).getScaledPagingTouchSlop();
         mSwipeHelper.setPagingTouchSlop(pagingTouchSlop);
     }
 
@@ -337,19 +357,6 @@ public class RecentsVerticalScrollView extends ScrollView
         });
     }
 
-    @Override
-    protected void onVisibilityChanged(View changedView, int visibility) {
-        super.onVisibilityChanged(changedView, visibility);
-        // scroll to bottom after reloading
-        if (visibility == View.VISIBLE && changedView == this) {
-            post(new Runnable() {
-                public void run() {
-                    update();
-                }
-            });
-        }
-    }
-
     public void setAdapter(TaskDescriptionAdapter adapter) {
         mAdapter = adapter;
         mAdapter.registerDataSetObserver(new DataSetObserver() {
@@ -370,7 +377,7 @@ public class RecentsVerticalScrollView extends ScrollView
         View child = mAdapter.createView(mLinearLayout);
         child.measure(childWidthMeasureSpec, childheightMeasureSpec);
         mNumItemsInOneScreenful =
-                (int) FloatMath.ceil(dm.heightPixels / (float) child.getMeasuredHeight());
+                (int) Math.ceil(dm.heightPixels / (double) child.getMeasuredHeight());
         addToRecycledViews(child);
 
         for (int i = 0; i < mNumItemsInOneScreenful - 1; i++) {

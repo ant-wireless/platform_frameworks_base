@@ -20,8 +20,10 @@ import android.app.backup.IBackupManager;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.system.OsConstants;
 import android.util.Log;
 
+import java.io.IOException;
 import java.util.ArrayList;
 
 public final class Backup {
@@ -49,13 +51,11 @@ public final class Backup {
             return;
         }
 
-        int socketFd = Integer.parseInt(nextArg());
-
         String arg = nextArg();
         if (arg.equals("backup")) {
-            doFullBackup(socketFd);
+            doFullBackup(OsConstants.STDOUT_FILENO);
         } else if (arg.equals("restore")) {
-            doFullRestore(socketFd);
+            doFullRestore(OsConstants.STDIN_FILENO);
         } else {
             Log.e(TAG, "Invalid operation '" + arg + "'");
         }
@@ -64,9 +64,12 @@ public final class Backup {
     private void doFullBackup(int socketFd) {
         ArrayList<String> packages = new ArrayList<String>();
         boolean saveApks = false;
+        boolean saveObbs = false;
         boolean saveShared = false;
         boolean doEverything = false;
+        boolean doWidgets = false;
         boolean allIncludesSystem = true;
+        boolean doCompress = true;
 
         String arg;
         while ((arg = nextArg()) != null) {
@@ -75,6 +78,10 @@ public final class Backup {
                     saveApks = true;
                 } else if ("-noapk".equals(arg)) {
                     saveApks = false;
+                } else if ("-obb".equals(arg)) {
+                    saveObbs = true;
+                } else if ("-noobb".equals(arg)) {
+                    saveObbs = false;
                 } else if ("-shared".equals(arg)) {
                     saveShared = true;
                 } else if ("-noshared".equals(arg)) {
@@ -83,8 +90,16 @@ public final class Backup {
                     allIncludesSystem = true;
                 } else if ("-nosystem".equals(arg)) {
                     allIncludesSystem = false;
+                } else if ("-widgets".equals(arg)) {
+                    doWidgets = true;
+                } else if ("-nowidgets".equals(arg)) {
+                    doWidgets = false;
                 } else if ("-all".equals(arg)) {
                     doEverything = true;
+                } else if ("-compress".equals(arg)) {
+                    doCompress = true;
+                } else if ("-nocompress".equals(arg)) {
+                    doCompress = false;
                 } else {
                     Log.w(TAG, "Unknown backup flag " + arg);
                     continue;
@@ -104,23 +119,37 @@ public final class Backup {
             return;
         }
 
+        ParcelFileDescriptor fd = null;
         try {
-            ParcelFileDescriptor fd = ParcelFileDescriptor.adoptFd(socketFd);
+            fd = ParcelFileDescriptor.adoptFd(socketFd);
             String[] packArray = new String[packages.size()];
-            mBackupManager.fullBackup(fd, saveApks, saveShared, doEverything, allIncludesSystem,
-                    packages.toArray(packArray));
+            mBackupManager.fullBackup(fd, saveApks, saveObbs, saveShared, doWidgets,
+                    doEverything, allIncludesSystem, doCompress, packages.toArray(packArray));
         } catch (RemoteException e) {
             Log.e(TAG, "Unable to invoke backup manager for backup");
+        } finally {
+            if (fd != null) {
+                try {
+                    fd.close();
+                } catch (IOException e) {}
+            }
         }
     }
 
     private void doFullRestore(int socketFd) {
         // No arguments to restore
+        ParcelFileDescriptor fd = null;
         try {
-            ParcelFileDescriptor fd = ParcelFileDescriptor.adoptFd(socketFd);
+            fd = ParcelFileDescriptor.adoptFd(socketFd);
             mBackupManager.fullRestore(fd);
         } catch (RemoteException e) {
             Log.e(TAG, "Unable to invoke backup manager for restore");
+        } finally {
+            if (fd != null) {
+                try {
+                    fd.close();
+                } catch (IOException e) {}
+            }
         }
     }
 

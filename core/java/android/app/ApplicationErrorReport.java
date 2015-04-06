@@ -24,10 +24,11 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.provider.Settings;
 import android.util.Printer;
+import android.util.Slog;
+import com.android.internal.util.FastPrintWriter;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -158,8 +159,8 @@ public class ApplicationErrorReport implements Parcelable {
     public static ComponentName getErrorReportReceiver(Context context,
             String packageName, int appFlags) {
         // check if error reporting is enabled in secure settings
-        int enabled = Settings.Secure.getInt(context.getContentResolver(),
-                Settings.Secure.SEND_ACTION_APP_ERROR, 0);
+        int enabled = Settings.Global.getInt(context.getContentResolver(),
+                Settings.Global.SEND_ACTION_APP_ERROR, 0);
         if (enabled == 0) {
             return null;
         }
@@ -167,10 +168,20 @@ public class ApplicationErrorReport implements Parcelable {
         PackageManager pm = context.getPackageManager();
 
         // look for receiver in the installer package
-        String candidate = pm.getInstallerPackageName(packageName);
-        ComponentName result = getErrorReportReceiver(pm, packageName, candidate);
-        if (result != null) {
-            return result;
+        String candidate = null;
+        ComponentName result = null;
+
+        try {
+            candidate = pm.getInstallerPackageName(packageName);
+        } catch (IllegalArgumentException e) {
+            // the package could already removed
+        }
+
+        if (candidate != null) {
+            result = getErrorReportReceiver(pm, packageName, candidate);
+            if (result != null) {
+                return result;
+            }
         }
 
         // if the error app is on the system image, look for system apps
@@ -327,7 +338,9 @@ public class ApplicationErrorReport implements Parcelable {
          */
         public CrashInfo(Throwable tr) {
             StringWriter sw = new StringWriter();
-            tr.printStackTrace(new PrintWriter(sw));
+            PrintWriter pw = new FastPrintWriter(sw, false, 256);
+            tr.printStackTrace(pw);
+            pw.flush();
             stackTrace = sw.toString();
             exceptionMessage = tr.getMessage();
 
@@ -376,6 +389,7 @@ public class ApplicationErrorReport implements Parcelable {
          * Save a CrashInfo instance to a parcel.
          */
         public void writeToParcel(Parcel dest, int flags) {
+            int start = dest.dataPosition();
             dest.writeString(exceptionClassName);
             dest.writeString(exceptionMessage);
             dest.writeString(throwFileName);
@@ -383,6 +397,16 @@ public class ApplicationErrorReport implements Parcelable {
             dest.writeString(throwMethodName);
             dest.writeInt(throwLineNumber);
             dest.writeString(stackTrace);
+            int total = dest.dataPosition()-start;
+            if (total > 20*1024) {
+                Slog.d("Error", "ERR: exClass=" + exceptionClassName);
+                Slog.d("Error", "ERR: exMsg=" + exceptionMessage);
+                Slog.d("Error", "ERR: file=" + throwFileName);
+                Slog.d("Error", "ERR: class=" + throwClassName);
+                Slog.d("Error", "ERR: method=" + throwMethodName + " line=" + throwLineNumber);
+                Slog.d("Error", "ERR: stack=" + stackTrace);
+                Slog.d("Error", "ERR: TOTAL BYTES WRITTEN: " + (dest.dataPosition()-start));
+            }
         }
 
         /**

@@ -23,6 +23,7 @@ import android.app.backup.IRestoreSession;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 
 public final class Bmgr {
@@ -102,6 +103,11 @@ public final class Bmgr {
             return;
         }
 
+        if ("fullbackup".equals(op)) {
+            doFullTransportBackup();
+            return;
+        }
+
         System.err.println("Unknown command");
         showUsage();
     }
@@ -165,6 +171,24 @@ public final class Bmgr {
         }
     }
 
+    private void doFullTransportBackup() {
+        System.out.println("Performing full transport backup");
+
+        String pkg;
+        ArrayList<String> allPkgs = new ArrayList<String>();
+        while ((pkg = nextArg()) != null) {
+            allPkgs.add(pkg);
+        }
+        if (allPkgs.size() > 0) {
+            try {
+                mBmgr.fullTransportBackup(allPkgs.toArray(new String[allPkgs.size()]));
+            } catch (RemoteException e) {
+                System.err.println(e.toString());
+                System.err.println(BMGR_NOT_RUNNING_ERR);
+            }
+        }
+    }
+
     private void doTransport() {
         try {
             String which = nextArg();
@@ -187,6 +211,12 @@ public final class Bmgr {
     }
 
     private void doWipe() {
+        String transport = nextArg();
+        if (transport == null) {
+            showUsage();
+            return;
+        }
+
         String pkg = nextArg();
         if (pkg == null) {
             showUsage();
@@ -194,8 +224,8 @@ public final class Bmgr {
         }
 
         try {
-            mBmgr.clearBackupData(pkg);
-            System.out.println("Wiped backup data for " + pkg);
+            mBmgr.clearBackupData(transport, pkg);
+            System.out.println("Wiped backup data for " + pkg + " on " + transport);
         } catch (RemoteException e) {
             System.err.println(e.toString());
             System.err.println(BMGR_NOT_RUNNING_ERR);
@@ -324,7 +354,7 @@ public final class Bmgr {
             return;
         }
 
-        if (arg.indexOf('.') >= 0) {
+        if (arg.indexOf('.') >= 0 || arg.equals("android")) {
             // it's a package name
             doRestorePackage(arg);
         } else {
@@ -446,7 +476,8 @@ public final class Bmgr {
         System.err.println("       bmgr restore TOKEN PACKAGE...");
         System.err.println("       bmgr restore PACKAGE");
         System.err.println("       bmgr run");
-        System.err.println("       bmgr wipe PACKAGE");
+        System.err.println("       bmgr wipe TRANSPORT PACKAGE");
+        System.err.println("       bmgr fullbackup PACKAGE...");
         System.err.println("");
         System.err.println("The 'backup' command schedules a backup pass for the named package.");
         System.err.println("Note that the backup pass will effectively be a no-op if the package");
@@ -462,11 +493,11 @@ public final class Bmgr {
         System.err.println("");
         System.err.println("The 'list transports' command reports the names of the backup transports");
         System.err.println("currently available on the device.  These names can be passed as arguments");
-        System.err.println("to the 'transport' command.  The currently selected transport is indicated");
-        System.err.println("with a '*' character.");
+        System.err.println("to the 'transport' and 'wipe' commands.  The currently active transport");
+        System.err.println("is indicated with a '*' character.");
         System.err.println("");
         System.err.println("The 'list sets' command reports the token and name of each restore set");
-        System.err.println("available to the device via the current transport.");
+        System.err.println("available to the device via the currently active transport.");
         System.err.println("");
         System.err.println("The 'transport' command designates the named transport as the currently");
         System.err.println("active one.  This setting is persistent across reboots.");
@@ -491,7 +522,11 @@ public final class Bmgr {
         System.err.println("data changes.");
         System.err.println("");
         System.err.println("The 'wipe' command causes all backed-up data for the given package to be");
-        System.err.println("erased from the current transport's storage.  The next backup operation");
+        System.err.println("erased from the given transport's storage.  The next backup operation");
         System.err.println("that the given application performs will rewrite its entire data set.");
+        System.err.println("Transport names to use here are those reported by 'list transports'.");
+        System.err.println("");
+        System.err.println("The 'fullbackup' command induces a full-data stream backup for one or more");
+        System.err.println("packages.  The data is sent via the currently active transport.");
     }
 }

@@ -23,11 +23,11 @@
 
 #include <androidfw/Asset.h>
 #include <androidfw/StreamingZipInflater.h>
+#include <androidfw/ZipFileRO.h>
+#include <androidfw/ZipUtils.h>
 #include <utils/Atomic.h>
 #include <utils/FileMap.h>
 #include <utils/Log.h>
-#include <utils/ZipFileRO.h>
-#include <utils/ZipUtils.h>
 #include <utils/threads.h>
 
 #include <assert.h>
@@ -44,6 +44,8 @@ using namespace android;
 #ifndef O_BINARY
 # define O_BINARY 0
 #endif
+
+static const bool kIsDebug = false;
 
 static Mutex gAssetLock;
 static int32_t gCount = 0;
@@ -72,7 +74,7 @@ String8 Asset::getAssetAllocations()
         }
         cur = cur->mNext;
     }
-    
+
     return res;
 }
 
@@ -84,18 +86,20 @@ Asset::Asset(void)
     mNext = mPrev = NULL;
     if (gTail == NULL) {
         gHead = gTail = this;
-  	} else {
-  	    mPrev = gTail;
-  	    gTail->mNext = this;
-  	    gTail = this;
-  	}
-    //ALOGI("Creating Asset %p #%d\n", this, gCount);
+    } else {
+        mPrev = gTail;
+        gTail->mNext = this;
+        gTail = this;
+    }
+    if (kIsDebug) {
+        ALOGI("Creating Asset %p #%d\n", this, gCount);
+    }
 }
 
 Asset::~Asset(void)
 {
     AutoMutex _l(gAssetLock);
-	gCount--;
+    gCount--;
     if (gHead == this) {
         gHead = mNext;
     }
@@ -109,7 +113,9 @@ Asset::~Asset(void)
         mPrev->mNext = mNext;
     }
     mNext = mPrev = NULL;
-    //ALOGI("Destroying Asset in %p #%d\n", this, gCount);
+    if (kIsDebug) {
+        ALOGI("Destroying Asset in %p #%d\n", this, gCount);
+    }
 }
 
 /*
@@ -409,7 +415,7 @@ status_t _FileAsset::openChunk(const char* fileName, int fd, off64_t offset, siz
     }
 
     mFileName = fileName != NULL ? strdup(fileName) : NULL;
-    
+
     return NO_ERROR;
 }
 
@@ -526,7 +532,7 @@ off64_t _FileAsset::seek(off64_t offset, int whence)
 void _FileAsset::close(void)
 {
     if (mMap != NULL) {
-        mMap->release();
+        delete mMap;
         mMap = NULL;
     }
     if (mBuf != NULL) {
@@ -538,7 +544,7 @@ void _FileAsset::close(void)
         free(mFileName);
         mFileName = NULL;
     }
-    
+
     if (mFp != NULL) {
         // can only be NULL when called from destructor
         // (otherwise we would never return this object)
@@ -606,7 +612,7 @@ const void* _FileAsset::getBuffer(bool wordAligned)
 
         map = new FileMap;
         if (!map->create(NULL, fileno(mFp), mStart, mLength, true)) {
-            map->release();
+            delete map;
             return NULL;
         }
 
@@ -821,7 +827,7 @@ off64_t _CompressedAsset::seek(off64_t offset, int whence)
 void _CompressedAsset::close(void)
 {
     if (mMap != NULL) {
-        mMap->release();
+        delete mMap;
         mMap = NULL;
     }
 
@@ -843,7 +849,7 @@ void _CompressedAsset::close(void)
  * The first time this is called, we expand the compressed data into a
  * buffer.
  */
-const void* _CompressedAsset::getBuffer(bool wordAligned)
+const void* _CompressedAsset::getBuffer(bool)
 {
     unsigned char* buf = NULL;
 
@@ -860,7 +866,7 @@ const void* _CompressedAsset::getBuffer(bool wordAligned)
     }
 
     if (mMap != NULL) {
-        if (!ZipFileRO::inflateBuffer(buf, mMap->getDataPtr(),
+        if (!ZipUtils::inflateToBuffer(mMap->getDataPtr(), buf,
                 mUncompressedLen, mCompressedLen))
             goto bail;
     } else {

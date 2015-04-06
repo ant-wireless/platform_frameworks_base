@@ -18,44 +18,53 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <linux/fb.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
-#include <binder/IMemory.h>
-#include <gui/SurfaceComposerClient.h>
+#include <binder/ProcessState.h>
 
+#include <gui/SurfaceComposerClient.h>
+#include <gui/ISurfaceComposer.h>
+
+#include <ui/PixelFormat.h>
+
+// TODO: Fix Skia.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <SkImageEncoder.h>
 #include <SkBitmap.h>
 #include <SkData.h>
 #include <SkStream.h>
+#pragma GCC diagnostic pop
 
 using namespace android;
+
+static uint32_t DEFAULT_DISPLAY_ID = ISurfaceComposer::eDisplayIdMain;
 
 static void usage(const char* pname)
 {
     fprintf(stderr,
-            "usage: %s [-hp] [FILENAME]\n"
+            "usage: %s [-hp] [-d display-id] [FILENAME]\n"
             "   -h: this message\n"
             "   -p: save the file as a png.\n"
+            "   -d: specify the display id to capture, default %d.\n"
             "If FILENAME ends with .png it will be saved as a png.\n"
             "If FILENAME is not given, the results will be printed to stdout.\n",
-            pname
+            pname, DEFAULT_DISPLAY_ID
     );
 }
 
-static SkBitmap::Config flinger2skia(PixelFormat f)
+static SkColorType flinger2skia(PixelFormat f)
 {
     switch (f) {
-        case PIXEL_FORMAT_A_8:
-            return SkBitmap::kA8_Config;
         case PIXEL_FORMAT_RGB_565:
-            return SkBitmap::kRGB_565_Config;
-        case PIXEL_FORMAT_RGBA_4444:
-            return SkBitmap::kARGB_4444_Config;
+            return kRGB_565_SkColorType;
         default:
-            return SkBitmap::kARGB_8888_Config;
+            return kN32_SkColorType;
     }
 }
 
@@ -83,15 +92,36 @@ static status_t vinfoToPixelFormat(const fb_var_screeninfo& vinfo,
     return NO_ERROR;
 }
 
+static status_t notifyMediaScanner(const char* fileName) {
+    String8 cmd("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://");
+    String8 fileUrl("\"");
+    fileUrl.append(fileName);
+    fileUrl.append("\"");
+    cmd.append(fileName);
+    cmd.append(" > /dev/null");
+    int result = system(cmd.string());
+    if (result < 0) {
+        fprintf(stderr, "Unable to broadcast intent for media scanner.\n");
+        return UNKNOWN_ERROR;
+    }
+    return NO_ERROR;
+}
+
 int main(int argc, char** argv)
 {
+    ProcessState::self()->startThreadPool();
+
     const char* pname = argv[0];
     bool png = false;
+    int32_t displayId = DEFAULT_DISPLAY_ID;
     int c;
-    while ((c = getopt(argc, argv, "ph")) != -1) {
+    while ((c = getopt(argc, argv, "phd:")) != -1) {
         switch (c) {
             case 'p':
                 png = true;
+                break;
+            case 'd':
+                displayId = atoi(optarg);
                 break;
             case '?':
             case 'h':
@@ -103,10 +133,11 @@ int main(int argc, char** argv)
     argv += optind;
 
     int fd = -1;
+    const char* fn = NULL;
     if (argc == 0) {
         fd = dup(STDOUT_FILENO);
     } else if (argc == 1) {
-        const char* fn = argv[0];
+        fn = argv[0];
         fd = open(fn, O_WRONLY | O_CREAT | O_TRUNC, 0664);
         if (fd == -1) {
             fprintf(stderr, "Error opening file: %s (%s)\n", fn, strerror(errno));
@@ -126,15 +157,17 @@ int main(int argc, char** argv)
     void const* mapbase = MAP_FAILED;
     ssize_t mapsize = -1;
 
-    void const* base = 0;
-    uint32_t w, h, f;
+    void const* base = NULL;
+    uint32_t w, s, h, f;
     size_t size = 0;
 
     ScreenshotClient screenshot;
-    if (screenshot.update() == NO_ERROR) {
+    sp<IBinder> display = SurfaceComposerClient::getBuiltInDisplay(displayId);
+    if (display != NULL && screenshot.update(display, Rect(), false) == NO_ERROR) {
         base = screenshot.getPixels();
         w = screenshot.getWidth();
         h = screenshot.getHeight();
+        s = screenshot.getStride();
         f = screenshot.getFormat();
         size = screenshot.getSize();
     } else {
@@ -148,6 +181,7 @@ int main(int argc, char** argv)
                     size_t offset = (vinfo.xoffset + vinfo.yoffset*vinfo.xres) * bytespp;
                     w = vinfo.xres;
                     h = vinfo.yres;
+                    s = vinfo.xres;
                     size = w*h*bytespp;
                     mapsize = offset + size;
                     mapbase = mmap(0, mapsize, PROT_READ, MAP_PRIVATE, fb, 0);
@@ -160,22 +194,30 @@ int main(int argc, char** argv)
         }
     }
 
-    if (base) {
+    if (base != NULL) {
         if (png) {
+            const SkImageInfo info = SkImageInfo::Make(w, h, flinger2skia(f),
+                                                       kPremul_SkAlphaType);
             SkBitmap b;
-            b.setConfig(flinger2skia(f), w, h);
-            b.setPixels((void*)base);
+            b.installPixels(info, const_cast<void*>(base), s*bytesPerPixel(f));
             SkDynamicMemoryWStream stream;
             SkImageEncoder::EncodeStream(&stream, b,
                     SkImageEncoder::kPNG_Type, SkImageEncoder::kDefaultQuality);
             SkData* streamData = stream.copyToData();
             write(fd, streamData->data(), streamData->size());
             streamData->unref();
+            if (fn != NULL) {
+                notifyMediaScanner(fn);
+            }
         } else {
             write(fd, &w, 4);
             write(fd, &h, 4);
             write(fd, &f, 4);
-            write(fd, base, size);
+            size_t Bpp = bytesPerPixel(f);
+            for (size_t y=0 ; y<h ; y++) {
+                write(fd, base, w*Bpp);
+                base = (void *)((char *)base + s*Bpp);
+            }
         }
     }
     close(fd);

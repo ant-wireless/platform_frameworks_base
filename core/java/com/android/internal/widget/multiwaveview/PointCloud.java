@@ -22,7 +22,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
-import android.util.FloatMath;
 import android.util.Log;
 
 public class PointCloud {
@@ -45,8 +44,8 @@ public class PointCloud {
 
     public class WaveManager {
         private float radius = 50;
-        private float width = 200.0f; // TODO: Make configurable
         private float alpha = 0.0f;
+
         public void setRadius(float r) {
             radius = r;
         }
@@ -151,8 +150,8 @@ public class PointCloud {
             float eta = PI/2.0f;
             float dEta = 2.0f * PI / pointsInBand;
             for (int i = 0; i < pointsInBand; i++) {
-                float x = r * FloatMath.cos(eta);
-                float y = r * FloatMath.sin(eta);
+                float x = r * (float) Math.cos(eta);
+                float y = r * (float) Math.sin(eta);
                 eta += dEta;
                 mPointCloud.add(new Point(x, y, r));
             }
@@ -167,33 +166,24 @@ public class PointCloud {
         return mScale;
     }
 
-    private static float hypot(float x, float y) {
-        return FloatMath.sqrt(x*x + y*y);
-    }
-
-    private static float max(float a, float b) {
-        return a > b ? a : b;
-    }
-
     public int getAlphaForPoint(Point point) {
         // Contribution from positional glow
-        float glowDistance = hypot(glowManager.x - point.x, glowManager.y - point.y);
+        float glowDistance = (float) Math.hypot(glowManager.x - point.x, glowManager.y - point.y);
         float glowAlpha = 0.0f;
         if (glowDistance < glowManager.radius) {
-            float cosf = FloatMath.cos(PI * 0.25f * glowDistance / glowManager.radius);
-            glowAlpha = glowManager.alpha * max(0.0f, (float) Math.pow(cosf, 10.0f));
+            float cosf = (float) Math.cos(PI * 0.25f * glowDistance / glowManager.radius);
+            glowAlpha = glowManager.alpha * Math.max(0.0f, (float) Math.pow(cosf, 10.0f));
         }
 
         // Compute contribution from Wave
-        float radius = hypot(point.x, point.y);
-        float distanceToWaveRing = (radius - waveManager.radius);
+        float radius = (float) Math.hypot(point.x, point.y);
         float waveAlpha = 0.0f;
-        if (distanceToWaveRing < waveManager.width * 0.5f && distanceToWaveRing < 0.0f) {
-            float cosf = FloatMath.cos(PI * 0.25f * distanceToWaveRing / waveManager.width);
-            waveAlpha = waveManager.alpha * max(0.0f, (float) Math.pow(cosf, 20.0f));
+        if (radius < waveManager.radius * 2) {
+            float distanceToWaveRing = (radius - waveManager.radius);
+            float cosf = (float) Math.cos(PI * 0.5f * distanceToWaveRing / waveManager.radius);
+            waveAlpha = waveManager.alpha * Math.max(0.0f, (float) Math.pow(cosf, 6.0f));
         }
-
-        return (int) (max(glowAlpha, waveAlpha) * 255);
+        return (int) (Math.max(glowAlpha, waveAlpha) * 255);
     }
 
     private float interp(float min, float max, float f) {

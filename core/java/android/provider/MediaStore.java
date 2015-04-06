@@ -19,8 +19,8 @@ package android.provider;
 import android.annotation.SdkConstant;
 import android.annotation.SdkConstant.SdkConstantType;
 import android.content.ContentResolver;
-import android.content.ContentValues;
 import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
@@ -40,6 +40,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
 
 /**
  * The Media provider contains meta data for all available media on both internal
@@ -109,18 +110,57 @@ public final class MediaStore {
      * An intent to perform a search for music media and automatically play content from the
      * result when possible. This can be fired, for example, by the result of a voice recognition
      * command to listen to music.
-     * <p>
-     * Contains the {@link android.app.SearchManager#QUERY} extra, which is a string
-     * that can contain any type of unstructured music search, like the name of an artist,
-     * an album, a song, a genre, or any combination of these.
-     * <p>
-     * Because this intent includes an open-ended unstructured search string, it makes the most
-     * sense for apps that can support large-scale search of music, such as services connected
-     * to an online database of music which can be streamed and played on the device.
+     * <p>This intent always includes the {@link android.provider.MediaStore#EXTRA_MEDIA_FOCUS}
+     * and {@link android.app.SearchManager#QUERY} extras. The
+     * {@link android.provider.MediaStore#EXTRA_MEDIA_FOCUS} extra determines the search mode, and
+     * the value of the {@link android.app.SearchManager#QUERY} extra depends on the search mode.
+     * For more information about the search modes for this intent, see
+     * <a href="{@docRoot}guide/components/intents-common.html#PlaySearch">Play music based
+     * on a search query</a> in <a href="{@docRoot}guide/components/intents-common.html">Common
+     * Intents</a>.</p>
+     *
+     * <p>This intent makes the most sense for apps that can support large-scale search of music,
+     * such as services connected to an online database of music which can be streamed and played
+     * on the device.</p>
      */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public static final String INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH =
             "android.media.action.MEDIA_PLAY_FROM_SEARCH";
-    
+
+    /**
+     * An intent to perform a search for readable media and automatically play content from the
+     * result when possible. This can be fired, for example, by the result of a voice recognition
+     * command to read a book or magazine.
+     * <p>
+     * Contains the {@link android.app.SearchManager#QUERY} extra, which is a string that can
+     * contain any type of unstructured text search, like the name of a book or magazine, an author
+     * a genre, a publisher, or any combination of these.
+     * <p>
+     * Because this intent includes an open-ended unstructured search string, it makes the most
+     * sense for apps that can support large-scale search of text media, such as services connected
+     * to an online database of books and/or magazines which can be read on the device.
+     */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
+    public static final String INTENT_ACTION_TEXT_OPEN_FROM_SEARCH =
+            "android.media.action.TEXT_OPEN_FROM_SEARCH";
+
+    /**
+     * An intent to perform a search for video media and automatically play content from the
+     * result when possible. This can be fired, for example, by the result of a voice recognition
+     * command to play movies.
+     * <p>
+     * Contains the {@link android.app.SearchManager#QUERY} extra, which is a string that can
+     * contain any type of unstructured video search, like the name of a movie, one or more actors,
+     * a genre, or any combination of these.
+     * <p>
+     * Because this intent includes an open-ended unstructured search string, it makes the most
+     * sense for apps that can support large-scale search of video, such as services connected to an
+     * online database of videos which can be streamed and played on the device.
+     */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
+    public static final String INTENT_ACTION_VIDEO_PLAY_FROM_SEARCH =
+            "android.media.action.VIDEO_PLAY_FROM_SEARCH";
+
     /**
      * The name of the Intent-extra used to define the artist
      */
@@ -133,6 +173,18 @@ public final class MediaStore {
      * The name of the Intent-extra used to define the song title
      */
     public static final String EXTRA_MEDIA_TITLE = "android.intent.extra.title";
+    /**
+     * The name of the Intent-extra used to define the genre.
+     */
+    public static final String EXTRA_MEDIA_GENRE = "android.intent.extra.genre";
+    /**
+     * The name of the Intent-extra used to define the playlist.
+     */
+    public static final String EXTRA_MEDIA_PLAYLIST = "android.intent.extra.playlist";
+    /**
+     * The name of the Intent-extra used to define the radio channel.
+     */
+    public static final String EXTRA_MEDIA_RADIO_CHANNEL = "android.intent.extra.radio_channel";
     /**
      * The name of the Intent-extra used to define the search focus. The search focus
      * indicates whether the search should be for things related to the artist, album
@@ -170,11 +222,29 @@ public final class MediaStore {
     /**
      * The name of the Intent action used to launch a camera in still image mode.
      */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public static final String INTENT_ACTION_STILL_IMAGE_CAMERA = "android.media.action.STILL_IMAGE_CAMERA";
+
+    /**
+     * The name of the Intent action used to launch a camera in still image mode
+     * for use when the device is secured (e.g. with a pin, password, pattern,
+     * or face unlock). Applications responding to this intent must not expose
+     * any personal content like existing photos or videos on the device. The
+     * applications should be careful not to share any photo or video with other
+     * applications or internet. The activity should use {@link
+     * android.view.WindowManager.LayoutParams#FLAG_SHOW_WHEN_LOCKED} to display
+     * on top of the lock screen while secured. There is no activity stack when
+     * this flag is used, so launching more than one activity is strongly
+     * discouraged.
+     */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
+    public static final String INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE =
+            "android.media.action.STILL_IMAGE_CAMERA_SECURE";
 
     /**
      * The name of the Intent action used to launch a camera in video mode.
      */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public static final String INTENT_ACTION_VIDEO_CAMERA = "android.media.action.VIDEO_CAMERA";
 
     /**
@@ -186,9 +256,43 @@ public final class MediaStore {
      * object in the extra field. This is useful for applications that only need a small image.
      * If the EXTRA_OUTPUT is present, then the full-sized image will be written to the Uri
      * value of EXTRA_OUTPUT.
+     * As of {@link android.os.Build.VERSION_CODES#LOLLIPOP}, this uri can also be supplied through
+     * {@link android.content.Intent#setClipData(ClipData)}. If using this approach, you still must
+     * supply the uri through the EXTRA_OUTPUT field for compatibility with old applications.
+     * If you don't set a ClipData, it will be copied there for you when calling
+     * {@link Context#startActivity(Intent)}.
      * @see #EXTRA_OUTPUT
      */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public final static String ACTION_IMAGE_CAPTURE = "android.media.action.IMAGE_CAPTURE";
+
+    /**
+     * Intent action that can be sent to have the camera application capture an image and return
+     * it when the device is secured (e.g. with a pin, password, pattern, or face unlock).
+     * Applications responding to this intent must not expose any personal content like existing
+     * photos or videos on the device. The applications should be careful not to share any photo
+     * or video with other applications or internet. The activity should use {@link
+     * android.view.WindowManager.LayoutParams#FLAG_SHOW_WHEN_LOCKED} to display on top of the
+     * lock screen while secured. There is no activity stack when this flag is used, so
+     * launching more than one activity is strongly discouraged.
+     * <p>
+     * The caller may pass an extra EXTRA_OUTPUT to control where this image will be written.
+     * If the EXTRA_OUTPUT is not present, then a small sized image is returned as a Bitmap
+     * object in the extra field. This is useful for applications that only need a small image.
+     * If the EXTRA_OUTPUT is present, then the full-sized image will be written to the Uri
+     * value of EXTRA_OUTPUT.
+     * As of {@link android.os.Build.VERSION_CODES#LOLLIPOP}, this uri can also be supplied through
+     * {@link android.content.Intent#setClipData(ClipData)}. If using this approach, you still must
+     * supply the uri through the EXTRA_OUTPUT field for compatibility with old applications.
+     * If you don't set a ClipData, it will be copied there for you when calling
+     * {@link Context#startActivity(Intent)}.
+     *
+     * @see #ACTION_IMAGE_CAPTURE
+     * @see #EXTRA_OUTPUT
+     */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
+    public static final String ACTION_IMAGE_CAPTURE_SECURE =
+            "android.media.action.IMAGE_CAPTURE_SECURE";
 
     /**
      * Standard Intent action that can be sent to have the camera application
@@ -200,11 +304,17 @@ public final class MediaStore {
      * where the video is written. If EXTRA_OUTPUT is not present the video will be
      * written to the standard location for videos, and the Uri of that location will be
      * returned in the data field of the Uri.
+     * As of {@link android.os.Build.VERSION_CODES#LOLLIPOP}, this uri can also be supplied through
+     * {@link android.content.Intent#setClipData(ClipData)}. If using this approach, you still must
+     * supply the uri through the EXTRA_OUTPUT field for compatibility with old applications.
+     * If you don't set a ClipData, it will be copied there for you when calling
+     * {@link Context#startActivity(Intent)}.
      * @see #EXTRA_OUTPUT
      * @see #EXTRA_VIDEO_QUALITY
      * @see #EXTRA_SIZE_LIMIT
      * @see #EXTRA_DURATION_LIMIT
      */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public final static String ACTION_VIDEO_CAPTURE = "android.media.action.VIDEO_CAPTURE";
 
     /**
@@ -463,7 +573,8 @@ public final class MediaStore {
         private static final Object sThumbBufLock = new Object();
         private static byte[] sThumbBuf;
 
-        private static Bitmap getMiniThumbFromFile(Cursor c, Uri baseUri, ContentResolver cr, BitmapFactory.Options options) {
+        private static Bitmap getMiniThumbFromFile(
+                Cursor c, Uri baseUri, ContentResolver cr, BitmapFactory.Options options) {
             Bitmap bitmap = null;
             Uri thumbUri = null;
             try {
@@ -508,6 +619,7 @@ public final class MediaStore {
                 if (c != null) c.close();
             }
         }
+
         /**
          * This method ensure thumbnails associated with origId are generated and decode the byte
          * stream from database (MICRO_KIND) or file (MINI_KIND).
@@ -575,6 +687,7 @@ public final class MediaStore {
                         if (sThumbBuf == null) {
                             sThumbBuf = new byte[MiniThumbFile.BYTES_PER_MINTHUMB];
                         }
+                        Arrays.fill(sThumbBuf, (byte)0);
                         if (thumbFile.getMiniThumbFromFile(origId, sThumbBuf) != null) {
                             bitmap = BitmapFactory.decodeByteArray(sThumbBuf, 0, sThumbBuf.length);
                             if (bitmap == null) {
@@ -1255,6 +1368,18 @@ public final class MediaStore {
         }
 
         public static final class Media implements AudioColumns {
+
+            private static final String[] EXTERNAL_PATHS;
+
+            static {
+                String secondary_storage = System.getenv("SECONDARY_STORAGE");
+                if (secondary_storage != null) {
+                    EXTERNAL_PATHS = secondary_storage.split(":");
+                } else {
+                    EXTERNAL_PATHS = new String[0];
+                }
+            }
+
             /**
              * Get the content:// style URI for the audio media table on the
              * given volume.
@@ -1268,6 +1393,12 @@ public final class MediaStore {
             }
 
             public static Uri getContentUriForPath(String path) {
+                for (String ep : EXTERNAL_PATHS) {
+                    if (path.startsWith(ep)) {
+                        return EXTERNAL_CONTENT_URI;
+                    }
+                }
+
                 return (path.startsWith(Environment.getExternalStorageDirectory().getPath()) ?
                         EXTERNAL_CONTENT_URI : INTERNAL_CONTENT_URI);
             }
@@ -1289,6 +1420,11 @@ public final class MediaStore {
              * The MIME type for this table.
              */
             public static final String CONTENT_TYPE = "vnd.android.cursor.dir/audio";
+
+            /**
+             * The MIME type for an audio track.
+             */
+            public static final String ENTRY_CONTENT_TYPE = "vnd.android.cursor.item/audio";
 
             /**
              * The default sort order for this table
@@ -1760,6 +1896,16 @@ public final class MediaStore {
              * The default sort order for this table
              */
             public static final String DEFAULT_SORT_ORDER = ALBUM_KEY;
+        }
+
+        public static final class Radio {
+            /**
+             * The MIME type for entries in this table.
+             */
+            public static final String ENTRY_CONTENT_TYPE = "vnd.android.cursor.item/radio";
+
+            // Not instantiable.
+            private Radio() { }
         }
     }
 

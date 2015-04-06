@@ -1,6 +1,5 @@
 page.title=&lt;uses-feature&gt;
-parent.title=The AndroidManifest.xml File
-parent.link=manifest-intro.html
+page.tags=filtering,features,google play filters,permissions
 @jd:body
 
 <div id="qv-wrapper">
@@ -28,49 +27,42 @@ parent.link=manifest-intro.html
 </div>
 </div>
 
-
-<dl class="xml">
-
-<dt>syntax:</dt>
-<dd>
-<pre class="stx">&lt;uses-feature android:<a href="#name">name</a>="<em>string</em>"
-              android:<a href="#required">required</a>=["true" | "false"]
-              android:<a href="#glEsVersion">glEsVersion</a>="<em>integer</em>" /&gt;</pre>
-</dd>
-
-<dt>contained in:</dt>
-<dd><code><a
-href="{@docRoot}guide/topics/manifest/manifest-element.html">&lt;manifest&gt;</a></code></dd>
-
- <div class="sidebox-wrapper"> 
-  <img id="rule" src="{@docRoot}assets/images/grad-rule-qv.png"> 
-  <div id="qv-sub-rule"> 
-    <img src="{@docRoot}assets/images/icon_play.png" style="float:left;margin:0;padding:0;"> 
-    <p style="color:#669999;padding-top:1em;">Google Play and <code style="color:#669999;">&lt;uses-feature&gt;</code> elements</p>
-    <p style="margin-top:1em;">Google Play filters the applications that are visible to users, so
-that users can see and download only those applications that are compatible with their
-devices. One of the ways it filters applications is by feature compatibility.</p>
-
-<p style="margin-top:1em;">To do this, Google Play checks the
-<code>&lt;uses-feature&gt;</code> elements in each application's manifest, to
-establish the app's feature needs. Google Play then shows or hides the application to
-each user, based on a comparison with the features available on the user's
-device. </p>
+ <div class="sidebox-wrapper">
+ <div class="sidebox">
+    <img src="{@docRoot}assets/images/icon_play.png" style="float:left;margin:0;padding:0;">
+    <p style="color:#669999;padding-top:1em;">Google Play Filtering</p>
+    <p style="padding-top:1em;">Google Play uses the <code>&lt;uses-feature&gt;</code>
+    elements declared in your app manifest to filter your app from devices
+    that do not meet it's hardware and software feature requirements. </p>
 
 <p style="margin-top:1em;">By specifying the features that your application requires,
 you enable Google Play to present your application only to users whose
 devices meet the application's feature requirements, rather than presenting it
 to all users. </p>
 
-<p style="margin-top:1em;" class="caution">For important information about how
+<p>For important information about how
 Google Play uses features as the basis for filtering, please read <a
 href="#market-feature-filtering">Google Play and Feature-Based Filtering</a>,
 below.</p>
 </div>
 </div>
 
+<dl class="xml">
+
+<dt>syntax:</dt>
+<dd>
+<pre class="stx">&lt;uses-feature
+  android:<a href="#name">name</a>="<em>string</em>"
+  android:<a href="#required">required</a>=["true" | "false"]
+  android:<a href="#glEsVersion">glEsVersion</a>="<em>integer</em>" /&gt;</pre>
+</dd>
+
+<dt>contained in:</dt>
+<dd><code><a
+href="{@docRoot}guide/topics/manifest/manifest-element.html">&lt;manifest&gt;</a></code></dd>
+
 <dt>description:</dt>
-<dd>Declares a single hardware or software feature that is used by the
+<dd itemprop="description">Declares a single hardware or software feature that is used by the
 application.
 
 <p>The purpose of a <code>&lt;uses-feature&gt;</code> declaration is to inform
@@ -106,7 +98,7 @@ application requires.</p>
 <p>Declared <code>&lt;uses-feature></code> elements are informational only, meaning
 that the Android system itself does not check for matching feature support on
 the device before installing an application. However, other services
-(such as Google Play) or applications may check your application's 
+(such as Google Play) or applications may check your application's
 <code>&lt;uses-feature></code> declarations as part of handling or interacting
 with your application. For this reason, it's very important that you declare all of
 the features (from the list below) that your application uses. </p>
@@ -132,7 +124,7 @@ permission grants your application access to the appropriate hardware and
 software, while declaring the features used by your application ensures proper
 device compatibility.</p>
 
-</dd> 
+</dd>
 
 
 <dt>attributes:</dt>
@@ -144,7 +136,7 @@ device compatibility.</p>
   <dd>Specifies a single hardware or software feature used by the application,
 as a descriptor string. Valid descriptor values are listed in the <a
 href="#hw-features">Hardware features</a> and <a href="#sw-features">Software
-features</a> tables, below. </dd>
+features</a> tables, below. Descriptor string values are case-sensitive.</dd>
 
   <dt><a name="required"></a><code>android:required</code></dt>  <!-- added in api level 5 -->
   <dd>Boolean value that indicates whether the application requires
@@ -171,8 +163,7 @@ feature</em>, if necessary. </li>
   <dd>The OpenGL ES version required by the application. The higher 16 bits
 represent the major number and the lower 16 bits represent the minor number. For
 example, to specify OpenGL ES version 2.0, you would set the value as
-"0x00020000". To specify OpenGL ES 2.1, if/when such a version were made
-available, you would set the value as "0x00020001".
+"0x00020000", or to specify OpenGL ES 3.0, you would set the value as "0x00030000".
 
   <p>An application should specify at most one <code>android:glEsVersion</code>
 attribute in its manifest. If it specifies more than one, the
@@ -191,6 +182,10 @@ that it requires OpenGL ES 2.0.</p>
   <p>An application that can work with any of several OpenGL ES versions should
 only specify the numerically lowest version of OpenGL ES that it requires. (It
 can check at run-time whether a higher level of OpenGL ES is available.)</p>
+
+  <p>For more information about using OpenGL ES, including how to check the supported OpenGL ES
+version at runtime, see the <a href="{@docRoot}guide/topics/graphics/opengl.html">OpenGL ES</a>
+API guide.</p>
   </dd>
 
 </dl>
@@ -207,7 +202,7 @@ can check at run-time whether a higher level of OpenGL ES is available.)</p>
     <li>{@link android.content.pm.FeatureInfo}</li>
     <li>{@link android.content.pm.ConfigurationInfo}</li>
     <li><a href="{@docRoot}guide/topics/manifest/uses-permission-element.html"><code>&lt;uses-permission&gt;</code></a></li>
-    <li><a href="{@docRoot}guide/google/play/filters.html">Filters on Google Play</a></li>
+    <li><a href="{@docRoot}google/play/filters.html">Filters on Google Play</a></li>
   </ul>
 </dd>
 
@@ -244,7 +239,7 @@ Package Manager for the list of features available on the device by calling
 Store application then passes the features list up to Google Play
 when establishing the session for the user.</p>
 
-<p>Each time you upload an application to the Google Play publisher site,
+<p>Each time you upload an application to the Google Play Developer Console,
 Google Play scans the application's manifest file. It looks for
 <code>&lt;uses-feature&gt;</code> elements and evaluates them in combination
 with other elements, in some cases, such as <code>&lt;uses-sdk&gt;</code> and
@@ -357,7 +352,7 @@ not offer a camera.</p>
 
 <p>If you don't want Google Play to filter based on a specific implied
 feature, you can disable that behavior. To do so, declare the feature explicitly
-in a <code>&lt;uses-feature&gt;</code> element and include an 
+in a <code>&lt;uses-feature&gt;</code> element and include an
 <code>android:required="false"</code> attribute. For example, to disable
 filtering derived from the <code>CAMERA</code> permission, you would declare
 the feature as shown below.</p>
@@ -554,14 +549,18 @@ is sensitive to delays or lag in sound input or output.</td>
 </td>
     </tr>
     <tr>
-       <td>Bluetooth</td>
-       <td><code>android.hardware.bluetooth</td>
+       <td rowspan="2">Bluetooth</td>
+       <td><code>android.hardware.bluetooth</code></td>
        <td>The application uses Bluetooth radio features in the device.</td>
-<td>
-</td>
+       <td></td>
     </tr>
     <tr>
-       <td rowspan="4">Camera</td>
+       <td><code>android.hardware.bluetooth_le</code></td>
+       <td>The application uses Bluetooth Low Energy radio features in the device.</td>
+       <td></td>
+    </tr>
+    <tr>
+       <td rowspan="6">Camera</td>
        <td><code>android.hardware.camera</code></td>
        <td>The application uses the device's camera. If the device supports
            multiple cameras, the application uses the camera that facing
@@ -582,6 +581,40 @@ is sensitive to delays or lag in sound input or output.</td>
 <tr>
   <td><code>android.hardware.camera.front</code></td>
   <td>Subfeature. The application uses a front-facing camera on the device.</td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.any</code></td>
+  <td>The application uses at least one camera facing in any direction, or an
+external camera device if one is connected. Use this in preference to
+<code>android.hardware.camera</code> if a back-facing camera is not required.
+  </td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.external</code></td>
+  <td>The application uses an external camera device if one is connected.</td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.level.full</code></td>
+  <td>The application uses a camera device with <code>FULL</code>-level support.</td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.capability.manual_sensor</code></td>
+  <td>The application uses a a camera device with the <code>MANUAL_SENSOR</code> capability.</td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.capability.manual_post_processing</code></td>
+  <td>The application uses a a camera device with the <code>MANUAL_POST_PROCESSING</code> capability.</td>
+</tr>
+<tr>
+  <td><code>android.hardware.camera.capability.raw</code></td>
+  <td>The application uses a a camera device with the <code>RAW</code> capability.</td>
+</tr>
+
+<tr>
+  <td>Infrared</td>
+  <td><code>android.hardware.consumerir</code></td>
+  <td>The application uses the consumer IR capabilities on the device.</td>
+  <td></td>
 </tr>
 
 <tr>
@@ -612,13 +645,18 @@ from a Global Positioning System receiver on the device. </td>
   <td></td>
 </tr>
 <tr>
-  <td>NFC</td>
+  <td rowspan="2">NFC</td>
   <td><code>android.hardware.nfc</td>
   <td>The application uses Near Field Communications radio features in the device.</td>
   <td></td>
 </tr>
 <tr>
-  <td rowspan="6">Sensors</td>
+  <td><code>android.hardware.nfc.hce</code></td>
+  <td>The application uses the NFC card emulation feature in the device.</td>
+  <td></td>
+</tr>
+<tr>
+  <td rowspan="8">Sensors</td>
   <td><code>android.hardware.sensor.accelerometer</code></td>
   <td>The application uses motion readings from an accelerometer on the
 device.</td>
@@ -650,6 +688,16 @@ the device.</td>
   <td>The application uses the device's proximity sensor.</td>
   <td></td>
 </tr>
+<tr>
+  <td><code>android.hardware.sensor.stepcounter</code></td>
+  <td>The application uses the device's step counter.</td>
+  <td></td>
+</tr>
+<tr>
+  <td><code>android.hardware.sensor.stepdetector</code></td>
+  <td>The application uses the device's step detector.</td>
+  <td></td>
+</tr>
 
 <tr>
   <td rowspan="2">Screen</td>
@@ -657,7 +705,7 @@ the device.</td>
   <td>The application requires landscape orientation.</td>
   <td rowspan="2">
      <p>For example, if your app requires portrait orientation, you should declare
-<code>&lt;uses-feature android:name="android.hardware.screen.portrait"/></code> so that only devices
+<code>&lt;uses-feature android:name="android.hardware.screen.portrait"/&gt;</code> so that only devices
 that support portrait orientation (whether always or by user choice) can install your app. If your
 application <em>supports</em> both orientations, then you don't need to declare either.</p>
     <p>Both orientations are assumed <em>not required</em>, by default, so your app may be installed
@@ -709,9 +757,9 @@ device.</td>
   <td>Television</td>
   <td><code>android.hardware.type.television</code></td>
   <td>The application is designed for a television user experience.</td>
-  <td>>This feature defines "television" to be a typical living room television experience: 
-  displayed on a big screen, where the user is sitting far away and the dominant form of 
-  input is be something like a d-pad, and generally not through touch or a 
+  <td>This feature defines "television" to be a typical living room television experience:
+  displayed on a big screen, where the user is sitting far away and the dominant form of
+  input is something like a d-pad, and generally not through touch or a
   mouse/pointer-device.</td>
 </tr>
 
@@ -827,10 +875,14 @@ hosts).</td>
 </tr>
 
 <tr>
-  <td>Wifi</td>
+  <td rowspan="2">Wi-Fi</td>
   <td><code>android.hardware.wifi</code></td>
-  <td>The application uses 802.11 networking (wifi) features on the device.</td>
+  <td>The application uses 802.11 networking (Wi-Fi) features on the device.</td>
   <td></td>
+</tr>
+<tr>
+  <td><code>android.hardware.wifi.direct</code></td>
+  <td>The application uses the Wi-Fi Direct networking features on the device.</td>
 </tr>
 
   </table>
@@ -844,30 +896,51 @@ in a separate <code>&lt;uses-feature&gt;</code> element. </p>
 
 
   <table>
-<tr> 
+<tr>
   <th>Feature</th>
-  <th>Attribute Value</th> 
+  <th>Attribute Value</th>
   <th>Description</th>
-  <th>Comments</th>
+</tr>
+<tr>
+  <td>App Widgets</td>
+  <td><code>android.software.app_widgets</code></td>
+  <td>The application uses or provides App Widgets and should be installed only on devices
+  that include a Home screen or similar location where users can embed App Widgets.</td>
+</tr>
+<tr>
+  <td>Device Management</td>
+  <td><code>android.software.device_admin</code></td>
+  <td>The application uses device policy enforcement via device administrators.</td>
+</tr>
+<tr>
+  <td>Home Screen</td>
+  <td><code>android.software.home_screen</code></td>
+  <td>The application behaves as a Home screen replacement and should be installed only on
+  devices that support third-party Home screen apps.</td>
+</tr>
+<tr>
+  <td>Input Method</td>
+  <td><code>android.software.input_methods</code></td>
+  <td>The application provides a custom input method and should be installed only on devices that
+  support third-party input methods.</td>
 </tr>
 <tr>
   <td>Live Wallpaper</td>
   <td><code>android.software.live_wallpaper</code></td>
-  <td>The application uses or provides Live Wallpapers.</td>
-  <td></td>
+  <td>The application uses or provides Live Wallpapers and should be installed only on devices that
+  support Live Wallpapers.</td>
 </tr>
 <tr>
   <td rowspan="2">SIP/VOIP</td>
   <td><code>android.software.sip</code></td>
-  <td>The application uses SIP service on the device.
+  <td>The application uses SIP service on the device and should be installed only on devices that
+  support SIP.
   </td>
-  <td></td>
 </tr>
 <tr>
   <td><code>android.software.sip.voip</code></td>
-  <td>Subfeature. The application uses SIP-based VOIP service on the device.
-  </td>
-  <td>This subfeature implicitly declares the <code>android.software.sip</code> parent feature,
+  <td><p>Subfeature. The application uses SIP-based VOIP service on the device.
+  <p>This subfeature implicitly declares the <code>android.software.sip</code> parent feature,
 unless declared with <code>android:required="false"</code>.</td>
 </tr>
   </table>
@@ -908,7 +981,7 @@ filtering based on the <code>CAMERA</code> permission, you would add this
 <pre>&lt;uses-feature android:name="android.hardware.camera" android:required="false" /&gt;</pre>
 
 <table id="permissions-features" >
-  <tr> 
+  <tr>
     <th>Category</th>
     <th>This Permission...</th>
     <th>Implies This Feature Requirement</th>
@@ -1032,7 +1105,7 @@ filtering based on the <code>CAMERA</code> permission, you would add this
 </tr>
 
 <tr>
-  <td rowspan="3">Wifi</td>
+  <td rowspan="3">Wi-Fi</td>
   <td><code>ACCESS_WIFI_STATE</code></td>
   <td><code>android.hardware.wifi</code></td>
 <!--  <td></td> -->

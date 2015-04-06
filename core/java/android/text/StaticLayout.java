@@ -26,6 +26,7 @@ import android.text.style.TabStopSpan;
 import android.util.Log;
 
 import com.android.internal.util.ArrayUtils;
+import com.android.internal.util.GrowingArrayUtils;
 
 /**
  * StaticLayout is a Layout for text that will not be edited after it
@@ -130,9 +131,8 @@ public class StaticLayout extends Layout {
             mEllipsizedWidth = outerwidth;
         }
 
-        mLines = new int[ArrayUtils.idealIntArraySize(2 * mColumns)];
-        mLineDirections = new Directions[
-                             ArrayUtils.idealIntArraySize(2 * mColumns)];
+        mLineDirections = ArrayUtils.newUnpaddedArray(Directions.class, 2 * mColumns);
+        mLines = new int[mLineDirections.length];
         mMaximumVisibleLineCount = maxLines;
 
         mMeasured = MeasuredText.obtain();
@@ -149,9 +149,9 @@ public class StaticLayout extends Layout {
         super(text, null, 0, null, 0, 0);
 
         mColumns = COLUMNS_ELLIPSIZE;
-        mLines = new int[ArrayUtils.idealIntArraySize(2 * mColumns)];
-        mLineDirections = new Directions[
-                             ArrayUtils.idealIntArraySize(2 * mColumns)];
+        mLineDirections = ArrayUtils.newUnpaddedArray(Directions.class, 2 * mColumns);
+        mLines = new int[mLineDirections.length];
+        // FIXME This is never recycled
         mMeasured = MeasuredText.obtain();
     }
 
@@ -161,6 +161,9 @@ public class StaticLayout extends Layout {
                         float spacingadd, boolean includepad,
                         boolean trackpad, float ellipsizedWidth,
                         TextUtils.TruncateAt ellipsize) {
+        int[] breakOpp = null;
+        final String localeLanguageTag = paint.getTextLocale().toLanguageTag();
+
         mLineCount = 0;
 
         int v = 0;
@@ -174,8 +177,6 @@ public class StaticLayout extends Layout {
         Spanned spanned = null;
         if (source instanceof Spanned)
             spanned = (Spanned) source;
-
-        int DEFAULT_DIR = DIR_LEFT_TO_RIGHT; // XXX
 
         int paraEnd;
         for (int paraStart = bufStart; paraStart <= bufEnd; paraStart = paraEnd) {
@@ -200,13 +201,12 @@ public class StaticLayout extends Layout {
                     restWidth -= sp[i].getLeadingMargin(false);
 
                     // LeadingMarginSpan2 is odd.  The count affects all
-                    // leading margin spans, not just this particular one,
-                    // and start from the top of the span, not the top of the
-                    // paragraph.
+                    // leading margin spans, not just this particular one
                     if (lms instanceof LeadingMarginSpan2) {
                         LeadingMarginSpan2 lms2 = (LeadingMarginSpan2) lms;
                         int lmsFirstLine = getLineForOffset(spanned.getSpanStart(lms2));
-                        firstWidthLineLimit = lmsFirstLine + lms2.getLeadingMarginLineCount();
+                        firstWidthLineLimit = Math.max(firstWidthLineLimit,
+                                lmsFirstLine + lms2.getLeadingMarginLineCount());
                     }
                 }
 
@@ -215,8 +215,7 @@ public class StaticLayout extends Layout {
                 if (chooseHt.length != 0) {
                     if (chooseHtv == null ||
                         chooseHtv.length < chooseHt.length) {
-                        chooseHtv = new int[ArrayUtils.idealIntArraySize(
-                                            chooseHt.length)];
+                        chooseHtv = ArrayUtils.newUnpaddedIntArray(chooseHt.length);
                     }
 
                     for (int i = 0; i < chooseHt.length; i++) {
@@ -243,6 +242,9 @@ public class StaticLayout extends Layout {
             int dir = measured.mDir;
             boolean easy = measured.mEasy;
 
+            breakOpp = nLineBreakOpportunities(localeLanguageTag, chs, paraEnd - paraStart, breakOpp);
+            int breakOppIndex = 0;
+
             int width = firstWidth;
 
             float w = 0;
@@ -260,6 +262,8 @@ public class StaticLayout extends Layout {
             int fit = paraStart;
             float fitWidth = w;
             int fitAscent = 0, fitDescent = 0, fitTop = 0, fitBottom = 0;
+            // same as fitWidth but not including any trailing whitespace
+            float fitWidthGraphing = w;
 
             boolean hasTabOrEmoji = false;
             boolean hasTab = false;
@@ -340,8 +344,13 @@ public class StaticLayout extends Layout {
                         w += widths[j - paraStart];
                     }
 
-                    if (w <= width) {
+                    boolean isSpaceOrTab = c == CHAR_SPACE || c == CHAR_TAB || c == CHAR_ZWSP;
+
+                    if (w <= width || isSpaceOrTab) {
                         fitWidth = w;
+                        if (!isSpaceOrTab) {
+                            fitWidthGraphing = w;
+                        }
                         fit = j + 1;
 
                         if (fmTop < fitTop)
@@ -353,31 +362,15 @@ public class StaticLayout extends Layout {
                         if (fmBottom > fitBottom)
                             fitBottom = fmBottom;
 
-                        /*
-                         * From the Unicode Line Breaking Algorithm:
-                         * (at least approximately)
-                         *
-                         * .,:; are class IS: breakpoints
-                         *      except when adjacent to digits
-                         * /    is class SY: a breakpoint
-                         *      except when followed by a digit.
-                         * -    is class HY: a breakpoint
-                         *      except when followed by a digit.
-                         *
-                         * Ideographs are class ID: breakpoints when adjacent,
-                         * except for NS (non-starters), which can be broken
-                         * after but not before.
-                         */
-                        if (c == CHAR_SPACE || c == CHAR_TAB ||
-                            ((c == CHAR_DOT || c == CHAR_COMMA ||
-                                    c == CHAR_COLON || c == CHAR_SEMICOLON) &&
-                             (j - 1 < here || !Character.isDigit(chs[j - 1 - paraStart])) &&
-                             (j + 1 >= spanEnd || !Character.isDigit(chs[j + 1 - paraStart]))) ||
-                            ((c == CHAR_SLASH || c == CHAR_HYPHEN) &&
-                             (j + 1 >= spanEnd || !Character.isDigit(chs[j + 1 - paraStart]))) ||
-                            (c >= CHAR_FIRST_CJK && isIdeographic(c, true) &&
-                             j + 1 < spanEnd && isIdeographic(chs[j + 1 - paraStart], false))) {
-                            okWidth = w;
+                        while (breakOpp[breakOppIndex] != -1
+                                && breakOpp[breakOppIndex] < j - paraStart + 1) {
+                            breakOppIndex++;
+                        }
+                        boolean isLineBreak = breakOppIndex < breakOpp.length &&
+                                breakOpp[breakOppIndex] == j - paraStart + 1;
+
+                        if (isLineBreak) {
+                            okWidth = fitWidthGraphing;
                             ok = j + 1;
 
                             if (fitTop < okTop)
@@ -390,19 +383,11 @@ public class StaticLayout extends Layout {
                                 okBottom = fitBottom;
                         }
                     } else {
-                        final boolean moreChars = (j + 1 < spanEnd);
                         int endPos;
                         int above, below, top, bottom;
                         float currentTextWidth;
 
                         if (ok != here) {
-                            // If it is a space that makes the length exceed width, cut here
-                            if (c == CHAR_SPACE) ok = j + 1;
-
-                            while (ok < spanEnd && chs[ok - paraStart] == CHAR_SPACE) {
-                                ok++;
-                            }
-
                             endPos = ok;
                             above = okAscent;
                             below = okDescent;
@@ -417,25 +402,36 @@ public class StaticLayout extends Layout {
                             bottom = fitBottom;
                             currentTextWidth = fitWidth;
                         } else {
+                            // must make progress, so take next character
                             endPos = here + 1;
-                            above = fm.ascent;
-                            below = fm.descent;
-                            top = fm.top;
-                            bottom = fm.bottom;
+                            // but to deal properly with clusters
+                            // take all zero width characters following that
+                            while (endPos < spanEnd && widths[endPos - paraStart] == 0) {
+                                endPos++;
+                            }
+                            above = fmAscent;
+                            below = fmDescent;
+                            top = fmTop;
+                            bottom = fmBottom;
                             currentTextWidth = widths[here - paraStart];
                         }
 
-                        v = out(source, here, endPos,
+                        int ellipseEnd = endPos;
+                        if (mMaximumVisibleLineCount == 1 && ellipsize == TextUtils.TruncateAt.MIDDLE) {
+                            ellipseEnd = paraEnd;
+                        }
+                        v = out(source, here, ellipseEnd,
                                 above, below, top, bottom,
                                 v, spacingmult, spacingadd, chooseHt,chooseHtv, fm, hasTabOrEmoji,
                                 needMultiply, chdirs, dir, easy, bufEnd, includepad, trackpad,
                                 chs, widths, paraStart, ellipsize, ellipsizedWidth,
-                                currentTextWidth, paint, moreChars);
+                                currentTextWidth, paint, true);
 
                         here = endPos;
                         j = here - 1; // restart j-span loop from here, compensating for the j++
                         ok = fit = here;
                         w = 0;
+                        fitWidthGraphing = w;
                         fitAscent = fitDescent = fitTop = fitBottom = 0;
                         okAscent = okDescent = okTop = okBottom = 0;
 
@@ -450,10 +446,10 @@ public class StaticLayout extends Layout {
                             spanEnd = here;
                             break;
                         }
-                    }
-                    // FIXME This should be moved in the above else block which changes mLineCount
-                    if (mLineCount >= mMaximumVisibleLineCount) {
-                        break;
+
+                        if (mLineCount >= mMaximumVisibleLineCount) {
+                            return;
+                        }
                     }
                 }
             }
@@ -492,6 +488,8 @@ public class StaticLayout extends Layout {
                 mLineCount < mMaximumVisibleLineCount) {
             // Log.e("text", "output last " + bufEnd);
 
+            measured.setPara(source, bufStart, bufEnd, textDir);
+
             paint.getFontMetricsInt(fm);
 
             v = out(source,
@@ -500,102 +498,11 @@ public class StaticLayout extends Layout {
                     v,
                     spacingmult, spacingadd, null,
                     null, fm, false,
-                    needMultiply, null, DEFAULT_DIR, true, bufEnd,
+                    needMultiply, measured.mLevels, measured.mDir, measured.mEasy, bufEnd,
                     includepad, trackpad, null,
                     null, bufStart, ellipsize,
                     ellipsizedWidth, 0, paint, false);
         }
-    }
-
-    /**
-     * Returns true if the specified character is one of those specified
-     * as being Ideographic (class ID) by the Unicode Line Breaking Algorithm
-     * (http://www.unicode.org/unicode/reports/tr14/), and is therefore OK
-     * to break between a pair of.
-     *
-     * @param includeNonStarters also return true for category NS
-     *                           (non-starters), which can be broken
-     *                           after but not before.
-     */
-    private static final boolean isIdeographic(char c, boolean includeNonStarters) {
-        if (c >= '\u2E80' && c <= '\u2FFF') {
-            return true; // CJK, KANGXI RADICALS, DESCRIPTION SYMBOLS
-        }
-        if (c == '\u3000') {
-            return true; // IDEOGRAPHIC SPACE
-        }
-        if (c >= '\u3040' && c <= '\u309F') {
-            if (!includeNonStarters) {
-                switch (c) {
-                case '\u3041': //  # HIRAGANA LETTER SMALL A
-                case '\u3043': //  # HIRAGANA LETTER SMALL I
-                case '\u3045': //  # HIRAGANA LETTER SMALL U
-                case '\u3047': //  # HIRAGANA LETTER SMALL E
-                case '\u3049': //  # HIRAGANA LETTER SMALL O
-                case '\u3063': //  # HIRAGANA LETTER SMALL TU
-                case '\u3083': //  # HIRAGANA LETTER SMALL YA
-                case '\u3085': //  # HIRAGANA LETTER SMALL YU
-                case '\u3087': //  # HIRAGANA LETTER SMALL YO
-                case '\u308E': //  # HIRAGANA LETTER SMALL WA
-                case '\u3095': //  # HIRAGANA LETTER SMALL KA
-                case '\u3096': //  # HIRAGANA LETTER SMALL KE
-                case '\u309B': //  # KATAKANA-HIRAGANA VOICED SOUND MARK
-                case '\u309C': //  # KATAKANA-HIRAGANA SEMI-VOICED SOUND MARK
-                case '\u309D': //  # HIRAGANA ITERATION MARK
-                case '\u309E': //  # HIRAGANA VOICED ITERATION MARK
-                    return false;
-                }
-            }
-            return true; // Hiragana (except small characters)
-        }
-        if (c >= '\u30A0' && c <= '\u30FF') {
-            if (!includeNonStarters) {
-                switch (c) {
-                case '\u30A0': //  # KATAKANA-HIRAGANA DOUBLE HYPHEN
-                case '\u30A1': //  # KATAKANA LETTER SMALL A
-                case '\u30A3': //  # KATAKANA LETTER SMALL I
-                case '\u30A5': //  # KATAKANA LETTER SMALL U
-                case '\u30A7': //  # KATAKANA LETTER SMALL E
-                case '\u30A9': //  # KATAKANA LETTER SMALL O
-                case '\u30C3': //  # KATAKANA LETTER SMALL TU
-                case '\u30E3': //  # KATAKANA LETTER SMALL YA
-                case '\u30E5': //  # KATAKANA LETTER SMALL YU
-                case '\u30E7': //  # KATAKANA LETTER SMALL YO
-                case '\u30EE': //  # KATAKANA LETTER SMALL WA
-                case '\u30F5': //  # KATAKANA LETTER SMALL KA
-                case '\u30F6': //  # KATAKANA LETTER SMALL KE
-                case '\u30FB': //  # KATAKANA MIDDLE DOT
-                case '\u30FC': //  # KATAKANA-HIRAGANA PROLONGED SOUND MARK
-                case '\u30FD': //  # KATAKANA ITERATION MARK
-                case '\u30FE': //  # KATAKANA VOICED ITERATION MARK
-                    return false;
-                }
-            }
-            return true; // Katakana (except small characters)
-        }
-        if (c >= '\u3400' && c <= '\u4DB5') {
-            return true; // CJK UNIFIED IDEOGRAPHS EXTENSION A
-        }
-        if (c >= '\u4E00' && c <= '\u9FBB') {
-            return true; // CJK UNIFIED IDEOGRAPHS
-        }
-        if (c >= '\uF900' && c <= '\uFAD9') {
-            return true; // CJK COMPATIBILITY IDEOGRAPHS
-        }
-        if (c >= '\uA000' && c <= '\uA48F') {
-            return true; // YI SYLLABLES
-        }
-        if (c >= '\uA490' && c <= '\uA4CF') {
-            return true; // YI RADICALS
-        }
-        if (c >= '\uFE62' && c <= '\uFE66') {
-            return true; // SMALL PLUS SIGN to SMALL EQUALS SIGN
-        }
-        if (c >= '\uFF10' && c <= '\uFF19') {
-            return true; // WIDE DIGITS
-        }
-
-        return false;
     }
 
     private int out(CharSequence text, int start, int end,
@@ -615,16 +522,16 @@ public class StaticLayout extends Layout {
         int[] lines = mLines;
 
         if (want >= lines.length) {
-            int nlen = ArrayUtils.idealIntArraySize(want + 1);
-            int[] grow = new int[nlen];
-            System.arraycopy(lines, 0, grow, 0, lines.length);
-            mLines = grow;
-            lines = grow;
-
-            Directions[] grow2 = new Directions[nlen];
+            Directions[] grow2 = ArrayUtils.newUnpaddedArray(
+                    Directions.class, GrowingArrayUtils.growSize(want));
             System.arraycopy(mLineDirections, 0, grow2, 0,
                              mLineDirections.length);
             mLineDirections = grow2;
+
+            int[] grow = new int[grow2.length];
+            System.arraycopy(lines, 0, grow, 0, lines.length);
+            mLines = grow;
+            lines = grow;
         }
 
         if (chooseHt != null) {
@@ -649,7 +556,11 @@ public class StaticLayout extends Layout {
             bottom = fm.bottom;
         }
 
-        if (j == 0) {
+        boolean firstLine = (j == 0);
+        boolean currentLineIsTheLastVisibleOne = (j + 1 == mMaximumVisibleLineCount);
+        boolean lastLine = currentLineIsTheLastVisibleOne || (end == bufEnd);
+
+        if (firstLine) {
             if (trackPad) {
                 mTopPadding = top - above;
             }
@@ -658,7 +569,10 @@ public class StaticLayout extends Layout {
                 above = top;
             }
         }
-        if (end == bufEnd) {
+
+        int extra;
+
+        if (lastLine) {
             if (trackPad) {
                 mBottomPadding = bottom - below;
             }
@@ -668,9 +582,8 @@ public class StaticLayout extends Layout {
             }
         }
 
-        int extra;
 
-        if (needMultiply) {
+        if (needMultiply && !lastLine) {
             double ex = (below - above) * (spacingmult - 1) + spacingadd;
             if (ex >= 0) {
                 extra = (int)(ex + EXTRA_ROUNDING);
@@ -707,8 +620,6 @@ public class StaticLayout extends Layout {
         if (ellipsize != null) {
             // If there is only one line, then do any type of ellipsis except when it is MARQUEE
             // if there are multiple lines, just allow END ellipsis on the last line
-            boolean firstLine = (j == 0);
-            boolean currentLineIsTheLastVisibleOne = (j + 1 == mMaximumVisibleLineCount);
             boolean forceEllipsis = moreChars && (mLineCount + 1 == mMaximumVisibleLineCount);
 
             boolean doEllipsis =
@@ -741,7 +652,7 @@ public class StaticLayout extends Layout {
 
         float ellipsisWidth = paint.measureText(
                 (where == TextUtils.TruncateAt.END_SMALL) ?
-                        ELLIPSIS_TWO_DOTS : ELLIPSIS_NORMAL, 0, 1);
+                        TextUtils.ELLIPSIS_TWO_DOTS : TextUtils.ELLIPSIS_NORMAL, 0, 1);
         int ellipsisStart = 0;
         int ellipsisCount = 0;
         int len = lineEnd - lineStart;
@@ -797,7 +708,7 @@ public class StaticLayout extends Layout {
                 int left = 0, right = len;
 
                 float ravail = (avail - ellipsisWidth) / 2;
-                for (right = len; right >= 0; right--) {
+                for (right = len; right > 0; right--) {
                     float w = widths[right - 1 + lineStart - widthStart];
 
                     if (w + rsum > ravail) {
@@ -937,10 +848,15 @@ public class StaticLayout extends Layout {
     void prepare() {
         mMeasured = MeasuredText.obtain();
     }
-    
+
     void finish() {
         mMeasured = MeasuredText.recycle(mMeasured);
     }
+
+    // returns an array with terminal sentinel value -1 to indicate end
+    // this is so that arrays can be recycled instead of allocating new arrays
+    // every time
+    private static native int[] nLineBreakOpportunities(String locale, char[] text, int length, int[] recycle);
 
     private int mLineCount;
     private int mTopPadding, mBottomPadding;
@@ -967,17 +883,10 @@ public class StaticLayout extends Layout {
 
     private static final int TAB_INCREMENT = 20; // same as Layout, but that's private
 
-    private static final char CHAR_FIRST_CJK = '\u2E80';
-
     private static final char CHAR_NEW_LINE = '\n';
     private static final char CHAR_TAB = '\t';
     private static final char CHAR_SPACE = ' ';
-    private static final char CHAR_DOT = '.';
-    private static final char CHAR_COMMA = ',';
-    private static final char CHAR_COLON = ':';
-    private static final char CHAR_SEMICOLON = ';';
-    private static final char CHAR_SLASH = '/';
-    private static final char CHAR_HYPHEN = '-';
+    private static final char CHAR_ZWSP = '\u200B';
 
     private static final double EXTRA_ROUNDING = 0.5;
 

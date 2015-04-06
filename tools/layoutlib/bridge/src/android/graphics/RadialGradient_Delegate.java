@@ -54,7 +54,7 @@ public class RadialGradient_Delegate extends Gradient_Delegate {
     // ---- native methods ----
 
     @LayoutlibDelegate
-    /*package*/ static int nativeCreate1(float x, float y, float radius,
+    /*package*/ static long nativeCreate1(float x, float y, float radius,
             int colors[], float positions[], int tileMode) {
         RadialGradient_Delegate newDelegate = new RadialGradient_Delegate(x, y, radius,
                 colors, positions, Shader_Delegate.getTileMode(tileMode));
@@ -62,24 +62,10 @@ public class RadialGradient_Delegate extends Gradient_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static int nativeCreate2(float x, float y, float radius,
+    /*package*/ static long nativeCreate2(float x, float y, float radius,
             int color0, int color1, int tileMode) {
         return nativeCreate1(x, y, radius, new int[] { color0, color1 }, null /*positions*/,
                 tileMode);
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static int nativePostCreate1(int native_shader, float x, float y, float radius,
-            int colors[], float positions[], int tileMode) {
-        // nothing to be done here.
-        return 0;
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static int nativePostCreate2(int native_shader, float x, float y, float radius,
-            int color0, int color1, int tileMode) {
-        // nothing to be done here.
-        return 0;
     }
 
     // ---- Private delegate/helper methods ----
@@ -198,7 +184,7 @@ public class RadialGradient_Delegate extends Gradient_Delegate {
 
                         float _x = pt2[0];
                         float _y = pt2[1];
-                        float distance = (float) Math.sqrt(_x * _x + _y * _y);
+                        float distance = (float) Math.hypot(_x, _y);
 
                         data[index++] = getGradientColor(distance / mRadius);
                     }

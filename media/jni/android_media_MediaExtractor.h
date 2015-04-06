@@ -19,6 +19,7 @@
 
 #include <media/stagefright/foundation/ABase.h>
 #include <media/stagefright/MediaSource.h>
+#include <media/stagefright/DataSource.h>
 #include <utils/Errors.h>
 #include <utils/KeyedVector.h>
 #include <utils/RefBase.h>
@@ -28,20 +29,25 @@
 
 namespace android {
 
-struct MetaData;
+struct IMediaHTTPService;
+class MetaData;
 struct NuMediaExtractor;
 
 struct JMediaExtractor : public RefBase {
     JMediaExtractor(JNIEnv *env, jobject thiz);
 
     status_t setDataSource(
+            const sp<IMediaHTTPService> &httpService,
             const char *path,
             const KeyedVector<String8, String8> *headers);
 
     status_t setDataSource(int fd, off64_t offset, off64_t size);
+    status_t setDataSource(const sp<DataSource> &source);
 
     size_t countTracks() const;
     status_t getTrackFormat(size_t index, jobject *format) const;
+
+    status_t getFileFormat(jobject *format) const;
 
     status_t selectTrack(size_t index);
     status_t unselectTrack(size_t index);

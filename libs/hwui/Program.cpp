@@ -15,8 +15,12 @@
  */
 
 #define LOG_TAG "OpenGLRenderer"
+#define ATRACE_TAG ATRACE_TAG_VIEW
+
+#include <utils/Trace.h>
 
 #include "Program.h"
+#include "Vertex.h"
 
 namespace android {
 namespace uirenderer {
@@ -25,7 +29,6 @@ namespace uirenderer {
 // Base program
 ///////////////////////////////////////////////////////////////////////////////
 
-// TODO: Program instance should be created from a factory method
 Program::Program(const ProgramDescription& description, const char* vertex, const char* fragment) {
     mInitialized = false;
     mHasColorUniform = false;
@@ -50,12 +53,13 @@ Program::Program(const ProgramDescription& description, const char* vertex, cons
                 texCoords = -1;
             }
 
+            ATRACE_BEGIN("linkProgram");
             glLinkProgram(mProgramId);
+            ATRACE_END();
 
             GLint status;
             glGetProgramiv(mProgramId, GL_LINK_STATUS, &status);
             if (status != GL_TRUE) {
-                ALOGE("Error while linking shaders:");
                 GLint infoLen = 0;
                 glGetProgramiv(mProgramId, GL_INFO_LOG_LENGTH, &infoLen);
                 if (infoLen > 1) {
@@ -63,14 +67,7 @@ Program::Program(const ProgramDescription& description, const char* vertex, cons
                     glGetProgramInfoLog(mProgramId, infoLen, 0, &log[0]);
                     ALOGE("%s", log);
                 }
-
-                glDetachShader(mProgramId, mVertexShader);
-                glDetachShader(mProgramId, mFragmentShader);
-
-                glDeleteShader(mVertexShader);
-                glDeleteShader(mFragmentShader);
-
-                glDeleteProgram(mProgramId);
+                LOG_ALWAYS_FATAL("Error while linking shaders");
             } else {
                 mInitialized = true;
             }
@@ -81,11 +78,15 @@ Program::Program(const ProgramDescription& description, const char* vertex, cons
 
     if (mInitialized) {
         transform = addUniform("transform");
+        projection = addUniform("projection");
     }
 }
 
 Program::~Program() {
     if (mInitialized) {
+        // This would ideally happen after linking the program
+        // but Tegra drivers, especially when perfhud is enabled,
+        // sometimes crash if we do so
         glDetachShader(mProgramId, mVertexShader);
         glDetachShader(mProgramId, mFragmentShader);
 
@@ -131,6 +132,8 @@ int Program::getUniform(const char* name) {
 }
 
 GLuint Program::buildShader(const char* source, GLenum type) {
+    ATRACE_NAME("Build GL Shader");
+
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, 0);
     glCompileShader(shader);
@@ -138,12 +141,12 @@ GLuint Program::buildShader(const char* source, GLenum type) {
     GLint status;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
     if (status != GL_TRUE) {
+        ALOGE("Error while compiling this shader:\n===\n%s\n===", source);
         // Some drivers return wrong values for GL_INFO_LOG_LENGTH
         // use a fixed size instead
         GLchar log[512];
         glGetShaderInfoLog(shader, sizeof(log), 0, &log[0]);
-        ALOGE("Error while compiling shader: %s", log);
-        glDeleteShader(shader);
+        LOG_ALWAYS_FATAL("Shader info log: %s", log);
         return 0;
     }
 
@@ -152,18 +155,25 @@ GLuint Program::buildShader(const char* source, GLenum type) {
 
 void Program::set(const mat4& projectionMatrix, const mat4& modelViewMatrix,
         const mat4& transformMatrix, bool offset) {
-    mat4 t(projectionMatrix);
-    if (offset) {
-        // offset screenspace xy by an amount that compensates for typical precision
-        // issues in GPU hardware that tends to paint hor/vert lines in pixels shifted
-        // up and to the left.
-        // This offset value is based on an assumption that some hardware may use as
-        // little as 12.4 precision, so we offset by slightly more than 1/16.
-        t.translate(.375, .375, 0);
+    if (projectionMatrix != mProjection || offset != mOffset) {
+        if (CC_LIKELY(!offset)) {
+            glUniformMatrix4fv(projection, 1, GL_FALSE, &projectionMatrix.data[0]);
+        } else {
+            mat4 p(projectionMatrix);
+            // offset screenspace xy by an amount that compensates for typical precision
+            // issues in GPU hardware that tends to paint hor/vert lines in pixels shifted
+            // up and to the left.
+            // This offset value is based on an assumption that some hardware may use as
+            // little as 12.4 precision, so we offset by slightly more than 1/16.
+            p.translate(Vertex::GeometryFudgeFactor(), Vertex::GeometryFudgeFactor());
+            glUniformMatrix4fv(projection, 1, GL_FALSE, &p.data[0]);
+        }
+        mProjection = projectionMatrix;
+        mOffset = offset;
     }
-    t.multiply(transformMatrix);
-    t.multiply(modelViewMatrix);
 
+    mat4 t(transformMatrix);
+    t.multiply(modelViewMatrix);
     glUniformMatrix4fv(transform, 1, GL_FALSE, &t.data[0]);
 }
 
@@ -178,7 +188,7 @@ void Program::setColor(const float r, const float g, const float b, const float 
 void Program::use() {
     glUseProgram(mProgramId);
     if (texCoords >= 0 && !mHasSampler) {
-        glUniform1i(getUniform("sampler"), 0);
+        glUniform1i(getUniform("baseSampler"), 0);
         mHasSampler = true;
     }
     mUse = true;

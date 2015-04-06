@@ -16,6 +16,9 @@
 
 package android.net;
 
+import android.net.LinkAddress;
+import android.net.RouteInfo;
+
 /**
  * Callback class for receiving events from an INetworkManagementService
  *
@@ -53,6 +56,23 @@ interface INetworkManagementEventObserver {
      */
     void interfaceRemoved(String iface);
 
+
+    /**
+     * An interface address has been added or updated.
+     *
+     * @param iface The interface.
+     * @param address The address.
+     */
+    void addressUpdated(String iface, in LinkAddress address);
+
+    /**
+     * An interface address has been removed.
+     *
+     * @param iface The interface.
+     * @param address The address.
+     */
+    void addressRemoved(String iface, in LinkAddress address);
+
     /**
      * A networking quota limit has been reached. The quota might not
      * be specific to an interface.
@@ -62,4 +82,31 @@ interface INetworkManagementEventObserver {
      */
     void limitReached(String limitName, String iface);
 
+    /**
+     * Interface data activity status is changed.
+     *
+     * @param iface The interface.
+     * @param active  True if the interface is actively transmitting data, false if it is idle.
+     * @param tsNanos Elapsed realtime in nanos when the state of the network interface changed.
+     */
+    void interfaceClassDataActivityChanged(String label, boolean active, long tsNanos);
+
+    /**
+     * Information about available DNS servers has been received.
+     *
+     * @param iface The interface on which the information was received.
+     * @param lifetime The time in seconds for which the DNS servers may be used.
+     * @param servers The IP addresses of the DNS servers.
+     */
+    void interfaceDnsServerInfo(String iface, long lifetime, in String[] servers);
+
+    /**
+     * A route has been added or updated.
+     */
+    void routeUpdated(in RouteInfo route);
+
+    /**
+     * A route has been removed.
+     */
+    void routeRemoved(in RouteInfo route);
 }

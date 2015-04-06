@@ -17,7 +17,6 @@ package android.graphics;
 
 import android.content.res.AssetManager;
 
-import java.io.BufferedInputStream;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -34,8 +33,11 @@ import java.io.InputStream;
  *
  */
 public final class BitmapRegionDecoder {
-    private int mNativeBitmapRegionDecoder;
+    private long mNativeBitmapRegionDecoder;
     private boolean mRecycled;
+    // ensures that the native decoder object exists and that only one decode can
+    // occur at a time.
+    private final Object mNativeLock = new Object();
 
     /**
      * Create a BitmapRegionDecoder from the specified byte array.
@@ -102,18 +104,17 @@ public final class BitmapRegionDecoder {
      *                    allowing sharing may degrade the decoding speed.
      * @return BitmapRegionDecoder, or null if the image data could not be decoded.
      * @throws IOException if the image format is not supported or can not be decoded.
+     *
+     * <p class="note">Prior to {@link android.os.Build.VERSION_CODES#KITKAT},
+     * if {@link InputStream#markSupported is.markSupported()} returns true,
+     * <code>is.mark(1024)</code> would be called. As of
+     * {@link android.os.Build.VERSION_CODES#KITKAT}, this is no longer the case.</p>
      */
     public static BitmapRegionDecoder newInstance(InputStream is,
             boolean isShareable) throws IOException {
-        // we need mark/reset to work properly in JNI
-
-        if (!is.markSupported()) {
-            is = new BufferedInputStream(is, 16 * 1024);
-        }
-
         if (is instanceof AssetManager.AssetInputStream) {
             return nativeNewInstance(
-                    ((AssetManager.AssetInputStream) is).getAssetInt(),
+                    ((AssetManager.AssetInputStream) is).getNativeAsset(),
                     isShareable);
         } else {
             // pass some temp storage down to the native code. 1024 is made up,
@@ -164,7 +165,7 @@ public final class BitmapRegionDecoder {
 
         This can be called from JNI code.
     */
-    private BitmapRegionDecoder(int decoder) {
+    private BitmapRegionDecoder(long decoder) {
         mNativeBitmapRegionDecoder = decoder;
         mRecycled = false;
     }
@@ -179,24 +180,30 @@ public final class BitmapRegionDecoder {
      *         decoded.
      */
     public Bitmap decodeRegion(Rect rect, BitmapFactory.Options options) {
-        checkRecycled("decodeRegion called on recycled region decoder");
-        if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= getWidth()
-                || rect.top >= getHeight())
-            throw new IllegalArgumentException("rectangle is outside the image");
-        return nativeDecodeRegion(mNativeBitmapRegionDecoder, rect.left, rect.top,
-                rect.right - rect.left, rect.bottom - rect.top, options);
+        synchronized (mNativeLock) {
+            checkRecycled("decodeRegion called on recycled region decoder");
+            if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= getWidth()
+                    || rect.top >= getHeight())
+                throw new IllegalArgumentException("rectangle is outside the image");
+            return nativeDecodeRegion(mNativeBitmapRegionDecoder, rect.left, rect.top,
+                    rect.right - rect.left, rect.bottom - rect.top, options);
+        }
     }
 
     /** Returns the original image's width */
     public int getWidth() {
-        checkRecycled("getWidth called on recycled region decoder");
-        return nativeGetWidth(mNativeBitmapRegionDecoder);
+        synchronized (mNativeLock) {
+            checkRecycled("getWidth called on recycled region decoder");
+            return nativeGetWidth(mNativeBitmapRegionDecoder);
+        }
     }
 
     /** Returns the original image's height */
     public int getHeight() {
-        checkRecycled("getHeight called on recycled region decoder");
-        return nativeGetHeight(mNativeBitmapRegionDecoder);
+        synchronized (mNativeLock) {
+            checkRecycled("getHeight called on recycled region decoder");
+            return nativeGetHeight(mNativeBitmapRegionDecoder);
+        }
     }
 
     /**
@@ -210,9 +217,11 @@ public final class BitmapRegionDecoder {
      * memory when there are no more references to this region decoder.
      */
     public void recycle() {
-        if (!mRecycled) {
-            nativeClean(mNativeBitmapRegionDecoder);
-            mRecycled = true;
+        synchronized (mNativeLock) {
+            if (!mRecycled) {
+                nativeClean(mNativeBitmapRegionDecoder);
+                mRecycled = true;
+            }
         }
     }
 
@@ -245,12 +254,12 @@ public final class BitmapRegionDecoder {
         }
     }
 
-    private static native Bitmap nativeDecodeRegion(int lbm,
+    private static native Bitmap nativeDecodeRegion(long lbm,
             int start_x, int start_y, int width, int height,
             BitmapFactory.Options options);
-    private static native int nativeGetWidth(int lbm);
-    private static native int nativeGetHeight(int lbm);
-    private static native void nativeClean(int lbm);
+    private static native int nativeGetWidth(long lbm);
+    private static native int nativeGetHeight(long lbm);
+    private static native void nativeClean(long lbm);
 
     private static native BitmapRegionDecoder nativeNewInstance(
             byte[] data, int offset, int length, boolean isShareable);
@@ -259,5 +268,5 @@ public final class BitmapRegionDecoder {
     private static native BitmapRegionDecoder nativeNewInstance(
             InputStream is, byte[] storage, boolean isShareable);
     private static native BitmapRegionDecoder nativeNewInstance(
-            int asset, boolean isShareable);
+            long asset, boolean isShareable);
 }

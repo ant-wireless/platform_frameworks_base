@@ -25,8 +25,10 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.drawable.BitmapDrawable;
+import android.media.AudioAttributes;
+import android.os.UserHandle;
 import android.os.Vibrator;
-import android.text.TextUtils;
+import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -78,6 +80,11 @@ public class WaveView extends View implements ValueAnimator.AnimatorUpdateListen
      * in which it can be grabbed when accessibility is enabled (more generous).
      */
     private static final float GRAB_HANDLE_RADIUS_SCALE_ACCESSIBILITY_ENABLED = 1.0f;
+
+    private static final AudioAttributes VIBRATION_ATTRIBUTES = new AudioAttributes.Builder()
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .build();
 
     private Vibrator mVibrator;
     private OnTriggerListener mOnTriggerListener;
@@ -573,11 +580,16 @@ public class WaveView extends View implements ValueAnimator.AnimatorUpdateListen
      * Triggers haptic feedback.
      */
     private synchronized void vibrate(long duration) {
-        if (mVibrator == null) {
-            mVibrator = (android.os.Vibrator)
-                    getContext().getSystemService(Context.VIBRATOR_SERVICE);
+        final boolean hapticEnabled = Settings.System.getIntForUser(
+                mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 1,
+                UserHandle.USER_CURRENT) != 0;
+        if (hapticEnabled) {
+            if (mVibrator == null) {
+                mVibrator = (android.os.Vibrator) getContext()
+                        .getSystemService(Context.VIBRATOR_SERVICE);
+            }
+            mVibrator.vibrate(duration, VIBRATION_ATTRIBUTES);
         }
-        mVibrator.vibrate(duration);
     }
 
     /**

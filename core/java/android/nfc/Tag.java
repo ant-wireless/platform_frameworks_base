@@ -24,6 +24,7 @@ import android.nfc.tech.Ndef;
 import android.nfc.tech.NdefFormatable;
 import android.nfc.tech.NfcA;
 import android.nfc.tech.NfcB;
+import android.nfc.tech.NfcBarcode;
 import android.nfc.tech.NfcF;
 import android.nfc.tech.NfcV;
 import android.nfc.tech.TagTechnology;
@@ -34,6 +35,7 @@ import android.os.RemoteException;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
 
 /**
  * Represents an NFC tag that has been discovered.
@@ -184,11 +186,49 @@ public final class Tag implements Parcelable {
                 case TagTechnology.NFC_V:
                     strings[i] = NfcV.class.getName();
                     break;
+                case TagTechnology.NFC_BARCODE:
+                    strings[i] = NfcBarcode.class.getName();
+                    break;
                 default:
                     throw new IllegalArgumentException("Unknown tech type " + techList[i]);
             }
         }
         return strings;
+    }
+
+    static int[] getTechCodesFromStrings(String[] techStringList) throws IllegalArgumentException {
+        if (techStringList == null) {
+            throw new IllegalArgumentException("List cannot be null");
+        }
+        int[] techIntList = new int[techStringList.length];
+        HashMap<String, Integer> stringToCodeMap = getTechStringToCodeMap();
+        for (int i = 0; i < techStringList.length; i++) {
+            Integer code = stringToCodeMap.get(techStringList[i]);
+
+            if (code == null) {
+                throw new IllegalArgumentException("Unknown tech type " + techStringList[i]);
+            }
+
+            techIntList[i] = code.intValue();
+        }
+        return techIntList;
+    }
+
+    private static HashMap<String, Integer> getTechStringToCodeMap() {
+        HashMap<String, Integer> techStringToCodeMap = new HashMap<String, Integer>();
+
+        techStringToCodeMap.put(IsoDep.class.getName(), TagTechnology.ISO_DEP);
+        techStringToCodeMap.put(MifareClassic.class.getName(), TagTechnology.MIFARE_CLASSIC);
+        techStringToCodeMap.put(MifareUltralight.class.getName(), TagTechnology.MIFARE_ULTRALIGHT);
+        techStringToCodeMap.put(Ndef.class.getName(), TagTechnology.NDEF);
+        techStringToCodeMap.put(NdefFormatable.class.getName(), TagTechnology.NDEF_FORMATABLE);
+        techStringToCodeMap.put(NfcA.class.getName(), TagTechnology.NFC_A);
+        techStringToCodeMap.put(NfcB.class.getName(), TagTechnology.NFC_B);
+        techStringToCodeMap.put(NfcF.class.getName(), TagTechnology.NFC_F);
+        techStringToCodeMap.put(NfcV.class.getName(), TagTechnology.NFC_V);
+        techStringToCodeMap.put(NfcBarcode.class.getName(), TagTechnology.NFC_BARCODE);
+
+        return techStringToCodeMap;
     }
 
     /**
@@ -197,6 +237,14 @@ public final class Tag implements Parcelable {
      */
     public int getServiceHandle() {
         return mServiceHandle;
+    }
+
+    /**
+     * For use by NfcService only.
+     * @hide
+     */
+    public int[] getTechCodeList() {
+        return mTechList;
     }
 
     /**

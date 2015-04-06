@@ -87,9 +87,8 @@ public class LruCache<K, V> {
 
     /**
      * Sets the size of the cache.
-     * @param maxSize The new maximum size.
      *
-     * @hide
+     * @param maxSize The new maximum size.
      */
     public void resize(int maxSize) {
         if (maxSize <= 0) {
@@ -186,10 +185,13 @@ public class LruCache<K, V> {
     }
 
     /**
+     * Remove the eldest entries until the total of remaining entries is at or
+     * below the requested size.
+     *
      * @param maxSize the maximum size of the cache before returning. May be -1
-     *     to evict even 0-sized elements.
+     *            to evict even 0-sized elements.
      */
-    private void trimToSize(int maxSize) {
+    public void trimToSize(int maxSize) {
         while (true) {
             K key;
             V value;

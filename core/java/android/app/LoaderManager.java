@@ -17,7 +17,6 @@
 package android.app;
 
 import android.content.Loader;
-import android.content.Loader.OnLoadCanceledListener;
 import android.os.Bundle;
 import android.util.DebugUtils;
 import android.util.Log;
@@ -205,13 +204,15 @@ class LoaderManagerImpl extends LoaderManager {
     // These are the currently active loaders.  A loader is here
     // from the time its load is started until it has been explicitly
     // stopped or restarted by the application.
-    final SparseArray<LoaderInfo> mLoaders = new SparseArray<LoaderInfo>();
+    final SparseArray<LoaderInfo> mLoaders = new SparseArray<LoaderInfo>(0);
 
     // These are previously run loaders.  This list is maintained internally
     // to avoid destroying a loader while an application is still using it.
     // It allows an application to restart a loader, but continue using its
     // previously run loader until the new loader's data is available.
-    final SparseArray<LoaderInfo> mInactiveLoaders = new SparseArray<LoaderInfo>();
+    final SparseArray<LoaderInfo> mInactiveLoaders = new SparseArray<LoaderInfo>(0);
+
+    final String mWho;
 
     Activity mActivity;
     boolean mStarted;
@@ -529,7 +530,8 @@ class LoaderManagerImpl extends LoaderManager {
         }
     }
     
-    LoaderManagerImpl(Activity activity, boolean started) {
+    LoaderManagerImpl(String who, Activity activity, boolean started) {
+        mWho = who;
         mActivity = activity;
         mStarted = started;
     }
@@ -831,6 +833,7 @@ class LoaderManagerImpl extends LoaderManager {
             for (int i = mLoaders.size()-1; i >= 0; i--) {
                 mLoaders.valueAt(i).destroy();
             }
+            mLoaders.clear();
         }
         
         if (DEBUG) Log.v(TAG, "Destroying Inactive in " + this);

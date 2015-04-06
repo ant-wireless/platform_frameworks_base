@@ -16,7 +16,6 @@
 
 package com.android.systemui.usb;
 
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -25,13 +24,14 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.hardware.usb.IUsbManager;
-import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbAccessory;
+import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.UserHandle;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -41,7 +41,6 @@ import android.widget.TextView;
 
 import com.android.internal.app.AlertActivity;
 import com.android.internal.app.AlertController;
-
 import com.android.systemui.R;
 
 public class UsbPermissionActivity extends AlertActivity
@@ -67,7 +66,7 @@ public class UsbPermissionActivity extends AlertActivity
         mDevice = (UsbDevice)intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
         mAccessory = (UsbAccessory)intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY);
         mPendingIntent = (PendingIntent)intent.getParcelableExtra(Intent.EXTRA_INTENT);
-        mUid = intent.getIntExtra("uid", 0);
+        mUid = intent.getIntExtra(Intent.EXTRA_UID, -1);
         mPackageName = intent.getStringExtra("package");
 
         PackageManager packageManager = getPackageManager();
@@ -128,7 +127,8 @@ public class UsbPermissionActivity extends AlertActivity
                 if (mPermissionGranted) {
                     service.grantDevicePermission(mDevice, mUid);
                     if (mAlwaysUse.isChecked()) {
-                        service.setDevicePackage(mDevice, mPackageName);
+                        final int userId = UserHandle.getUserId(mUid);
+                        service.setDevicePackage(mDevice, mPackageName, userId);
                     }
                 }
             }
@@ -137,7 +137,8 @@ public class UsbPermissionActivity extends AlertActivity
                 if (mPermissionGranted) {
                     service.grantAccessoryPermission(mAccessory, mUid);
                     if (mAlwaysUse.isChecked()) {
-                        service.setAccessoryPackage(mAccessory, mPackageName);
+                        final int userId = UserHandle.getUserId(mUid);
+                        service.setAccessoryPackage(mAccessory, mPackageName, userId);
                     }
                 }
             }

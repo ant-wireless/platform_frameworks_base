@@ -21,10 +21,9 @@ import android.content.SharedPreferences;
 import android.content.res.TypedArray;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.view.View;
-import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityManager;
 import android.widget.TextView;
 
 /**
@@ -37,12 +36,16 @@ public abstract class TwoStatePreference extends Preference {
     private CharSequence mSummaryOn;
     private CharSequence mSummaryOff;
     boolean mChecked;
-    private boolean mSendClickAccessibilityEvent;
+    private boolean mCheckedSet;
     private boolean mDisableDependentsState;
 
+    public TwoStatePreference(
+            Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+    }
 
-    public TwoStatePreference(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public TwoStatePreference(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
     }
 
     public TwoStatePreference(Context context, AttributeSet attrs) {
@@ -57,15 +60,10 @@ public abstract class TwoStatePreference extends Preference {
     protected void onClick() {
         super.onClick();
 
-        boolean newValue = !isChecked();
-
-        mSendClickAccessibilityEvent = true;
-
-        if (!callChangeListener(newValue)) {
-            return;
+        final boolean newValue = !isChecked();
+        if (callChangeListener(newValue)) {
+            setChecked(newValue);
         }
-
-        setChecked(newValue);
     }
 
     /**
@@ -74,11 +72,16 @@ public abstract class TwoStatePreference extends Preference {
      * @param checked The checked state.
      */
     public void setChecked(boolean checked) {
-        if (mChecked != checked) {
+        // Always persist/notify the first time; don't assume the field's default of false.
+        final boolean changed = mChecked != checked;
+        if (changed || !mCheckedSet) {
             mChecked = checked;
+            mCheckedSet = true;
             persistBoolean(checked);
-            notifyDependencyChange(shouldDisableDependents());
-            notifyChanged();
+            if (changed) {
+                notifyDependencyChange(shouldDisableDependents());
+                notifyChanged();
+            }
         }
     }
 
@@ -185,21 +188,6 @@ public abstract class TwoStatePreference extends Preference {
                 : (Boolean) defaultValue);
     }
 
-    void sendAccessibilityEvent(View view) {
-        // Since the view is still not attached we create, populate,
-        // and send the event directly since we do not know when it
-        // will be attached and posting commands is not as clean.
-        AccessibilityManager accessibilityManager = AccessibilityManager.getInstance(getContext());
-        if (mSendClickAccessibilityEvent && accessibilityManager.isEnabled()) {
-            AccessibilityEvent event = AccessibilityEvent.obtain();
-            event.setEventType(AccessibilityEvent.TYPE_VIEW_CLICKED);
-            view.onInitializeAccessibilityEvent(event);
-            view.dispatchPopulateAccessibilityEvent(event);
-            accessibilityManager.sendAccessibilityEvent(event);
-        }
-        mSendClickAccessibilityEvent = false;
-    }
-
     /**
      * Sync a summary view contained within view's subhierarchy with the correct summary text.
      * @param view View where a summary should be located
@@ -209,17 +197,17 @@ public abstract class TwoStatePreference extends Preference {
         TextView summaryView = (TextView) view.findViewById(com.android.internal.R.id.summary);
         if (summaryView != null) {
             boolean useDefaultSummary = true;
-            if (mChecked && mSummaryOn != null) {
+            if (mChecked && !TextUtils.isEmpty(mSummaryOn)) {
                 summaryView.setText(mSummaryOn);
                 useDefaultSummary = false;
-            } else if (!mChecked && mSummaryOff != null) {
+            } else if (!mChecked && !TextUtils.isEmpty(mSummaryOff)) {
                 summaryView.setText(mSummaryOff);
                 useDefaultSummary = false;
             }
 
             if (useDefaultSummary) {
                 final CharSequence summary = getSummary();
-                if (summary != null) {
+                if (!TextUtils.isEmpty(summary)) {
                     summaryView.setText(summary);
                     useDefaultSummary = false;
                 }

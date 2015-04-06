@@ -19,9 +19,12 @@ package android.os;
 
 import android.net.InterfaceConfiguration;
 import android.net.INetworkManagementEventObserver;
+import android.net.Network;
 import android.net.NetworkStats;
 import android.net.RouteInfo;
+import android.net.UidRange;
 import android.net.wifi.WifiConfiguration;
+import android.os.INetworkActivityListener;
 
 /**
  * @hide
@@ -89,6 +92,11 @@ interface INetworkManagementService
     void enableIpv6(String iface);
 
     /**
+     * Enables or enables IPv6 ND offload.
+     */
+    void setInterfaceIpv6NdOffload(String iface, boolean enable);
+
+    /**
      * Retrieves the network routes currently configured on the specified
      * interface
      */
@@ -97,24 +105,17 @@ interface INetworkManagementService
     /**
      * Add the specified route to the interface.
      */
-    void addRoute(String iface, in RouteInfo route);
+    void addRoute(int netId, in RouteInfo route);
 
     /**
      * Remove the specified route from the interface.
      */
-    void removeRoute(String iface, in RouteInfo route);
+    void removeRoute(int netId, in RouteInfo route);
 
     /**
-     * Add the specified route to a secondary interface
-     * This will go into a special route table to be accessed
-     * via ip rules
+     * Set the specified MTU size
      */
-    void addSecondaryRoute(String iface, in RouteInfo route);
-
-    /**
-     * Remove the specified secondary route.
-     */
-    void removeSecondaryRoute(String iface, in RouteInfo route);
+    void setMtu(String iface, int mtu);
 
     /**
      * Shuts down the service
@@ -169,10 +170,10 @@ interface INetworkManagementService
     /**
      * Sets the list of DNS forwarders (in order of priority)
      */
-    void setDnsForwarders(in String[] dns);
+    void setDnsForwarders(in Network network, in String[] dns);
 
     /**
-     * Returns the list of DNS fowarders (in order of priority)
+     * Returns the list of DNS forwarders (in order of priority)
      */
     String[] getDnsForwarders();
 
@@ -218,17 +219,17 @@ interface INetworkManagementService
     /**
      * Start Wifi Access Point
      */
-    void startAccessPoint(in WifiConfiguration wifiConfig, String wlanIface, String softapIface);
+    void startAccessPoint(in WifiConfiguration wifiConfig, String iface);
 
     /**
      * Stop Wifi Access Point
      */
-    void stopAccessPoint(String wlanIface);
+    void stopAccessPoint(String iface);
 
     /**
      * Set Access Point config
      */
-    void setAccessPoint(in WifiConfiguration wifiConfig, String wlanIface, String softapIface);
+    void setAccessPoint(in WifiConfiguration wifiConfig, String iface);
 
     /**
      ** DATA USAGE RELATED
@@ -254,11 +255,9 @@ interface INetworkManagementService
     NetworkStats getNetworkStatsUidDetail(int uid);
 
     /**
-     * Return summary of network statistics for the requested pairs of
-     * tethering interfaces.  Even indexes are remote interface, and odd
-     * indexes are corresponding local interfaces.
+     * Return summary of network statistics all tethering interfaces.
      */
-    NetworkStats getNetworkStatsTethering(in String[] ifacePairs);
+    NetworkStats getNetworkStatsTethering();
 
     /**
      * Set quota for an interface.
@@ -290,45 +289,132 @@ interface INetworkManagementService
      */
     void setUidNetworkRules(int uid, boolean rejectOnQuotaInterfaces);
 
+    void setUidCleartextNetworkPolicy(int uid, int policy);
+
     /**
      * Return status of bandwidth control module.
      */
     boolean isBandwidthControlEnabled();
 
     /**
-     * Configures bandwidth throttling on an interface.
+     * Sets idletimer for an interface.
+     *
+     * This either initializes a new idletimer or increases its
+     * reference-counting if an idletimer already exists for given
+     * {@code iface}.
+     *
+     * {@code type} is the type of the interface, such as TYPE_MOBILE.
+     *
+     * Every {@code addIdleTimer} should be paired with a
+     * {@link removeIdleTimer} to cleanup when the network disconnects.
      */
-    void setInterfaceThrottle(String iface, int rxKbps, int txKbps);
+    void addIdleTimer(String iface, int timeout, int type);
 
     /**
-     * Returns the currently configured RX throttle values
-     * for the specified interface
+     * Removes idletimer for an interface.
      */
-    int getInterfaceRxThrottle(String iface);
+    void removeIdleTimer(String iface);
 
     /**
-     * Returns the currently configured TX throttle values
-     * for the specified interface
+     * Bind name servers to a network in the DNS resolver.
      */
-    int getInterfaceTxThrottle(String iface);
+    void setDnsServersForNetwork(int netId, in String[] servers, String domains);
 
     /**
-     * Sets the name of the default interface in the DNS resolver.
+     * Flush the DNS cache associated with the specified network.
      */
-    void setDefaultInterfaceForDns(String iface);
+    void flushNetworkDnsCache(int netId);
+
+    void setFirewallEnabled(boolean enabled);
+    boolean isFirewallEnabled();
+    void setFirewallInterfaceRule(String iface, boolean allow);
+    void setFirewallEgressSourceRule(String addr, boolean allow);
+    void setFirewallEgressDestRule(String addr, int port, boolean allow);
+    void setFirewallUidRule(int uid, boolean allow);
 
     /**
-     * Bind name servers to an interface in the DNS resolver.
+     * Set all packets from users in ranges to go through VPN specified by netId.
      */
-    void setDnsServersForInterface(String iface, in String[] servers);
+    void addVpnUidRanges(int netId, in UidRange[] ranges);
 
     /**
-     * Flush the DNS cache associated with the default interface.
+     * Clears the special VPN rules for users in ranges and VPN specified by netId.
      */
-    void flushDefaultDnsCache();
+    void removeVpnUidRanges(int netId, in UidRange[] ranges);
 
     /**
-     * Flush the DNS cache associated with the specified interface.
+     * Start the clatd (464xlat) service on the given interface.
      */
-    void flushInterfaceDnsCache(String iface);
+    void startClatd(String interfaceName);
+
+    /**
+     * Stop the clatd (464xlat) service on the given interface.
+     */
+    void stopClatd(String interfaceName);
+
+    /**
+     * Determine whether the clatd (464xlat) service has been started on the given interface.
+     */
+    boolean isClatdStarted(String interfaceName);
+
+    /**
+     * Start listening for mobile activity state changes.
+     */
+    void registerNetworkActivityListener(INetworkActivityListener listener);
+
+    /**
+     * Stop listening for mobile activity state changes.
+     */
+    void unregisterNetworkActivityListener(INetworkActivityListener listener);
+
+    /**
+     * Check whether the mobile radio is currently active.
+     */
+    boolean isNetworkActive();
+
+    /**
+     * Setup a new physical network.
+     */
+    void createPhysicalNetwork(int netId);
+
+    /**
+     * Setup a new VPN.
+     */
+    void createVirtualNetwork(int netId, boolean hasDNS, boolean secure);
+
+    /**
+     * Remove a network.
+     */
+    void removeNetwork(int netId);
+
+    /**
+     * Add an interface to a network.
+     */
+    void addInterfaceToNetwork(String iface, int netId);
+
+    /**
+     * Remove an Interface from a network.
+     */
+    void removeInterfaceFromNetwork(String iface, int netId);
+
+    void addLegacyRouteForNetId(int netId, in RouteInfo routeInfo, int uid);
+
+    void setDefaultNetId(int netId);
+    void clearDefaultNetId();
+
+    void setPermission(String permission, in int[] uids);
+    void clearPermission(in int[] uids);
+
+    /**
+     * Allow UID to call protect().
+     */
+    void allowProtect(int uid);
+
+    /**
+     * Deny UID from calling protect().
+     */
+    void denyProtect(int uid);
+
+    void addInterfaceToLocalNetwork(String iface, in List<RouteInfo> routes);
+    void removeInterfaceFromLocalNetwork(String iface);
 }

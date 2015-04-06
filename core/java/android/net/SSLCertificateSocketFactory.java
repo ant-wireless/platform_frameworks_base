@@ -18,10 +18,15 @@ package android.net;
 
 import android.os.SystemProperties;
 import android.util.Log;
+import com.android.org.conscrypt.OpenSSLContextImpl;
+import com.android.org.conscrypt.OpenSSLSocketImpl;
+import com.android.org.conscrypt.SSLClientSessionCache;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.security.KeyManagementException;
+import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import javax.net.SocketFactory;
 import javax.net.ssl.HostnameVerifier;
@@ -34,9 +39,6 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
-import org.apache.harmony.xnet.provider.jsse.OpenSSLContextImpl;
-import org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl;
-import org.apache.harmony.xnet.provider.jsse.SSLClientSessionCache;
 
 /**
  * SSLSocketFactory implementation with several extra features:
@@ -79,14 +81,13 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
         }
     };
 
-    private static final HostnameVerifier HOSTNAME_VERIFIER =
-        HttpsURLConnection.getDefaultHostnameVerifier();
-
     private SSLSocketFactory mInsecureFactory = null;
     private SSLSocketFactory mSecureFactory = null;
     private TrustManager[] mTrustManagers = null;
     private KeyManager[] mKeyManagers = null;
     private byte[] mNpnProtocols = null;
+    private byte[] mAlpnProtocols = null;
+    private PrivateKey mChannelIdPrivateKey = null;
 
     private final int mHandshakeTimeoutMillis;
     private final SSLClientSessionCache mSessionCache;
@@ -153,7 +154,13 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
      *         for none.  The socket timeout is reset to 0 after the handshake.
      * @param cache The {@link SSLSessionCache} to use, or null for no cache.
      * @return a new SocketFactory with the specified parameters
+     *
+     * @deprecated Use {@link #getDefault()} along with a {@link javax.net.ssl.HttpsURLConnection}
+     *     instead. The Apache HTTP client is no longer maintained and may be removed in a future
+     *     release. Please visit <a href="http://android-developers.blogspot.com/2011/09/androids-http-clients.html">this webpage</a>
+     *     for further details.
      */
+    @Deprecated
     public static org.apache.http.conn.ssl.SSLSocketFactory getHttpSocketFactory(
             int handshakeTimeoutMillis, SSLSessionCache cache) {
         return new org.apache.http.conn.ssl.SSLSocketFactory(
@@ -192,7 +199,7 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
             if (session == null) {
                 throw new SSLException("Cannot verify SSL socket without session");
             }
-            if (!HOSTNAME_VERIFIER.verify(hostname, session)) {
+            if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)) {
                 throw new SSLPeerUnverifiedException("Cannot verify hostname: " + hostname);
             }
         }
@@ -201,7 +208,7 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
     private SSLSocketFactory makeSocketFactory(
             KeyManager[] keyManagers, TrustManager[] trustManagers) {
         try {
-            OpenSSLContextImpl sslContext = new OpenSSLContextImpl();
+            OpenSSLContextImpl sslContext = OpenSSLContextImpl.getPreferred();
             sslContext.engineInit(keyManagers, trustManagers, null);
             sslContext.engineGetClientSessionContext().setPersistentCache(mSessionCache);
             return sslContext.engineGetSocketFactory();
@@ -265,19 +272,42 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
      *     must be non-empty and of length less than 256.
      */
     public void setNpnProtocols(byte[][] npnProtocols) {
-        this.mNpnProtocols = toNpnProtocolsList(npnProtocols);
+        this.mNpnProtocols = toLengthPrefixedList(npnProtocols);
+    }
+
+    /**
+     * Sets the
+     * <a href="http://tools.ietf.org/html/draft-ietf-tls-applayerprotoneg-01">
+     * Application Layer Protocol Negotiation (ALPN)</a> protocols that this peer
+     * is interested in.
+     *
+     * <p>For servers this is the sequence of protocols to advertise as
+     * supported, in order of preference. This list is sent unencrypted to
+     * all clients that support ALPN.
+     *
+     * <p>For clients this is a list of supported protocols to match against the
+     * server's list. If there is no protocol supported by both client and
+     * server then the first protocol in the client's list will be selected.
+     * The order of the client's protocols is otherwise insignificant.
+     *
+     * @param protocols a non-empty list of protocol byte arrays. All arrays
+     *     must be non-empty and of length less than 256.
+     * @hide
+     */
+    public void setAlpnProtocols(byte[][] protocols) {
+        this.mAlpnProtocols = toLengthPrefixedList(protocols);
     }
 
     /**
      * Returns an array containing the concatenation of length-prefixed byte
      * strings.
      */
-    static byte[] toNpnProtocolsList(byte[]... npnProtocols) {
-        if (npnProtocols.length == 0) {
-            throw new IllegalArgumentException("npnProtocols.length == 0");
+    static byte[] toLengthPrefixedList(byte[]... items) {
+        if (items.length == 0) {
+            throw new IllegalArgumentException("items.length == 0");
         }
         int totalLength = 0;
-        for (byte[] s : npnProtocols) {
+        for (byte[] s : items) {
             if (s.length == 0 || s.length > 255) {
                 throw new IllegalArgumentException("s.length == 0 || s.length > 255: " + s.length);
             }
@@ -285,7 +315,7 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
         }
         byte[] result = new byte[totalLength];
         int pos = 0;
-        for (byte[] s : npnProtocols) {
+        for (byte[] s : items) {
             result[pos++] = (byte) s.length;
             for (byte b : s) {
                 result[pos++] = b;
@@ -300,9 +330,24 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
      * null if no protocol was negotiated.
      *
      * @param socket a socket created by this factory.
+     * @throws IllegalArgumentException if the socket was not created by this factory.
      */
     public byte[] getNpnSelectedProtocol(Socket socket) {
-        return ((OpenSSLSocketImpl) socket).getNpnSelectedProtocol();
+        return castToOpenSSLSocket(socket).getNpnSelectedProtocol();
+    }
+
+    /**
+     * Returns the
+     * <a href="http://tools.ietf.org/html/draft-ietf-tls-applayerprotoneg-01">Application
+     * Layer Protocol Negotiation (ALPN)</a> protocol selected by client and server, or null
+     * if no protocol was negotiated.
+     *
+     * @param socket a socket created by this factory.
+     * @throws IllegalArgumentException if the socket was not created by this factory.
+     * @hide
+     */
+    public byte[] getAlpnSelectedProtocol(Socket socket) {
+        return castToOpenSSLSocket(socket).getAlpnSelectedProtocol();
     }
 
     /**
@@ -316,6 +361,68 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
         mInsecureFactory = null;
     }
 
+    /**
+     * Sets the private key to be used for TLS Channel ID by connections made by this
+     * factory.
+     *
+     * @param privateKey private key (enables TLS Channel ID) or {@code null} for no key (disables
+     *        TLS Channel ID). The private key has to be an Elliptic Curve (EC) key based on the
+     *        NIST P-256 curve (aka SECG secp256r1 or ANSI X9.62 prime256v1).
+     *
+     * @hide
+     */
+    public void setChannelIdPrivateKey(PrivateKey privateKey) {
+        mChannelIdPrivateKey = privateKey;
+    }
+
+    /**
+     * Enables <a href="http://tools.ietf.org/html/rfc5077#section-3.2">session ticket</a>
+     * support on the given socket.
+     *
+     * @param socket a socket created by this factory
+     * @param useSessionTickets {@code true} to enable session ticket support on this socket.
+     * @throws IllegalArgumentException if the socket was not created by this factory.
+     */
+    public void setUseSessionTickets(Socket socket, boolean useSessionTickets) {
+        castToOpenSSLSocket(socket).setUseSessionTickets(useSessionTickets);
+    }
+
+    /**
+     * Turns on <a href="http://tools.ietf.org/html/rfc6066#section-3">Server
+     * Name Indication (SNI)</a> on a given socket.
+     *
+     * @param socket a socket created by this factory.
+     * @param hostName the desired SNI hostname, null to disable.
+     * @throws IllegalArgumentException if the socket was not created by this factory.
+     */
+    public void setHostname(Socket socket, String hostName) {
+        castToOpenSSLSocket(socket).setHostname(hostName);
+    }
+
+    /**
+     * Sets this socket's SO_SNDTIMEO write timeout in milliseconds.
+     * Use 0 for no timeout.
+     * To take effect, this option must be set before the blocking method was called.
+     *
+     * @param socket a socket created by this factory.
+     * @param timeout the desired write timeout in milliseconds.
+     * @throws IllegalArgumentException if the socket was not created by this factory.
+     *
+     * @hide
+     */
+    public void setSoWriteTimeout(Socket socket, int writeTimeoutMilliseconds)
+            throws SocketException {
+        castToOpenSSLSocket(socket).setSoWriteTimeout(writeTimeoutMilliseconds);
+    }
+
+    private static OpenSSLSocketImpl castToOpenSSLSocket(Socket socket) {
+        if (!(socket instanceof OpenSSLSocketImpl)) {
+            throw new IllegalArgumentException("Socket not created by this factory: "
+                    + socket);
+        }
+
+        return (OpenSSLSocketImpl) socket;
+    }
 
     /**
      * {@inheritDoc}
@@ -327,7 +434,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
     public Socket createSocket(Socket k, String host, int port, boolean close) throws IOException {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket(k, host, port, close);
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         if (mSecure) {
             verifyHostname(s, host);
         }
@@ -346,7 +455,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
     public Socket createSocket() throws IOException {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket();
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         return s;
     }
 
@@ -363,7 +474,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket(
                 addr, port, localAddr, localPort);
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         return s;
     }
 
@@ -378,7 +491,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
     public Socket createSocket(InetAddress addr, int port) throws IOException {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket(addr, port);
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         return s;
     }
 
@@ -394,7 +509,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket(
                 host, port, localAddr, localPort);
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         if (mSecure) {
             verifyHostname(s, host);
         }
@@ -411,7 +528,9 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
     public Socket createSocket(String host, int port) throws IOException {
         OpenSSLSocketImpl s = (OpenSSLSocketImpl) getDelegate().createSocket(host, port);
         s.setNpnProtocols(mNpnProtocols);
+        s.setAlpnProtocols(mAlpnProtocols);
         s.setHandshakeTimeout(mHandshakeTimeoutMillis);
+        s.setChannelIdPrivateKey(mChannelIdPrivateKey);
         if (mSecure) {
             verifyHostname(s, host);
         }
@@ -420,7 +539,7 @@ public class SSLCertificateSocketFactory extends SSLSocketFactory {
 
     @Override
     public String[] getDefaultCipherSuites() {
-        return getDelegate().getSupportedCipherSuites();
+        return getDelegate().getDefaultCipherSuites();
     }
 
     @Override

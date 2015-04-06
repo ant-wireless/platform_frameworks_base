@@ -1,10 +1,8 @@
 page.title=Allowing Other Apps to Start Your Activity
-parent.title=Interacting with Other Apps
-parent.link=index.html
+page.tags=intents
+helpoutsWidget=true
 
 trainingnavtop=true
-previous.title=Getting a Result from an Activity
-previous.link=result.html
 
 @jd:body
 
@@ -20,7 +18,8 @@ previous.link=result.html
 
 <h2>You should also read</h2>
 <ul>
-  <li><a href="{@docRoot}training/sharing/index.html">Sharing Content</a></li>
+    <li><a href="{@docRoot}training/sharing/index.html">Sharing Simple Data</a></li>
+    <li><a href="{@docRoot}training/secure-file-sharing/index.html">Sharing Files</a>
 </ul>
   </div>
 </div>
@@ -147,12 +146,12 @@ the recipient's address using the {@code send} or {@code sendto} URI scheme. For
 {@link android.content.Intent#CATEGORY_DEFAULT} category in the intent filter. The methods {@link
 android.app.Activity#startActivity startActivity()} and {@link
 android.app.Activity#startActivityForResult startActivityForResult()} treat all intents as if they
-contained the {@link android.content.Intent#CATEGORY_DEFAULT} category. If you do not declare it, no
-implicit intents will resolve to your activity.</p>
+declared the {@link android.content.Intent#CATEGORY_DEFAULT} category. If you do not declare it
+in your intent filter, no implicit intents will resolve to your activity.</p>
 
 <p>For more information about sending and receiving {@link android.content.Intent#ACTION_SEND}
 intents that perform social sharing behaviors, see the lesson about <a
-href="{@docRoot}training/sharing/receive.html">Receiving Content from Other Apps</a>.</p>
+href="{@docRoot}training/sharing/receive.html">Receiving Simple Data from Other Apps</a>.</p>
 
 
 <h2 id="HandleIntent">Handle the Intent in Your Activity</h2>

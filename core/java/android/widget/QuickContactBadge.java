@@ -27,6 +27,7 @@ import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
+import android.os.Bundle;
 import android.provider.ContactsContract.CommonDataKinds.Email;
 import android.provider.ContactsContract.Contacts;
 import android.provider.ContactsContract.Intents;
@@ -50,6 +51,7 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
     private Drawable mOverlay;
     private QueryHandler mQueryHandler;
     private Drawable mDefaultAvatar;
+    private Bundle mExtras = null;
 
     protected String[] mExcludeMimes = null;
 
@@ -57,6 +59,8 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
     static final private int TOKEN_PHONE_LOOKUP = 1;
     static final private int TOKEN_EMAIL_LOOKUP_AND_TRIGGER = 2;
     static final private int TOKEN_PHONE_LOOKUP_AND_TRIGGER = 3;
+
+    static final private String EXTRA_URI_CONTENT = "uri_content";
 
     static final String[] EMAIL_LOOKUP_PROJECTION = new String[] {
         RawContacts.CONTACT_ID,
@@ -80,15 +84,22 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
         this(context, attrs, 0);
     }
 
-    public QuickContactBadge(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public QuickContactBadge(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public QuickContactBadge(
+            Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
 
         TypedArray styledAttributes = mContext.obtainStyledAttributes(R.styleable.Theme);
         mOverlay = styledAttributes.getDrawable(
                 com.android.internal.R.styleable.Theme_quickContactBadgeOverlay);
         styledAttributes.recycle();
 
-        mQueryHandler = new QueryHandler(mContext.getContentResolver());
+        if (!isInEditMode()) {
+            mQueryHandler = new QueryHandler(mContext.getContentResolver());
+        }
         setOnClickListener(this);
     }
 
@@ -98,6 +109,15 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
         if (mOverlay != null && mOverlay.isStateful()) {
             mOverlay.setState(getDrawableState());
             invalidate();
+        }
+    }
+
+    @Override
+    public void drawableHotspotChanged(float x, float y) {
+        super.drawableHotspotChanged(x, y);
+
+        if (mOverlay != null) {
+            mOverlay.setHotspot(x, y);
         }
     }
 
@@ -144,7 +164,7 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
      */
     public void setImageToDefault() {
         if (mDefaultAvatar == null) {
-            mDefaultAvatar = getResources().getDrawable(R.drawable.ic_contact_picture);
+            mDefaultAvatar = mContext.getDrawable(R.drawable.ic_contact_picture);
         }
         setImageDrawable(mDefaultAvatar);
     }
@@ -175,8 +195,27 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
      * until this view is clicked.
      */
     public void assignContactFromEmail(String emailAddress, boolean lazyLookup) {
+        assignContactFromEmail(emailAddress, lazyLookup, null);
+    }
+
+    /**
+     * Assign a contact based on an email address. This should only be used when
+     * the contact's URI is not available, as an extra query will have to be
+     * performed to lookup the URI based on the email.
+
+     @param emailAddress The email address of the contact.
+     @param lazyLookup If this is true, the lookup query will not be performed
+     until this view is clicked.
+     @param extras A bundle of extras to populate the contact edit page with if the contact
+     is not found and the user chooses to add the email address to an existing contact or
+     create a new contact. Uses the same string constants as those found in
+     {@link android.provider.ContactsContract.Intents.Insert}
+    */
+
+    public void assignContactFromEmail(String emailAddress, boolean lazyLookup, Bundle extras) {
         mContactEmail = emailAddress;
-        if (!lazyLookup) {
+        mExtras = extras;
+        if (!lazyLookup && mQueryHandler != null) {
             mQueryHandler.startQuery(TOKEN_EMAIL_LOOKUP, null,
                     Uri.withAppendedPath(Email.CONTENT_LOOKUP_URI, Uri.encode(mContactEmail)),
                     EMAIL_LOOKUP_PROJECTION, null, null, null);
@@ -185,6 +224,7 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
             onContactUriChanged();
         }
     }
+
 
     /**
      * Assign a contact based on a phone number. This should only be used when
@@ -196,8 +236,26 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
      * until this view is clicked.
      */
     public void assignContactFromPhone(String phoneNumber, boolean lazyLookup) {
+        assignContactFromPhone(phoneNumber, lazyLookup, new Bundle());
+    }
+
+    /**
+     * Assign a contact based on a phone number. This should only be used when
+     * the contact's URI is not available, as an extra query will have to be
+     * performed to lookup the URI based on the phone number.
+     *
+     * @param phoneNumber The phone number of the contact.
+     * @param lazyLookup If this is true, the lookup query will not be performed
+     * until this view is clicked.
+     * @param extras A bundle of extras to populate the contact edit page with if the contact
+     * is not found and the user chooses to add the phone number to an existing contact or
+     * create a new contact. Uses the same string constants as those found in
+     * {@link android.provider.ContactsContract.Intents.Insert}
+     */
+    public void assignContactFromPhone(String phoneNumber, boolean lazyLookup, Bundle extras) {
         mContactPhone = phoneNumber;
-        if (!lazyLookup) {
+        mExtras = extras;
+        if (!lazyLookup && mQueryHandler != null) {
             mQueryHandler.startQuery(TOKEN_PHONE_LOOKUP, null,
                     Uri.withAppendedPath(PhoneLookup.CONTENT_FILTER_URI, mContactPhone),
                     PHONE_LOOKUP_PROJECTION, null, null, null);
@@ -207,21 +265,37 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
         }
     }
 
+    /**
+     * Assigns the drawable that is to be drawn on top of the assigned contact photo.
+     *
+     * @param overlay Drawable to be drawn over the assigned contact photo. Must have a non-zero
+     *         instrinsic width and height.
+     */
+    public void setOverlay(Drawable overlay) {
+        mOverlay = overlay;
+    }
+
     private void onContactUriChanged() {
         setEnabled(isAssigned());
     }
 
     @Override
     public void onClick(View v) {
+        // If contact has been assigned, mExtras should no longer be null, but do a null check
+        // anyway just in case assignContactFromPhone or Email was called with a null bundle or
+        // wasn't assigned previously.
+        final Bundle extras = (mExtras == null) ? new Bundle() : mExtras;
         if (mContactUri != null) {
             QuickContact.showQuickContact(getContext(), QuickContactBadge.this, mContactUri,
                     QuickContact.MODE_LARGE, mExcludeMimes);
-        } else if (mContactEmail != null) {
-            mQueryHandler.startQuery(TOKEN_EMAIL_LOOKUP_AND_TRIGGER, mContactEmail,
+        } else if (mContactEmail != null && mQueryHandler != null) {
+            extras.putString(EXTRA_URI_CONTENT, mContactEmail);
+            mQueryHandler.startQuery(TOKEN_EMAIL_LOOKUP_AND_TRIGGER, extras,
                     Uri.withAppendedPath(Email.CONTENT_LOOKUP_URI, Uri.encode(mContactEmail)),
                     EMAIL_LOOKUP_PROJECTION, null, null, null);
-        } else if (mContactPhone != null) {
-            mQueryHandler.startQuery(TOKEN_PHONE_LOOKUP_AND_TRIGGER, mContactPhone,
+        } else if (mContactPhone != null && mQueryHandler != null) {
+            extras.putString(EXTRA_URI_CONTENT, mContactPhone);
+            mQueryHandler.startQuery(TOKEN_PHONE_LOOKUP_AND_TRIGGER, extras,
                     Uri.withAppendedPath(PhoneLookup.CONTENT_FILTER_URI, mContactPhone),
                     PHONE_LOOKUP_PROJECTION, null, null, null);
         } else {
@@ -262,12 +336,12 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
             Uri lookupUri = null;
             Uri createUri = null;
             boolean trigger = false;
-
+            Bundle extras = (cookie != null) ? (Bundle) cookie : new Bundle();
             try {
                 switch(token) {
                     case TOKEN_PHONE_LOOKUP_AND_TRIGGER:
                         trigger = true;
-                        createUri = Uri.fromParts("tel", (String)cookie, null);
+                        createUri = Uri.fromParts("tel", extras.getString(EXTRA_URI_CONTENT), null);
 
                         //$FALL-THROUGH$
                     case TOKEN_PHONE_LOOKUP: {
@@ -281,7 +355,8 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
                     }
                     case TOKEN_EMAIL_LOOKUP_AND_TRIGGER:
                         trigger = true;
-                        createUri = Uri.fromParts("mailto", (String)cookie, null);
+                        createUri = Uri.fromParts("mailto",
+                                extras.getString(EXTRA_URI_CONTENT), null);
 
                         //$FALL-THROUGH$
                     case TOKEN_EMAIL_LOOKUP: {
@@ -309,6 +384,10 @@ public class QuickContactBadge extends ImageView implements OnClickListener {
             } else if (createUri != null) {
                 // Prompt user to add this person to contacts
                 final Intent intent = new Intent(Intents.SHOW_OR_CREATE_CONTACT, createUri);
+                if (extras != null) {
+                    extras.remove(EXTRA_URI_CONTENT);
+                    intent.putExtras(extras);
+                }
                 getContext().startActivity(intent);
             }
         }

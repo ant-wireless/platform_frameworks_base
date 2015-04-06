@@ -27,14 +27,20 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.Bundle;
 import android.os.RemoteException;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
+import android.widget.TextView;
 
 import java.text.Collator;
-import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.ArrayList;
 
 public class LocalePicker extends ListFragment {
     private static final String TAG = "LocalePicker";
@@ -77,6 +83,70 @@ public class LocalePicker extends ListFragment {
         }
     }
 
+    public static List<LocaleInfo> getAllAssetLocales(Context context, boolean isInDeveloperMode) {
+        final Resources resources = context.getResources();
+
+        final String[] locales = Resources.getSystem().getAssets().getLocales();
+        List<String> localeList = new ArrayList<String>(locales.length);
+        Collections.addAll(localeList, locales);
+
+        // Don't show the pseudolocales unless we're in developer mode. http://b/17190407.
+        if (!isInDeveloperMode) {
+            localeList.remove("ar-XB");
+            localeList.remove("en-XA");
+        }
+
+        Collections.sort(localeList);
+        final String[] specialLocaleCodes = resources.getStringArray(R.array.special_locale_codes);
+        final String[] specialLocaleNames = resources.getStringArray(R.array.special_locale_names);
+
+        final ArrayList<LocaleInfo> localeInfos = new ArrayList<LocaleInfo>(localeList.size());
+        for (String locale : localeList) {
+            final Locale l = Locale.forLanguageTag(locale.replace('_', '-'));
+            if (l == null || "und".equals(l.getLanguage())
+                    || l.getLanguage().isEmpty() || l.getCountry().isEmpty()) {
+                continue;
+            }
+
+            if (localeInfos.isEmpty()) {
+                if (DEBUG) {
+                    Log.v(TAG, "adding initial "+ toTitleCase(l.getDisplayLanguage(l)));
+                }
+                localeInfos.add(new LocaleInfo(toTitleCase(l.getDisplayLanguage(l)), l));
+            } else {
+                // check previous entry:
+                //  same lang and a country -> upgrade to full name and
+                //    insert ours with full name
+                //  diff lang -> insert ours with lang-only name
+                final LocaleInfo previous = localeInfos.get(localeInfos.size() - 1);
+                if (previous.locale.getLanguage().equals(l.getLanguage()) &&
+                        !previous.locale.getLanguage().equals("zz")) {
+                    if (DEBUG) {
+                        Log.v(TAG, "backing up and fixing " + previous.label + " to " +
+                                getDisplayName(previous.locale, specialLocaleCodes, specialLocaleNames));
+                    }
+                    previous.label = toTitleCase(getDisplayName(
+                            previous.locale, specialLocaleCodes, specialLocaleNames));
+                    if (DEBUG) {
+                        Log.v(TAG, "  and adding "+ toTitleCase(
+                                getDisplayName(l, specialLocaleCodes, specialLocaleNames)));
+                    }
+                    localeInfos.add(new LocaleInfo(toTitleCase(
+                            getDisplayName(l, specialLocaleCodes, specialLocaleNames)), l));
+                } else {
+                    String displayName = toTitleCase(l.getDisplayLanguage(l));
+                    if (DEBUG) {
+                        Log.v(TAG, "adding "+displayName);
+                    }
+                    localeInfos.add(new LocaleInfo(displayName, l));
+                }
+            }
+        }
+
+        Collections.sort(localeInfos);
+        return localeInfos;
+    }
+
     /**
      * Constructs an Adapter object containing Locale information. Content is sorted by
      * {@link LocaleInfo#label}.
@@ -86,75 +156,33 @@ public class LocalePicker extends ListFragment {
     }
 
     public static ArrayAdapter<LocaleInfo> constructAdapter(Context context,
-            int layoutId, int fieldId) {
-        final Resources resources = context.getResources();
-        final String[] locales = Resources.getSystem().getAssets().getLocales();
-        final String[] specialLocaleCodes = resources.getStringArray(R.array.special_locale_codes);
-        final String[] specialLocaleNames = resources.getStringArray(R.array.special_locale_names);
-        Arrays.sort(locales);
-        final int origSize = locales.length;
-        final LocaleInfo[] preprocess = new LocaleInfo[origSize];
-        int finalSize = 0;
-        for (int i = 0 ; i < origSize; i++ ) {
-            final String s = locales[i];
-            final int len = s.length();
-            if (len == 5) {
-                String language = s.substring(0, 2);
-                String country = s.substring(3, 5);
-                final Locale l = new Locale(language, country);
+            final int layoutId, final int fieldId) {
+        boolean isInDeveloperMode = Settings.Global.getInt(context.getContentResolver(),
+                Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0;
+        final List<LocaleInfo> localeInfos = getAllAssetLocales(context, isInDeveloperMode);
 
-                if (finalSize == 0) {
-                    if (DEBUG) {
-                        Log.v(TAG, "adding initial "+ toTitleCase(l.getDisplayLanguage(l)));
-                    }
-                    preprocess[finalSize++] =
-                            new LocaleInfo(toTitleCase(l.getDisplayLanguage(l)), l);
+        final LayoutInflater inflater =
+                (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
+        return new ArrayAdapter<LocaleInfo>(context, layoutId, fieldId, localeInfos) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                View view;
+                TextView text;
+                if (convertView == null) {
+                    view = inflater.inflate(layoutId, parent, false);
+                    text = (TextView) view.findViewById(fieldId);
+                    view.setTag(text);
                 } else {
-                    // check previous entry:
-                    //  same lang and a country -> upgrade to full name and
-                    //    insert ours with full name
-                    //  diff lang -> insert ours with lang-only name
-                    if (preprocess[finalSize-1].locale.getLanguage().equals(
-                            language)) {
-                        if (DEBUG) {
-                            Log.v(TAG, "backing up and fixing "+
-                                    preprocess[finalSize-1].label+" to "+
-                                    getDisplayName(preprocess[finalSize-1].locale,
-                                            specialLocaleCodes, specialLocaleNames));
-                        }
-                        preprocess[finalSize-1].label = toTitleCase(
-                                getDisplayName(preprocess[finalSize-1].locale,
-                                        specialLocaleCodes, specialLocaleNames));
-                        if (DEBUG) {
-                            Log.v(TAG, "  and adding "+ toTitleCase(
-                                    getDisplayName(l, specialLocaleCodes, specialLocaleNames)));
-                        }
-                        preprocess[finalSize++] =
-                                new LocaleInfo(toTitleCase(
-                                        getDisplayName(
-                                                l, specialLocaleCodes, specialLocaleNames)), l);
-                    } else {
-                        String displayName;
-                        if (s.equals("zz_ZZ")) {
-                            displayName = "Pseudo...";
-                        } else {
-                            displayName = toTitleCase(l.getDisplayLanguage(l));
-                        }
-                        if (DEBUG) {
-                            Log.v(TAG, "adding "+displayName);
-                        }
-                        preprocess[finalSize++] = new LocaleInfo(displayName, l);
-                    }
+                    view = convertView;
+                    text = (TextView) view.getTag();
                 }
-            }
-        }
+                LocaleInfo item = getItem(position);
+                text.setText(item.toString());
+                text.setTextLocale(item.getLocale());
 
-        final LocaleInfo[] localeInfos = new LocaleInfo[finalSize];
-        for (int i = 0; i < finalSize; i++) {
-            localeInfos[i] = preprocess[i];
-        }
-        Arrays.sort(localeInfos);
-        return new ArrayAdapter<LocaleInfo>(context, layoutId, fieldId, localeInfos);
+                return view;
+            }
+        };
     }
 
     private static String toTitleCase(String s) {
@@ -218,10 +246,9 @@ public class LocalePicker extends ListFragment {
             IActivityManager am = ActivityManagerNative.getDefault();
             Configuration config = am.getConfiguration();
 
-            config.locale = locale;
-
-            // indicate this isn't some passing default - the user wants this remembered
-            config.userSetLocale = true;
+            // Will set userSetLocale to indicate this isn't some passing default - the user
+            // wants this remembered
+            config.setLocale(locale);
 
             am.updateConfiguration(config);
             // Trigger the dirty bit for the Settings Provider.

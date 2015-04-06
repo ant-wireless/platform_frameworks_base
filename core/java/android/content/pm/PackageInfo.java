@@ -31,19 +31,40 @@ public class PackageInfo implements Parcelable {
     public String packageName;
 
     /**
+     * The names of any installed split APKs for this package.
+     */
+    public String[] splitNames;
+
+    /**
      * The version number of this package, as specified by the &lt;manifest&gt;
      * tag's {@link android.R.styleable#AndroidManifest_versionCode versionCode}
      * attribute.
      */
     public int versionCode;
-    
+
     /**
      * The version name of this package, as specified by the &lt;manifest&gt;
      * tag's {@link android.R.styleable#AndroidManifest_versionName versionName}
      * attribute.
      */
     public String versionName;
-    
+
+    /**
+     * The revision number of the base APK for this package, as specified by the
+     * &lt;manifest&gt; tag's
+     * {@link android.R.styleable#AndroidManifest_revisionCode revisionCode}
+     * attribute.
+     */
+    public int baseRevisionCode;
+
+    /**
+     * The revision number of any split APKs for this package, as specified by
+     * the &lt;manifest&gt; tag's
+     * {@link android.R.styleable#AndroidManifest_revisionCode revisionCode}
+     * attribute. Indexes are a 1:1 mapping against {@link #splitNames}.
+     */
+    public int[] splitRevisionCodes;
+
     /**
      * The shared user ID name of this package, as specified by the &lt;manifest&gt;
      * tag's {@link android.R.styleable#AndroidManifest_sharedUserId sharedUserId}
@@ -175,14 +196,26 @@ public class PackageInfo implements Parcelable {
      * {@link android.R.styleable#AndroidManifestUsesConfiguration
      * &lt;uses-configuration&gt;} tags included under &lt;manifest&gt;,
      * or null if there were none. This is only filled in if the flag
-     * {@link PackageManager#GET_CONFIGURATIONS} was set.  
+     * {@link PackageManager#GET_CONFIGURATIONS} was set.
      */
     public ConfigurationInfo[] configPreferences;
 
     /**
-     * The features that this application has said it requires.
+     * Features that this application has requested.
+     *
+     * @see FeatureInfo#FLAG_REQUIRED
      */
     public FeatureInfo[] reqFeatures;
+
+    /**
+     * Groups of features that this application has requested.
+     * Each group contains a set of features that are required.
+     * A device must match the features listed in {@link #reqFeatures} and one
+     * or more FeatureGroups in order to have satisfied the feature requirement.
+     *
+     * @see FeatureInfo#FLAG_REQUIRED
+     */
+    public FeatureGroupInfo[] featureGroups;
 
     /**
      * Constant corresponding to <code>auto</code> in
@@ -190,51 +223,76 @@ public class PackageInfo implements Parcelable {
      * @hide
      */
     public static final int INSTALL_LOCATION_UNSPECIFIED = -1;
+
     /**
-     * Constant corresponding to <code>auto</code> in
-     * the {@link android.R.attr#installLocation} attribute.
-     * @hide
+     * Constant corresponding to <code>auto</code> in the
+     * {@link android.R.attr#installLocation} attribute.
      */
     public static final int INSTALL_LOCATION_AUTO = 0;
+
     /**
-     * Constant corresponding to <code>internalOnly</code> in
-     * the {@link android.R.attr#installLocation} attribute.
-     * @hide
+     * Constant corresponding to <code>internalOnly</code> in the
+     * {@link android.R.attr#installLocation} attribute.
      */
     public static final int INSTALL_LOCATION_INTERNAL_ONLY = 1;
+
     /**
-     * Constant corresponding to <code>preferExternal</code> in
-     * the {@link android.R.attr#installLocation} attribute.
-     * @hide
+     * Constant corresponding to <code>preferExternal</code> in the
+     * {@link android.R.attr#installLocation} attribute.
      */
     public static final int INSTALL_LOCATION_PREFER_EXTERNAL = 2;
+
     /**
-     * The install location requested by the activity.  From the
+     * The install location requested by the package. From the
      * {@link android.R.attr#installLocation} attribute, one of
-     * {@link #INSTALL_LOCATION_AUTO},
-     * {@link #INSTALL_LOCATION_INTERNAL_ONLY},
+     * {@link #INSTALL_LOCATION_AUTO}, {@link #INSTALL_LOCATION_INTERNAL_ONLY},
      * {@link #INSTALL_LOCATION_PREFER_EXTERNAL}
-     * @hide
      */
     public int installLocation = INSTALL_LOCATION_INTERNAL_ONLY;
-    
+
+    /** @hide */
+    public boolean coreApp;
+
+    /** @hide */
+    public boolean requiredForAllUsers;
+
+    /** @hide */
+    public String restrictedAccountType;
+
+    /** @hide */
+    public String requiredAccountType;
+
+    /**
+     * What package, if any, this package will overlay.
+     *
+     * Package name of target package, or null.
+     * @hide
+     */
+    public String overlayTarget;
+
     public PackageInfo() {
     }
 
+    @Override
     public String toString() {
         return "PackageInfo{"
             + Integer.toHexString(System.identityHashCode(this))
             + " " + packageName + "}";
     }
 
+    @Override
     public int describeContents() {
         return 0;
     }
 
+    @Override
     public void writeToParcel(Parcel dest, int parcelableFlags) {
         dest.writeString(packageName);
+        dest.writeStringArray(splitNames);
         dest.writeInt(versionCode);
         dest.writeString(versionName);
+        dest.writeInt(baseRevisionCode);
+        dest.writeIntArray(splitRevisionCodes);
         dest.writeString(sharedUserId);
         dest.writeInt(sharedUserLabel);
         if (applicationInfo != null) {
@@ -257,15 +315,23 @@ public class PackageInfo implements Parcelable {
         dest.writeTypedArray(signatures, parcelableFlags);
         dest.writeTypedArray(configPreferences, parcelableFlags);
         dest.writeTypedArray(reqFeatures, parcelableFlags);
+        dest.writeTypedArray(featureGroups, parcelableFlags);
         dest.writeInt(installLocation);
+        dest.writeInt(coreApp ? 1 : 0);
+        dest.writeInt(requiredForAllUsers ? 1 : 0);
+        dest.writeString(restrictedAccountType);
+        dest.writeString(requiredAccountType);
+        dest.writeString(overlayTarget);
     }
 
     public static final Parcelable.Creator<PackageInfo> CREATOR
             = new Parcelable.Creator<PackageInfo>() {
+        @Override
         public PackageInfo createFromParcel(Parcel source) {
             return new PackageInfo(source);
         }
 
+        @Override
         public PackageInfo[] newArray(int size) {
             return new PackageInfo[size];
         }
@@ -273,8 +339,11 @@ public class PackageInfo implements Parcelable {
 
     private PackageInfo(Parcel source) {
         packageName = source.readString();
+        splitNames = source.createStringArray();
         versionCode = source.readInt();
         versionName = source.readString();
+        baseRevisionCode = source.readInt();
+        splitRevisionCodes = source.createIntArray();
         sharedUserId = source.readString();
         sharedUserLabel = source.readInt();
         int hasApp = source.readInt();
@@ -295,6 +364,12 @@ public class PackageInfo implements Parcelable {
         signatures = source.createTypedArray(Signature.CREATOR);
         configPreferences = source.createTypedArray(ConfigurationInfo.CREATOR);
         reqFeatures = source.createTypedArray(FeatureInfo.CREATOR);
+        featureGroups = source.createTypedArray(FeatureGroupInfo.CREATOR);
         installLocation = source.readInt();
+        coreApp = source.readInt() != 0;
+        requiredForAllUsers = source.readInt() != 0;
+        restrictedAccountType = source.readString();
+        requiredAccountType = source.readString();
+        overlayTarget = source.readString();
     }
 }

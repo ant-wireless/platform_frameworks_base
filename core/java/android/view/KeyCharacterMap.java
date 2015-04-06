@@ -180,6 +180,8 @@ public class KeyCharacterMap implements Parcelable {
     private static final int ACCENT_CIRCUMFLEX_LEGACY = '^';
     private static final int ACCENT_TILDE_LEGACY = '~';
 
+    private static final int CHAR_SPACE = ' ';
+
     /**
      * Maps Unicode combining diacritical to display-form dead key.
      */
@@ -280,20 +282,20 @@ public class KeyCharacterMap implements Parcelable {
         }
     };
 
-    private int mPtr;
+    private long mPtr;
 
-    private static native int nativeReadFromParcel(Parcel in);
-    private static native void nativeWriteToParcel(int ptr, Parcel out);
-    private static native void nativeDispose(int ptr);
+    private static native long nativeReadFromParcel(Parcel in);
+    private static native void nativeWriteToParcel(long ptr, Parcel out);
+    private static native void nativeDispose(long ptr);
 
-    private static native char nativeGetCharacter(int ptr, int keyCode, int metaState);
-    private static native boolean nativeGetFallbackAction(int ptr, int keyCode, int metaState,
+    private static native char nativeGetCharacter(long ptr, int keyCode, int metaState);
+    private static native boolean nativeGetFallbackAction(long ptr, int keyCode, int metaState,
             FallbackAction outFallbackAction);
-    private static native char nativeGetNumber(int ptr, int keyCode);
-    private static native char nativeGetMatch(int ptr, int keyCode, char[] chars, int metaState);
-    private static native char nativeGetDisplayLabel(int ptr, int keyCode);
-    private static native int nativeGetKeyboardType(int ptr);
-    private static native KeyEvent[] nativeGetEvents(int ptr, char[] chars);
+    private static native char nativeGetNumber(long ptr, int keyCode);
+    private static native char nativeGetMatch(long ptr, int keyCode, char[] chars, int metaState);
+    private static native char nativeGetDisplayLabel(long ptr, int keyCode);
+    private static native int nativeGetKeyboardType(long ptr);
+    private static native KeyEvent[] nativeGetEvents(long ptr, char[] chars);
 
     private KeyCharacterMap(Parcel in) {
         if (in == null) {
@@ -306,7 +308,7 @@ public class KeyCharacterMap implements Parcelable {
     }
 
     // Called from native
-    private KeyCharacterMap(int ptr) {
+    private KeyCharacterMap(long ptr) {
         mPtr = ptr;
     }
 
@@ -473,14 +475,23 @@ public class KeyCharacterMap implements Parcelable {
     }
 
     /**
-     * Get the character that is produced by putting accent on the character c.
+     * Get the character that is produced by combining the dead key producing accent
+     * with the key producing character c.
      * For example, getDeadChar('`', 'e') returns &egrave;.
+     * getDeadChar('^', ' ') returns '^' and getDeadChar('^', '^') returns '^'.
      *
      * @param accent The accent character.  eg. '`'
      * @param c The basic character.
      * @return The combined character, or 0 if the characters cannot be combined.
      */
     public static int getDeadChar(int accent, int c) {
+        if (c == accent || CHAR_SPACE == c) {
+            // The same dead character typed twice or a dead character followed by a
+            // space should both produce the non-combining version of the combining char.
+            // In this case we don't even need to compute the combining character.
+            return accent;
+        }
+
         int combining = sAccentToCombining.get(accent);
         if (combining == 0) {
             return 0;
@@ -495,7 +506,8 @@ public class KeyCharacterMap implements Parcelable {
                 sDeadKeyBuilder.append((char)c);
                 sDeadKeyBuilder.append((char)combining);
                 String result = Normalizer.normalize(sDeadKeyBuilder, Normalizer.Form.NFC);
-                combined = result.length() == 1 ? result.charAt(0) : 0;
+                combined = result.codePointCount(0, result.length()) == 1
+                        ? result.codePointAt(0) : 0;
                 sDeadKeyCache.put(combination, combined);
             }
         }

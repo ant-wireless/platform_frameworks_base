@@ -28,8 +28,18 @@ import android.os.WorkSource;
 public class BridgePowerManager implements IPowerManager {
 
     @Override
-    public boolean isScreenOn() throws RemoteException {
+    public boolean isInteractive() throws RemoteException {
         return true;
+    }
+
+    @Override
+    public boolean isPowerSaveMode() throws RemoteException {
+        return false;
+    }
+
+    @Override
+    public boolean setPowerSaveMode(boolean mode) throws RemoteException {
+        return false;
     }
 
     @Override
@@ -39,13 +49,19 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
-    public void acquireWakeLock(int arg0, IBinder arg1, String arg2, WorkSource arg3)
+    public void acquireWakeLock(IBinder arg0, int arg1, String arg2, String arg2_5, WorkSource arg3, String arg4)
             throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void clearUserActivityTimeout(long arg0, long arg1) throws RemoteException {
+    public void acquireWakeLockWithUid(IBinder arg0, int arg1, String arg2, String arg2_5, int arg3)
+            throws RemoteException {
+        // pass for now.
+    }
+
+    @Override
+    public void powerHint(int hintId, int data) {
         // pass for now.
     }
 
@@ -55,28 +71,22 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
-    public int getSupportedWakeLockFlags() throws RemoteException {
-        // pass for now.
-        return 0;
-    }
-
-    @Override
-    public void goToSleep(long arg0) throws RemoteException {
+    public void goToSleep(long arg0, int arg1, int arg2) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void goToSleepWithReason(long arg0, int arg1) throws RemoteException {
+    public void nap(long arg0) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void preventScreenOn(boolean arg0) throws RemoteException {
+    public void reboot(boolean confirm, String reason, boolean wait) {
         // pass for now.
     }
 
     @Override
-    public void reboot(String arg0) throws RemoteException {
+    public void shutdown(boolean confirm, boolean wait) {
         // pass for now.
     }
 
@@ -86,27 +96,22 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
+    public void updateWakeLockUids(IBinder arg0, int[] arg1) throws RemoteException {
+        // pass for now.
+    }
+
+    @Override
     public void setAttentionLight(boolean arg0, int arg1) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void setAutoBrightnessAdjustment(float arg0) throws RemoteException {
+    public void setTemporaryScreenAutoBrightnessAdjustmentSettingOverride(float arg0) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void setBacklightBrightness(int arg0) throws RemoteException {
-        // pass for now.
-    }
-
-    @Override
-    public void setMaximumScreenOffTimeount(int arg0) throws RemoteException {
-        // pass for now.
-    }
-
-    @Override
-    public void setPokeLock(int arg0, IBinder arg1, String arg2) throws RemoteException {
+    public void setTemporaryScreenBrightnessSettingOverride(int arg0) throws RemoteException {
         // pass for now.
     }
 
@@ -116,17 +121,28 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
-    public void updateWakeLockWorkSource(IBinder arg0, WorkSource arg1) throws RemoteException {
+    public void updateWakeLockWorkSource(IBinder arg0, WorkSource arg1, String arg2) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void userActivity(long arg0, boolean arg1) throws RemoteException {
+    public boolean isWakeLockLevelSupported(int level) throws RemoteException {
+        // pass for now.
+        return true;
+    }
+
+    @Override
+    public void userActivity(long time, int event, int flags) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void userActivityWithForce(long arg0, boolean arg1, boolean arg2) throws RemoteException {
+    public void wakeUp(long time) throws RemoteException {
+        // pass for now.
+    }
+
+    @Override
+    public void boostScreenBrightness(long time) throws RemoteException {
         // pass for now.
     }
 }

@@ -16,6 +16,8 @@
 
 package android.webkit;
 
+import android.annotation.SystemApi;
+
 import java.util.Set;
 
 /**
@@ -61,7 +63,8 @@ public class GeolocationPermissions {
     };
 
     /**
-     * Gets the singleton instance of this class.
+     * Gets the singleton instance of this class. This method cannot be
+     * called before the application instantiates a {@link WebView} instance.
      *
      * @return the singleton {@link GeolocationPermissions} instance
      */
@@ -135,5 +138,6 @@ public class GeolocationPermissions {
      * way to call createHandler() and createUIHandler(), so it would not work).
      * @hide Only for use by WebViewProvider implementations
      */
+    @SystemApi
     public GeolocationPermissions() {}
 }

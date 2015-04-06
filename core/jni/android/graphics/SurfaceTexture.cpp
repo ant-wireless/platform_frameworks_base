@@ -18,10 +18,13 @@
 
 #include <stdio.h>
 
-#include <gui/SurfaceTexture.h>
-#include <gui/SurfaceTextureClient.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 
-#include <android_runtime/AndroidRuntime.h>
+#include <gui/GLConsumer.h>
+#include <gui/Surface.h>
+
+#include "core_jni_helpers.h"
 
 #include <utils/Log.h>
 #include <utils/misc.h>
@@ -34,12 +37,14 @@
 namespace android {
 
 static const char* const OutOfResourcesException =
-    "android/graphics/SurfaceTexture$OutOfResourcesException";
+    "android/view/Surface$OutOfResourcesException";
 static const char* const IllegalStateException = "java/lang/IllegalStateException";
 const char* const kSurfaceTextureClassPathName = "android/graphics/SurfaceTexture";
 
 struct fields_t {
     jfieldID  surfaceTexture;
+    jfieldID  producer;
+    jfieldID  frameAvailableListener;
     jmethodID postEvent;
 };
 static fields_t fields;
@@ -47,49 +52,76 @@ static fields_t fields;
 // ----------------------------------------------------------------------------
 
 static void SurfaceTexture_setSurfaceTexture(JNIEnv* env, jobject thiz,
-        const sp<SurfaceTexture>& surfaceTexture)
+        const sp<GLConsumer>& surfaceTexture)
 {
-    SurfaceTexture* const p =
-        (SurfaceTexture*)env->GetIntField(thiz, fields.surfaceTexture);
+    GLConsumer* const p =
+        (GLConsumer*)env->GetLongField(thiz, fields.surfaceTexture);
     if (surfaceTexture.get()) {
-        surfaceTexture->incStrong(thiz);
+        surfaceTexture->incStrong((void*)SurfaceTexture_setSurfaceTexture);
     }
     if (p) {
-        p->decStrong(thiz);
+        p->decStrong((void*)SurfaceTexture_setSurfaceTexture);
     }
-    env->SetIntField(thiz, fields.surfaceTexture, (int)surfaceTexture.get());
+    env->SetLongField(thiz, fields.surfaceTexture, (jlong)surfaceTexture.get());
 }
 
-sp<SurfaceTexture> SurfaceTexture_getSurfaceTexture(JNIEnv* env, jobject thiz)
+static void SurfaceTexture_setProducer(JNIEnv* env, jobject thiz,
+        const sp<IGraphicBufferProducer>& producer)
 {
-    sp<SurfaceTexture> surfaceTexture(
-        (SurfaceTexture*)env->GetIntField(thiz, fields.surfaceTexture));
-    return surfaceTexture;
+    IGraphicBufferProducer* const p =
+        (IGraphicBufferProducer*)env->GetLongField(thiz, fields.producer);
+    if (producer.get()) {
+        producer->incStrong((void*)SurfaceTexture_setProducer);
+    }
+    if (p) {
+        p->decStrong((void*)SurfaceTexture_setProducer);
+    }
+    env->SetLongField(thiz, fields.producer, (jlong)producer.get());
 }
 
-sp<ANativeWindow> android_SurfaceTexture_getNativeWindow(
-        JNIEnv* env, jobject thiz)
+static void SurfaceTexture_setFrameAvailableListener(JNIEnv* env,
+        jobject thiz, sp<GLConsumer::FrameAvailableListener> listener)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
-    sp<SurfaceTextureClient> surfaceTextureClient(surfaceTexture != NULL ?
-            new SurfaceTextureClient(surfaceTexture) : NULL);
+    GLConsumer::FrameAvailableListener* const p =
+        (GLConsumer::FrameAvailableListener*)
+            env->GetLongField(thiz, fields.frameAvailableListener);
+    if (listener.get()) {
+        listener->incStrong((void*)SurfaceTexture_setSurfaceTexture);
+    }
+    if (p) {
+        p->decStrong((void*)SurfaceTexture_setSurfaceTexture);
+    }
+    env->SetLongField(thiz, fields.frameAvailableListener, (jlong)listener.get());
+}
+
+sp<GLConsumer> SurfaceTexture_getSurfaceTexture(JNIEnv* env, jobject thiz) {
+    return (GLConsumer*)env->GetLongField(thiz, fields.surfaceTexture);
+}
+
+sp<IGraphicBufferProducer> SurfaceTexture_getProducer(JNIEnv* env, jobject thiz) {
+    return (IGraphicBufferProducer*)env->GetLongField(thiz, fields.producer);
+}
+
+sp<ANativeWindow> android_SurfaceTexture_getNativeWindow(JNIEnv* env, jobject thiz) {
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<IGraphicBufferProducer> producer(SurfaceTexture_getProducer(env, thiz));
+    sp<Surface> surfaceTextureClient(surfaceTexture != NULL ? new Surface(producer) : NULL);
     return surfaceTextureClient;
 }
 
-bool android_SurfaceTexture_isInstanceOf(JNIEnv* env, jobject thiz)
-{
+bool android_SurfaceTexture_isInstanceOf(JNIEnv* env, jobject thiz) {
     jclass surfaceTextureClass = env->FindClass(kSurfaceTextureClassPathName);
     return env->IsInstanceOf(thiz, surfaceTextureClass);
 }
 
 // ----------------------------------------------------------------------------
 
-class JNISurfaceTextureContext : public SurfaceTexture::FrameAvailableListener
+class JNISurfaceTextureContext : public GLConsumer::FrameAvailableListener
 {
 public:
     JNISurfaceTextureContext(JNIEnv* env, jobject weakThiz, jclass clazz);
     virtual ~JNISurfaceTextureContext();
-    virtual void onFrameAvailable();
+    virtual void onFrameAvailable(const BufferItem& item);
 
 private:
     static JNIEnv* getJNIEnv(bool* needsDetach);
@@ -109,7 +141,8 @@ JNIEnv* JNISurfaceTextureContext::getJNIEnv(bool* needsDetach) {
     *needsDetach = false;
     JNIEnv* env = AndroidRuntime::getJNIEnv();
     if (env == NULL) {
-        JavaVMAttachArgs args = {JNI_VERSION_1_4, NULL, NULL};
+        JavaVMAttachArgs args = {
+            JNI_VERSION_1_4, "JNISurfaceTextureContext", NULL };
         JavaVM* vm = AndroidRuntime::getJavaVM();
         int result = vm->AttachCurrentThread(&env, (void*) &args);
         if (result != JNI_OK) {
@@ -144,7 +177,7 @@ JNISurfaceTextureContext::~JNISurfaceTextureContext()
     }
 }
 
-void JNISurfaceTextureContext::onFrameAvailable()
+void JNISurfaceTextureContext::onFrameAvailable(const BufferItem& /* item */)
 {
     bool needsDetach = false;
     JNIEnv* env = getJNIEnv(&needsDetach);
@@ -160,32 +193,68 @@ void JNISurfaceTextureContext::onFrameAvailable()
 
 // ----------------------------------------------------------------------------
 
+
+#define ANDROID_GRAPHICS_SURFACETEXTURE_JNI_ID "mSurfaceTexture"
+#define ANDROID_GRAPHICS_PRODUCER_JNI_ID "mProducer"
+#define ANDROID_GRAPHICS_FRAMEAVAILABLELISTENER_JNI_ID \
+                                         "mFrameAvailableListener"
+
 static void SurfaceTexture_classInit(JNIEnv* env, jclass clazz)
 {
     fields.surfaceTexture = env->GetFieldID(clazz,
-            ANDROID_GRAPHICS_SURFACETEXTURE_JNI_ID, "I");
+            ANDROID_GRAPHICS_SURFACETEXTURE_JNI_ID, "J");
     if (fields.surfaceTexture == NULL) {
         ALOGE("can't find android/graphics/SurfaceTexture.%s",
                 ANDROID_GRAPHICS_SURFACETEXTURE_JNI_ID);
     }
+    fields.producer = env->GetFieldID(clazz,
+            ANDROID_GRAPHICS_PRODUCER_JNI_ID, "J");
+    if (fields.producer == NULL) {
+        ALOGE("can't find android/graphics/SurfaceTexture.%s",
+                ANDROID_GRAPHICS_PRODUCER_JNI_ID);
+    }
+    fields.frameAvailableListener = env->GetFieldID(clazz,
+            ANDROID_GRAPHICS_FRAMEAVAILABLELISTENER_JNI_ID, "J");
+    if (fields.frameAvailableListener == NULL) {
+        ALOGE("can't find android/graphics/SurfaceTexture.%s",
+                ANDROID_GRAPHICS_FRAMEAVAILABLELISTENER_JNI_ID);
+    }
 
     fields.postEvent = env->GetStaticMethodID(clazz, "postEventFromNative",
-            "(Ljava/lang/Object;)V");
+            "(Ljava/lang/ref/WeakReference;)V");
     if (fields.postEvent == NULL) {
         ALOGE("can't find android/graphics/SurfaceTexture.postEventFromNative");
     }
 }
 
-static void SurfaceTexture_init(JNIEnv* env, jobject thiz, jint texName,
-        jobject weakThiz, jboolean allowSynchronous)
+static void SurfaceTexture_init(JNIEnv* env, jobject thiz, jboolean isDetached,
+        jint texName, jboolean singleBufferMode, jobject weakThiz)
 {
-    sp<SurfaceTexture> surfaceTexture(new SurfaceTexture(texName, allowSynchronous));
+    sp<IGraphicBufferProducer> producer;
+    sp<IGraphicBufferConsumer> consumer;
+    BufferQueue::createBufferQueue(&producer, &consumer);
+
+    if (singleBufferMode) {
+        consumer->disableAsyncBuffer();
+        consumer->setDefaultMaxBufferCount(1);
+    }
+
+    sp<GLConsumer> surfaceTexture;
+    if (isDetached) {
+        surfaceTexture = new GLConsumer(consumer, GL_TEXTURE_EXTERNAL_OES,
+                true, true);
+    } else {
+        surfaceTexture = new GLConsumer(consumer, texName,
+                GL_TEXTURE_EXTERNAL_OES, true, true);
+    }
+
     if (surfaceTexture == 0) {
         jniThrowException(env, OutOfResourcesException,
                 "Unable to create native SurfaceTexture");
         return;
     }
     SurfaceTexture_setSurfaceTexture(env, thiz, surfaceTexture);
+    SurfaceTexture_setProducer(env, thiz, producer);
 
     jclass clazz = env->GetObjectClass(thiz);
     if (clazz == NULL) {
@@ -197,25 +266,27 @@ static void SurfaceTexture_init(JNIEnv* env, jobject thiz, jint texName,
     sp<JNISurfaceTextureContext> ctx(new JNISurfaceTextureContext(env, weakThiz,
             clazz));
     surfaceTexture->setFrameAvailableListener(ctx);
+    SurfaceTexture_setFrameAvailableListener(env, thiz, ctx);
 }
 
 static void SurfaceTexture_finalize(JNIEnv* env, jobject thiz)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     surfaceTexture->setFrameAvailableListener(0);
+    SurfaceTexture_setFrameAvailableListener(env, thiz, 0);
     SurfaceTexture_setSurfaceTexture(env, thiz, 0);
+    SurfaceTexture_setProducer(env, thiz, 0);
 }
 
 static void SurfaceTexture_setDefaultBufferSize(
-        JNIEnv* env, jobject thiz, jint width, jint height)
-{
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+        JNIEnv* env, jobject thiz, jint width, jint height) {
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     surfaceTexture->setDefaultBufferSize(width, height);
 }
 
 static void SurfaceTexture_updateTexImage(JNIEnv* env, jobject thiz)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     status_t err = surfaceTexture->updateTexImage();
     if (err == INVALID_OPERATION) {
         jniThrowException(env, IllegalStateException, "Unable to update texture contents (see "
@@ -225,22 +296,34 @@ static void SurfaceTexture_updateTexImage(JNIEnv* env, jobject thiz)
     }
 }
 
+static void SurfaceTexture_releaseTexImage(JNIEnv* env, jobject thiz)
+{
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    status_t err = surfaceTexture->releaseTexImage();
+    if (err == INVALID_OPERATION) {
+        jniThrowException(env, IllegalStateException, "Unable to release texture contents (see "
+                "logcat for details)");
+    } else if (err < 0) {
+        jniThrowRuntimeException(env, "Error during updateTexImage (see logcat for details)");
+    }
+}
+
 static jint SurfaceTexture_detachFromGLContext(JNIEnv* env, jobject thiz)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     return surfaceTexture->detachFromContext();
 }
 
 static jint SurfaceTexture_attachToGLContext(JNIEnv* env, jobject thiz, jint tex)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     return surfaceTexture->attachToContext((GLuint)tex);
 }
 
 static void SurfaceTexture_getTransformMatrix(JNIEnv* env, jobject thiz,
         jfloatArray jmtx)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     float* mtx = env->GetFloatArrayElements(jmtx, NULL);
     surfaceTexture->getTransformMatrix(mtx);
     env->ReleaseFloatArrayElements(jmtx, mtx, 0);
@@ -248,13 +331,13 @@ static void SurfaceTexture_getTransformMatrix(JNIEnv* env, jobject thiz,
 
 static jlong SurfaceTexture_getTimestamp(JNIEnv* env, jobject thiz)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     return surfaceTexture->getTimestamp();
 }
 
 static void SurfaceTexture_release(JNIEnv* env, jobject thiz)
 {
-    sp<SurfaceTexture> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
+    sp<GLConsumer> surfaceTexture(SurfaceTexture_getSurfaceTexture(env, thiz));
     surfaceTexture->abandon();
 }
 
@@ -262,10 +345,11 @@ static void SurfaceTexture_release(JNIEnv* env, jobject thiz)
 
 static JNINativeMethod gSurfaceTextureMethods[] = {
     {"nativeClassInit",            "()V",   (void*)SurfaceTexture_classInit },
-    {"nativeInit",                 "(ILjava/lang/Object;Z)V", (void*)SurfaceTexture_init },
+    {"nativeInit",                 "(ZIZLjava/lang/ref/WeakReference;)V", (void*)SurfaceTexture_init },
     {"nativeFinalize",             "()V",   (void*)SurfaceTexture_finalize },
     {"nativeSetDefaultBufferSize", "(II)V", (void*)SurfaceTexture_setDefaultBufferSize },
     {"nativeUpdateTexImage",       "()V",   (void*)SurfaceTexture_updateTexImage },
+    {"nativeReleaseTexImage",      "()V",   (void*)SurfaceTexture_releaseTexImage },
     {"nativeDetachFromGLContext",  "()I",   (void*)SurfaceTexture_detachFromGLContext },
     {"nativeAttachToGLContext",    "(I)I",   (void*)SurfaceTexture_attachToGLContext },
     {"nativeGetTransformMatrix",   "([F)V", (void*)SurfaceTexture_getTransformMatrix },
@@ -275,10 +359,8 @@ static JNINativeMethod gSurfaceTextureMethods[] = {
 
 int register_android_graphics_SurfaceTexture(JNIEnv* env)
 {
-    int err = 0;
-    err = AndroidRuntime::registerNativeMethods(env, kSurfaceTextureClassPathName,
-            gSurfaceTextureMethods, NELEM(gSurfaceTextureMethods));
-    return err;
+    return RegisterMethodsOrDie(env, kSurfaceTextureClassPathName, gSurfaceTextureMethods,
+                                NELEM(gSurfaceTextureMethods));
 }
 
 } // namespace android

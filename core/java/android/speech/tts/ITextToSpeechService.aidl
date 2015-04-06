@@ -18,7 +18,9 @@ package android.speech.tts;
 
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.speech.tts.ITextToSpeechCallback;
+import android.speech.tts.Voice;
 
 /**
  * Interface for TextToSpeech to talk to TextToSpeechService.
@@ -35,8 +37,10 @@ interface ITextToSpeechService {
      * @param text The text to synthesize.
      * @param queueMode Determines what to do to requests already in the queue.
      * @param param Request parameters.
+     * @param utteranceId Unique identifier of synthesized utterance.
      */
-    int speak(in IBinder callingInstance, in String text, in int queueMode, in Bundle params);
+    int speak(in IBinder callingInstance, in CharSequence text, in int queueMode, in Bundle params,
+            String utteranceId);
 
     /**
      * Tells the engine to synthesize some speech and write it to a file.
@@ -44,11 +48,13 @@ interface ITextToSpeechService {
      * @param callingInstance a binder representing the identity of the calling
      *        TextToSpeech object.
      * @param text The text to synthesize.
-     * @param filename The file to write the synthesized audio to.
+     * @param fileDescriptor The file descriptor to write the synthesized audio to. Has to be
+              writable.
+     * @param utteranceId Unique identifier of synthesized utterance.
      * @param param Request parameters.
      */
-    int synthesizeToFile(in IBinder callingInstance, in String text,
-        in String filename, in Bundle params);
+    int synthesizeToFileDescriptor(in IBinder callingInstance, in CharSequence text,
+        in ParcelFileDescriptor fileDescriptor, in Bundle params, String utteranceId);
 
     /**
      * Plays an existing audio resource.
@@ -57,9 +63,11 @@ interface ITextToSpeechService {
      *        TextToSpeech object.
      * @param audioUri URI for the audio resource (a file or android.resource URI)
      * @param queueMode Determines what to do to requests already in the queue.
+     * @param utteranceId Unique identifier of synthesized utterance.
      * @param param Request parameters.
      */
-    int playAudio(in IBinder callingInstance, in Uri audioUri, in int queueMode, in Bundle params);
+    int playAudio(in IBinder callingInstance, in Uri audioUri, in int queueMode, in Bundle params,
+            String utteranceId);
 
     /**
      * Plays silence.
@@ -68,9 +76,10 @@ interface ITextToSpeechService {
      *        TextToSpeech object.
      * @param duration Number of milliseconds of silence to play.
      * @param queueMode Determines what to do to requests already in the queue.
-     * @param param Request parameters.
+     * @param utteranceId Unique id used to identify this request in callbacks.
      */
-    int playSilence(in IBinder callingInstance, in long duration, in int queueMode, in Bundle params);
+    int playSilence(in IBinder callingInstance, in long duration, in int queueMode,
+        in String utteranceId);
 
     /**
      * Checks whether the service is currently playing some audio.
@@ -88,7 +97,6 @@ interface ITextToSpeechService {
 
     /**
      * Returns the language, country and variant currently being used by the TTS engine.
-     *
      * Can be called from multiple threads.
      *
      * @return A 3-element array, containing language (ISO 3-letter code),
@@ -97,6 +105,18 @@ interface ITextToSpeechService {
      *         be empty too.
      */
     String[] getLanguage();
+
+    /**
+     * Returns a default TTS language, country and variant as set by the user.
+     *
+     * Can be called from multiple threads.
+     *
+     * @return A 3-element array, containing language (ISO 3-letter code),
+     *         country (ISO 3-letter code) and variant used by the engine.
+     *         The country and variant may be {@code ""}. If country is empty, then variant must
+     *         be empty too.
+     */
+    String[] getClientDefaultLanguage();
 
     /**
      * Checks whether the engine supports a given language.
@@ -123,7 +143,7 @@ interface ITextToSpeechService {
      * @param country ISO-3 country code. May be empty or null.
      * @param variant Language variant. May be empty or null.
      * @return An array of strings containing the set of features supported for
-     *         the supplied locale. The array of strings must not contain 
+     *         the supplied locale. The array of strings must not contain
      *         duplicates.
      */
     String[] getFeaturesForLanguage(in String lang, in String country, in String variant);
@@ -131,6 +151,8 @@ interface ITextToSpeechService {
     /**
      * Notifies the engine that it should load a speech synthesis language.
      *
+     * @param caller a binder representing the identity of the calling
+     *        TextToSpeech object.
      * @param lang ISO-3 language code.
      * @param country ISO-3 country code. May be empty or null.
      * @param variant Language variant. May be empty or null.
@@ -141,15 +163,48 @@ interface ITextToSpeechService {
      *         {@link TextToSpeech#LANG_MISSING_DATA}
      *         {@link TextToSpeech#LANG_NOT_SUPPORTED}.
      */
-    int loadLanguage(in String lang, in String country, in String variant);
+    int loadLanguage(in IBinder caller, in String lang, in String country, in String variant);
 
     /**
      * Sets the callback that will be notified when playback of utterance from the
      * given app are completed.
      *
-     * @param callingApp Package name for the app whose utterance the callback will handle.
+     * @param caller Instance a binder representing the identity of the calling
+     *        TextToSpeech object.
      * @param cb The callback.
      */
     void setCallback(in IBinder caller, ITextToSpeechCallback cb);
 
+    /**
+     * Get the array of available voices.
+     */
+    List<Voice> getVoices();
+
+    /**
+     * Notifies the engine that it should load a speech synthesis voice.
+     *
+     * @param caller a binder representing the identity of the calling
+     *        TextToSpeech object.
+     * @param voiceName Unique voice of the name.
+     * @return {@link TextToSpeech#SUCCESS} or {@link TextToSpeech#ERROR}.
+     */
+    int loadVoice(in IBinder caller, in String voiceName);
+
+    /**
+     * Return a name of the default voice for a given locale.
+     *
+     * This allows {@link TextToSpeech#getVoice} to return a sensible value after a client calls
+     * {@link TextToSpeech#setLanguage}.
+     *
+     * @param lang ISO 3-character language code.
+     * @param country ISO 3-character country code. May be empty or null.
+     * @param variant Language variant. May be empty or null.
+     * @return Code indicating the support status for the locale.
+     *         One of {@link TextToSpeech#LANG_AVAILABLE},
+     *         {@link TextToSpeech#LANG_COUNTRY_AVAILABLE},
+     *         {@link TextToSpeech#LANG_COUNTRY_VAR_AVAILABLE},
+     *         {@link TextToSpeech#LANG_MISSING_DATA}
+     *         {@link TextToSpeech#LANG_NOT_SUPPORTED}.
+     */
+    String getDefaultVoiceNameFor(in String lang, in String country, in String variant);
 }

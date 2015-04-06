@@ -20,7 +20,6 @@ import java.io.PrintWriter;
 
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.util.FloatMath;
 import com.android.internal.util.FastMath;
 
 /**
@@ -66,17 +65,25 @@ public class RectF implements Parcelable {
      *          rectangle.
      */
     public RectF(RectF r) {
-        left = r.left;
-        top = r.top;
-        right = r.right;
-        bottom = r.bottom;
+        if (r == null) {
+            left = top = right = bottom = 0.0f;
+        } else {
+            left = r.left;
+            top = r.top;
+            right = r.right;
+            bottom = r.bottom;
+        }
     }
     
     public RectF(Rect r) {
-        left = r.left;
-        top = r.top;
-        right = r.right;
-        bottom = r.bottom;
+        if (r == null) {
+            left = top = right = bottom = 0.0f;
+        } else {
+            left = r.left;
+            top = r.top;
+            right = r.right;
+            bottom = r.bottom;
+        }
     }
 
     @Override
@@ -442,8 +449,8 @@ public class RectF implements Parcelable {
      * floor of top and left, and the ceiling of right and bottom.
      */
     public void roundOut(Rect dst) {
-        dst.set((int) FloatMath.floor(left), (int) FloatMath.floor(top),
-                (int) FloatMath.ceil(right), (int) FloatMath.ceil(bottom));
+        dst.set((int) Math.floor(left), (int) Math.floor(top),
+                (int) Math.ceil(right), (int) Math.ceil(bottom));
     }
 
     /**

@@ -18,7 +18,6 @@ package android.net;
 
 import android.os.Parcelable;
 import android.os.Parcel;
-import java.net.InetAddress;
 
 /**
  * A simple object for retrieving the results of a DHCP request.
@@ -27,11 +26,10 @@ public class DhcpInfo implements Parcelable {
     public int ipAddress;
     public int gateway;
     public int netmask;
-
     public int dns1;
     public int dns2;
-
     public int serverAddress;
+
     public int leaseDuration;
 
     public DhcpInfo() {

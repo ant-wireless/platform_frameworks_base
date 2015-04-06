@@ -16,10 +16,18 @@
 
 package android.net.wifi;
 
-import android.net.wifi.WifiInfo;
+import android.net.wifi.BatchedScanResult;
+import android.net.wifi.BatchedScanSettings;
 import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.ScanSettings;
+import android.net.wifi.WifiChannel;
 import android.net.wifi.ScanResult;
+import android.net.wifi.WifiConnectionStatistics;
+import android.net.wifi.WifiActivityEnergyInfo;
+
 import android.net.DhcpInfo;
+
 
 import android.os.Messenger;
 import android.os.WorkSource;
@@ -31,7 +39,13 @@ import android.os.WorkSource;
  */
 interface IWifiManager
 {
+    int getSupportedFeatures();
+
+    WifiActivityEnergyInfo reportActivityInfo();
+
     List<WifiConfiguration> getConfiguredNetworks();
+
+    List<WifiConfiguration> getPrivilegedConfiguredNetworks();
 
     int addOrUpdateNetwork(in WifiConfiguration config);
 
@@ -43,9 +57,13 @@ interface IWifiManager
 
     boolean pingSupplicant();
 
-    void startScan(boolean forceActive);
+    List<WifiChannel> getChannelList();
 
-    List<ScanResult> getScanResults();
+    void startScan(in ScanSettings requested, in WorkSource ws);
+
+    void startLocationRestrictedScan(in WorkSource ws);
+
+    List<ScanResult> getScanResults(String callingPackage);
 
     void disconnect();
 
@@ -70,6 +88,8 @@ interface IWifiManager
     boolean saveConfiguration();
 
     DhcpInfo getDhcpInfo();
+
+    boolean isScanAlwaysAvailable();
 
     boolean acquireWifiLock(IBinder lock, int lockType, String tag, in WorkSource ws);
 
@@ -103,8 +123,38 @@ interface IWifiManager
 
     Messenger getWifiServiceMessenger();
 
-    Messenger getWifiStateMachineMessenger();
-
     String getConfigFile();
+
+    void enableTdls(String remoteIPAddress, boolean enable);
+
+    void enableTdlsWithMacAddress(String remoteMacAddress, boolean enable);
+
+    boolean requestBatchedScan(in BatchedScanSettings requested, IBinder binder, in WorkSource ws);
+
+    void stopBatchedScan(in BatchedScanSettings requested);
+
+    List<BatchedScanResult> getBatchedScanResults(String callingPackage);
+
+    boolean isBatchedScanSupported();
+
+    void pollBatchedScan();
+
+    String getWpsNfcConfigurationToken(int netId);
+
+    void enableVerboseLogging(int verbose);
+
+    int getVerboseLoggingLevel();
+
+    int getAggressiveHandover();
+
+    void enableAggressiveHandover(int enabled);
+
+    int getAllowScansWithTraffic();
+
+    void setAllowScansWithTraffic(int enabled);
+
+    WifiConnectionStatistics getConnectionStatistics();
+
+    void disableEphemeralNetwork(String SSID);
 }
 

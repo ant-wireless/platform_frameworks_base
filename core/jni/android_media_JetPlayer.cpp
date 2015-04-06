@@ -24,7 +24,7 @@
 
 #include <jni.h>
 #include <JNIHelp.h>
-#include <android_runtime/AndroidRuntime.h>
+#include "core_jni_helpers.h"
 
 #include <utils/Log.h>
 #include <media/JetPlayer.h>
@@ -87,12 +87,12 @@ android_media_JetPlayer_setup(JNIEnv *env, jobject thiz, jobject weak_this,
     if (result==EAS_SUCCESS) {
         // save our newly created C++ JetPlayer in the "nativePlayerInJavaObj" field
         // of the Java object (in mNativePlayerInJavaObj)
-        env->SetIntField(thiz, javaJetPlayerFields.nativePlayerInJavaObj, (int)lpJet);
+        env->SetLongField(thiz, javaJetPlayerFields.nativePlayerInJavaObj, (jlong)lpJet);
         return JNI_TRUE;
     } else {
         ALOGE("android_media_JetPlayer_setup(): initialization failed with EAS error code %d", (int)result);
         delete lpJet;
-        env->SetIntField(weak_this, javaJetPlayerFields.nativePlayerInJavaObj, 0);
+        env->SetLongField(weak_this, javaJetPlayerFields.nativePlayerInJavaObj, 0);
         return JNI_FALSE;
     }
 }
@@ -103,7 +103,7 @@ static void
 android_media_JetPlayer_finalize(JNIEnv *env, jobject thiz)
 {
     ALOGV("android_media_JetPlayer_finalize(): entering.");
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
     if (lpJet != NULL) {
         lpJet->release();
@@ -119,7 +119,7 @@ static void
 android_media_JetPlayer_release(JNIEnv *env, jobject thiz)
 {
     android_media_JetPlayer_finalize(env, thiz);
-    env->SetIntField(thiz, javaJetPlayerFields.nativePlayerInJavaObj, 0);
+    env->SetLongField(thiz, javaJetPlayerFields.nativePlayerInJavaObj, 0);
     ALOGV("android_media_JetPlayer_release() done");
 }
 
@@ -128,11 +128,12 @@ android_media_JetPlayer_release(JNIEnv *env, jobject thiz)
 static jboolean
 android_media_JetPlayer_loadFromFile(JNIEnv *env, jobject thiz, jstring path)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for openFile()");
+        return JNI_FALSE;
     }
 
     // set up event callback function
@@ -164,11 +165,12 @@ static jboolean
 android_media_JetPlayer_loadFromFileD(JNIEnv *env, jobject thiz,
     jobject fileDescriptor, jlong offset, jlong length)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for openFile()");
+        return JNI_FALSE;
     }
 
     // set up event callback function
@@ -193,11 +195,12 @@ android_media_JetPlayer_loadFromFileD(JNIEnv *env, jobject thiz,
 static jboolean
 android_media_JetPlayer_closeFile(JNIEnv *env, jobject thiz)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for closeFile()");
+        return JNI_FALSE;
     }
 
     if (lpJet->closeFile()==EAS_SUCCESS) {
@@ -214,11 +217,12 @@ android_media_JetPlayer_closeFile(JNIEnv *env, jobject thiz)
 static jboolean
 android_media_JetPlayer_play(JNIEnv *env, jobject thiz)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for play()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result = lpJet->play();
@@ -237,11 +241,12 @@ android_media_JetPlayer_play(JNIEnv *env, jobject thiz)
 static jboolean
 android_media_JetPlayer_pause(JNIEnv *env, jobject thiz)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for pause()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result = lpJet->pause();
@@ -266,11 +271,12 @@ android_media_JetPlayer_queueSegment(JNIEnv *env, jobject thiz,
         jint segmentNum, jint libNum, jint repeatCount, jint transpose, jint muteFlags,
         jbyte userID)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for queueSegment()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result
@@ -292,11 +298,12 @@ android_media_JetPlayer_queueSegmentMuteArray(JNIEnv *env, jobject thiz,
         jint segmentNum, jint libNum, jint repeatCount, jint transpose, jbooleanArray muteArray,
         jbyte userID)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for queueSegmentMuteArray()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result=EAS_FAILURE;
@@ -337,11 +344,12 @@ static jboolean
 android_media_JetPlayer_setMuteFlags(JNIEnv *env, jobject thiz,
          jint muteFlags /*unsigned?*/, jboolean bSync)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for setMuteFlags()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result;
@@ -361,11 +369,12 @@ static jboolean
 android_media_JetPlayer_setMuteArray(JNIEnv *env, jobject thiz,
         jbooleanArray muteArray, jboolean bSync)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for setMuteArray()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result=EAS_FAILURE;
@@ -406,11 +415,12 @@ static jboolean
 android_media_JetPlayer_setMuteFlag(JNIEnv *env, jobject thiz,
          jint trackId, jboolean muteFlag, jboolean bSync)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for setMuteFlag()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result;
@@ -431,11 +441,12 @@ android_media_JetPlayer_setMuteFlag(JNIEnv *env, jobject thiz,
 static jboolean
 android_media_JetPlayer_triggerClip(JNIEnv *env, jobject thiz, jint clipId)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for triggerClip()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result;
@@ -455,11 +466,12 @@ android_media_JetPlayer_triggerClip(JNIEnv *env, jobject thiz, jint clipId)
 static jboolean
 android_media_JetPlayer_clearQueue(JNIEnv *env, jobject thiz)
 {
-    JetPlayer *lpJet = (JetPlayer *)env->GetIntField(
+    JetPlayer *lpJet = (JetPlayer *)env->GetLongField(
         thiz, javaJetPlayerFields.nativePlayerInJavaObj);
-    if (lpJet == NULL ) {
+    if (lpJet == NULL) {
         jniThrowException(env, "java/lang/IllegalStateException",
             "Unable to retrieve JetPlayer pointer for clearQueue()");
+        return JNI_FALSE;
     }
 
     EAS_RESULT result = lpJet->clearQueue();
@@ -505,36 +517,22 @@ static JNINativeMethod gMethods[] = {
 
 int register_android_media_JetPlayer(JNIEnv *env)
 {
-    jclass jetPlayerClass = NULL;
     javaJetPlayerFields.jetClass = NULL;
     javaJetPlayerFields.postNativeEventInJava = NULL;
     javaJetPlayerFields.nativePlayerInJavaObj = NULL;
 
     // Get the JetPlayer java class
-    jetPlayerClass = env->FindClass(kClassPathName);
-    if (jetPlayerClass == NULL) {
-        ALOGE("Can't find %s", kClassPathName);
-        return -1;
-    }
-    javaJetPlayerFields.jetClass = (jclass)env->NewGlobalRef(jetPlayerClass);
+    jclass jetPlayerClass = FindClassOrDie(env, kClassPathName);
+    javaJetPlayerFields.jetClass = MakeGlobalRefOrDie(env, jetPlayerClass);
 
     // Get the mNativePlayerInJavaObj variable field
-    javaJetPlayerFields.nativePlayerInJavaObj = env->GetFieldID(
-            jetPlayerClass,
-            JAVA_NATIVEJETPLAYERINJAVAOBJ_FIELD_NAME, "I");
-    if (javaJetPlayerFields.nativePlayerInJavaObj == NULL) {
-        ALOGE("Can't find JetPlayer.%s", JAVA_NATIVEJETPLAYERINJAVAOBJ_FIELD_NAME);
-        return -1;
-    }
+    javaJetPlayerFields.nativePlayerInJavaObj = GetFieldIDOrDie(env,
+            jetPlayerClass, JAVA_NATIVEJETPLAYERINJAVAOBJ_FIELD_NAME, "J");
 
     // Get the callback to post events from this native code to Java
-    javaJetPlayerFields.postNativeEventInJava = env->GetStaticMethodID(javaJetPlayerFields.jetClass,
-            JAVA_NATIVEJETPOSTEVENT_CALLBACK_NAME, "(Ljava/lang/Object;III)V");
-    if (javaJetPlayerFields.postNativeEventInJava == NULL) {
-        ALOGE("Can't find Jet.%s", JAVA_NATIVEJETPOSTEVENT_CALLBACK_NAME);
-        return -1;
-    }
+    javaJetPlayerFields.postNativeEventInJava = GetStaticMethodIDOrDie(env,
+            javaJetPlayerFields.jetClass, JAVA_NATIVEJETPOSTEVENT_CALLBACK_NAME,
+            "(Ljava/lang/Object;III)V");
 
-    return AndroidRuntime::registerNativeMethods(env,
-            kClassPathName, gMethods, NELEM(gMethods));
+    return RegisterMethodsOrDie(env, kClassPathName, gMethods, NELEM(gMethods));
 }

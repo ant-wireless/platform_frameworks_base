@@ -643,7 +643,8 @@ public class MyPrefsBackupAgent extends BackupAgentHelper {
     // Allocate a helper and add it to the backup agent
     &#64;Override
     public void onCreate() {
-        SharedPreferencesBackupHelper helper = new SharedPreferencesBackupHelper(this, PREFS);
+        SharedPreferencesBackupHelper helper =
+                new SharedPreferencesBackupHelper(this, PREFS);
         addHelper(PREFS_BACKUP_KEY, helper);
     }
 }
@@ -680,7 +681,7 @@ android.app.backup.BackupAgentHelper} looks like this:</p>
 
 <pre>
 public class MyFileBackupAgent extends BackupAgentHelper {
-    // The name of the SharedPreferences file
+    // The name of the file
     static final String TOP_SCORES = "scores";
     static final String PLAYER_STATS = "stats";
 
@@ -688,8 +689,10 @@ public class MyFileBackupAgent extends BackupAgentHelper {
     static final String FILES_BACKUP_KEY = "myfiles";
 
     // Allocate a helper and add it to the backup agent
-    void onCreate() {
-        FileBackupHelper helper = new FileBackupHelper(this, TOP_SCORES, PLAYER_STATS);
+    &#64;Override
+    public void onCreate() {
+        FileBackupHelper helper = new FileBackupHelper(this,
+                TOP_SCORES, PLAYER_STATS);
         addHelper(FILES_BACKUP_KEY, helper);
     }
 }
@@ -899,8 +902,9 @@ Play built in.</li>
 {@code tools/} path:
 <pre class="no-pretty-print">adb shell bmgr enable true</pre>
       </li>
-      <li>If using a device, open the system <b>Settings</b>, select <b>Privacy</b>, then enable
-<b>Back up my data</b> and <b>Automatic restore</b>.
+      <li>If using a device, open the system <b>Settings</b>, select
+      <b>Backup & reset</b>, then enable
+      <b>Back up my data</b> and <b>Automatic restore</b>.</li>
     </ul>
   </li>
   <li>Open your application and initialize some data

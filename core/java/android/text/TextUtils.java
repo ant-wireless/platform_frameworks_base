@@ -19,6 +19,8 @@ package android.text;
 import android.content.res.Resources;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.SystemProperties;
+import android.provider.Settings;
 import android.text.style.AbsoluteSizeSpan;
 import android.text.style.AlignmentSpan;
 import android.text.style.BackgroundColorSpan;
@@ -27,6 +29,7 @@ import android.text.style.CharacterStyle;
 import android.text.style.EasyEditSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.LeadingMarginSpan;
+import android.text.style.LocaleSpan;
 import android.text.style.MetricAffectingSpan;
 import android.text.style.QuoteSpan;
 import android.text.style.RelativeSizeSpan;
@@ -40,19 +43,32 @@ import android.text.style.SuggestionRangeSpan;
 import android.text.style.SuggestionSpan;
 import android.text.style.SuperscriptSpan;
 import android.text.style.TextAppearanceSpan;
+import android.text.style.TtsSpan;
 import android.text.style.TypefaceSpan;
 import android.text.style.URLSpan;
 import android.text.style.UnderlineSpan;
+import android.util.Log;
 import android.util.Printer;
+import android.view.View;
 
 import com.android.internal.R;
 import com.android.internal.util.ArrayUtils;
 
+import libcore.icu.ICU;
+
 import java.lang.reflect.Array;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 public class TextUtils {
+    private static final String TAG = "TextUtils";
+
+    /* package */ static final char[] ELLIPSIS_NORMAL = { '\u2026' }; // this is "..."
+    private static final String ELLIPSIS_STRING = new String(ELLIPSIS_NORMAL);
+
+    /* package */ static final char[] ELLIPSIS_TWO_DOTS = { '\u2025' }; // this is ".."
+    private static final String ELLIPSIS_TWO_DOTS_STRING = new String(ELLIPSIS_TWO_DOTS);
 
     private TextUtils() { /* cannot be instantiated */ }
 
@@ -220,7 +236,12 @@ public class TextUtils {
     public static boolean regionMatches(CharSequence one, int toffset,
                                         CharSequence two, int ooffset,
                                         int len) {
-        char[] temp = obtain(2 * len);
+        int tempLen = 2 * len;
+        if (tempLen < len) {
+            // Integer overflow; len is unreasonably large
+            throw new IndexOutOfBoundsException();
+        }
+        char[] temp = obtain(tempLen);
 
         getChars(one, toffset, toffset + len, temp, 0);
         getChars(two, ooffset, ooffset + len, temp, len);
@@ -546,6 +567,8 @@ public class TextUtils {
     /** @hide */
     public static final int ALIGNMENT_SPAN = 1;
     /** @hide */
+    public static final int FIRST_SPAN = ALIGNMENT_SPAN;
+    /** @hide */
     public static final int FOREGROUND_COLOR_SPAN = 2;
     /** @hide */
     public static final int RELATIVE_SIZE_SPAN = 3;
@@ -587,6 +610,12 @@ public class TextUtils {
     public static final int SUGGESTION_RANGE_SPAN = 21;
     /** @hide */
     public static final int EASY_EDIT_SPAN = 22;
+    /** @hide */
+    public static final int LOCALE_SPAN = 23;
+    /** @hide */
+    public static final int TTS_SPAN = 24;
+    /** @hide */
+    public static final int LAST_SPAN = TTS_SPAN;
 
     /**
      * Flatten a CharSequence and whatever styles can be copied across processes
@@ -616,9 +645,16 @@ public class TextUtils {
 
                 if (prop instanceof ParcelableSpan) {
                     ParcelableSpan ps = (ParcelableSpan)prop;
-                    p.writeInt(ps.getSpanTypeId());
-                    ps.writeToParcel(p, parcelableFlags);
-                    writeWhere(p, sp, o);
+                    int spanTypeId = ps.getSpanTypeId();
+                    if (spanTypeId < FIRST_SPAN || spanTypeId > LAST_SPAN) {
+                        Log.e(TAG, "external class \"" + ps.getClass().getSimpleName()
+                                + "\" is attempting to use the frameworks-only ParcelableSpan"
+                                + " interface");
+                    } else {
+                        p.writeInt(spanTypeId);
+                        ps.writeToParcel(p, parcelableFlags);
+                        writeWhere(p, sp, o);
+                    }
                 }
             }
 
@@ -751,7 +787,15 @@ public class TextUtils {
                     break;
 
                 case EASY_EDIT_SPAN:
-                    readSpan(p, sp, new EasyEditSpan());
+                    readSpan(p, sp, new EasyEditSpan(p));
+                    break;
+
+                case LOCALE_SPAN:
+                    readSpan(p, sp, new LocaleSpan(p));
+                    break;
+
+                case TTS_SPAN:
+                    readSpan(p, sp, new TtsSpan(p));
                     break;
 
                 default:
@@ -1044,7 +1088,7 @@ public class TextUtils {
                                          EllipsizeCallback callback) {
         return ellipsize(text, paint, avail, where, preserveLength, callback,
                 TextDirectionHeuristics.FIRSTSTRONG_LTR,
-                (where == TruncateAt.END_SMALL) ? ELLIPSIS_TWO_DOTS : ELLIPSIS_NORMAL);
+                (where == TruncateAt.END_SMALL) ? ELLIPSIS_TWO_DOTS_STRING : ELLIPSIS_STRING);
     }
 
     /**
@@ -1290,7 +1334,7 @@ public class TextUtils {
         }
 
         if (buf == null || buf.length < len)
-            buf = new char[ArrayUtils.idealCharArraySize(len)];
+            buf = ArrayUtils.newUnpaddedCharArray(len);
 
         return buf;
     }
@@ -1694,15 +1738,66 @@ public class TextUtils {
         return (int) (range & 0x00000000FFFFFFFFL);
     }
 
+    /**
+     * Return the layout direction for a given Locale
+     *
+     * @param locale the Locale for which we want the layout direction. Can be null.
+     * @return the layout direction. This may be one of:
+     * {@link android.view.View#LAYOUT_DIRECTION_LTR} or
+     * {@link android.view.View#LAYOUT_DIRECTION_RTL}.
+     *
+     * Be careful: this code will need to be updated when vertical scripts will be supported
+     */
+    public static int getLayoutDirectionFromLocale(Locale locale) {
+        if (locale != null && !locale.equals(Locale.ROOT)) {
+            final String scriptSubtag = ICU.addLikelySubtags(locale).getScript();
+            if (scriptSubtag == null) return getLayoutDirectionFromFirstChar(locale);
+
+            if (scriptSubtag.equalsIgnoreCase(ARAB_SCRIPT_SUBTAG) ||
+                    scriptSubtag.equalsIgnoreCase(HEBR_SCRIPT_SUBTAG)) {
+                return View.LAYOUT_DIRECTION_RTL;
+            }
+        }
+        // If forcing into RTL layout mode, return RTL as default, else LTR
+        return SystemProperties.getBoolean(Settings.Global.DEVELOPMENT_FORCE_RTL, false)
+                ? View.LAYOUT_DIRECTION_RTL
+                : View.LAYOUT_DIRECTION_LTR;
+    }
+
+    /**
+     * Fallback algorithm to detect the locale direction. Rely on the fist char of the
+     * localized locale name. This will not work if the localized locale name is in English
+     * (this is the case for ICU 4.4 and "Urdu" script)
+     *
+     * @param locale
+     * @return the layout direction. This may be one of:
+     * {@link View#LAYOUT_DIRECTION_LTR} or
+     * {@link View#LAYOUT_DIRECTION_RTL}.
+     *
+     * Be careful: this code will need to be updated when vertical scripts will be supported
+     *
+     * @hide
+     */
+    private static int getLayoutDirectionFromFirstChar(Locale locale) {
+        switch(Character.getDirectionality(locale.getDisplayName(locale).charAt(0))) {
+            case Character.DIRECTIONALITY_RIGHT_TO_LEFT:
+            case Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC:
+                return View.LAYOUT_DIRECTION_RTL;
+
+            case Character.DIRECTIONALITY_LEFT_TO_RIGHT:
+            default:
+                return View.LAYOUT_DIRECTION_LTR;
+        }
+    }
+
     private static Object sLock = new Object();
+
     private static char[] sTemp = null;
 
     private static String[] EMPTY_STRING_ARRAY = new String[]{};
 
     private static final char ZWNBS_CHAR = '\uFEFF';
 
-    private static final String ELLIPSIS_NORMAL = Resources.getSystem().getString(
-            R.string.ellipsis);
-    private static final String ELLIPSIS_TWO_DOTS = Resources.getSystem().getString(
-            R.string.ellipsis_two_dots);
+    private static String ARAB_SCRIPT_SUBTAG = "Arab";
+    private static String HEBR_SCRIPT_SUBTAG = "Hebr";
 }

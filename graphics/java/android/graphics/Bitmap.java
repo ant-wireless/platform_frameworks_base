@@ -16,9 +16,12 @@
 
 package android.graphics;
 
+import android.annotation.NonNull;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.Trace;
 import android.util.DisplayMetrics;
+import dalvik.system.VMRuntime;
 
 import java.io.OutputStream;
 import java.nio.Buffer;
@@ -27,7 +30,6 @@ import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 
 public final class Bitmap implements Parcelable {
-
     /**
      * Indicates that the bitmap was created for an unknown pixel density.
      *
@@ -42,29 +44,40 @@ public final class Bitmap implements Parcelable {
      * 
      * @hide
      */
-    public final int mNativeBitmap;
+    public final long mNativeBitmap;
 
     /**
      * Backing buffer for the Bitmap.
-     * Made public for quick access from drawing methods -- do NOT modify
-     * from outside this class.
-     *
-     * @hide
      */
-    public byte[] mBuffer;
+    private byte[] mBuffer;
 
     @SuppressWarnings({"FieldCanBeLocal", "UnusedDeclaration"}) // Keep to finalize native resources
     private final BitmapFinalizer mFinalizer;
 
     private final boolean mIsMutable;
-    private byte[] mNinePatchChunk;   // may be null
-    private int[] mLayoutBounds;   // may be null
-    private int mWidth = -1;
-    private int mHeight = -1;
+
+    /**
+     * Represents whether the Bitmap's content is requested to be pre-multiplied.
+     * Note that isPremultiplied() does not directly return this value, because
+     * isPremultiplied() may never return true for a 565 Bitmap or a bitmap
+     * without alpha.
+     *
+     * setPremultiplied() does directly set the value so that setConfig() and
+     * setPremultiplied() aren't order dependent, despite being setters.
+     *
+     * The native bitmap's premultiplication state is kept up to date by
+     * pushing down this preference for every config change.
+     */
+    private boolean mRequestPremultiplied;
+
+    private byte[] mNinePatchChunk; // may be null
+    private NinePatch.InsetStruct mNinePatchInsets; // may be null
+    private int mWidth;
+    private int mHeight;
     private boolean mRecycled;
 
     // Package-scoped for fast access.
-    /*package*/ int mDensity = sDefaultDensity = getDefaultDensity();
+    int mDensity = getDefaultDensity();
 
     private static volatile Matrix sScaleMatrix;
 
@@ -78,53 +91,56 @@ public final class Bitmap implements Parcelable {
     public static void setDefaultDensity(int density) {
         sDefaultDensity = density;
     }
-    
-    /*package*/ static int getDefaultDensity() {
+
+    static int getDefaultDensity() {
         if (sDefaultDensity >= 0) {
             return sDefaultDensity;
         }
+        //noinspection deprecation
         sDefaultDensity = DisplayMetrics.DENSITY_DEVICE;
         return sDefaultDensity;
     }
-    
-    /**
-     * @noinspection UnusedDeclaration
-     */
-    /*  Private constructor that must received an already allocated native
-        bitmap int (pointer).
-
-        This can be called from JNI code.
-    */
-    /*package*/ Bitmap(int nativeBitmap, byte[] buffer, boolean isMutable, byte[] ninePatchChunk,
-            int density) {
-        this(nativeBitmap, buffer, isMutable, ninePatchChunk, null, density);
-    }
 
     /**
-     * @noinspection UnusedDeclaration
+     * Private constructor that must received an already allocated native bitmap
+     * int (pointer).
      */
-    /*  Private constructor that must received an already allocated native
-        bitmap int (pointer).
-
-        This can be called from JNI code.
-    */
-    /*package*/ Bitmap(int nativeBitmap, byte[] buffer, boolean isMutable, byte[] ninePatchChunk,
-            int[] layoutBounds, int density) {
+    @SuppressWarnings({"UnusedDeclaration"}) // called from JNI
+    Bitmap(long nativeBitmap, byte[] buffer, int width, int height, int density,
+            boolean isMutable, boolean requestPremultiplied,
+            byte[] ninePatchChunk, NinePatch.InsetStruct ninePatchInsets) {
         if (nativeBitmap == 0) {
             throw new RuntimeException("internal error: native bitmap is 0");
         }
 
+        mWidth = width;
+        mHeight = height;
+        mIsMutable = isMutable;
+        mRequestPremultiplied = requestPremultiplied;
         mBuffer = buffer;
+
         // we delete this in our finalizer
         mNativeBitmap = nativeBitmap;
-        mFinalizer = new BitmapFinalizer(nativeBitmap);
 
-        mIsMutable = isMutable;
         mNinePatchChunk = ninePatchChunk;
-        mLayoutBounds = layoutBounds;
+        mNinePatchInsets = ninePatchInsets;
         if (density >= 0) {
             mDensity = density;
         }
+
+        int nativeAllocationByteCount = buffer == null ? getByteCount() : 0;
+        mFinalizer = new BitmapFinalizer(nativeBitmap, nativeAllocationByteCount);
+    }
+
+    /**
+     * Native bitmap has been reconfigured, so set premult and cached
+     * width/height values
+     */
+    @SuppressWarnings({"UnusedDeclaration"}) // called from JNI
+    void reinit(int width, int height, boolean requestPremultiplied) {
+        mWidth = width;
+        mHeight = height;
+        mRequestPremultiplied = requestPremultiplied;
     }
 
     /**
@@ -167,7 +183,104 @@ public final class Bitmap implements Parcelable {
     public void setDensity(int density) {
         mDensity = density;
     }
-    
+
+    /**
+     * <p>Modifies the bitmap to have a specified width, height, and {@link
+     * Config}, without affecting the underlying allocation backing the bitmap.
+     * Bitmap pixel data is not re-initialized for the new configuration.</p>
+     *
+     * <p>This method can be used to avoid allocating a new bitmap, instead
+     * reusing an existing bitmap's allocation for a new configuration of equal
+     * or lesser size. If the Bitmap's allocation isn't large enough to support
+     * the new configuration, an IllegalArgumentException will be thrown and the
+     * bitmap will not be modified.</p>
+     *
+     * <p>The result of {@link #getByteCount()} will reflect the new configuration,
+     * while {@link #getAllocationByteCount()} will reflect that of the initial
+     * configuration.</p>
+     *
+     * <p>Note: This may change this result of hasAlpha(). When converting to 565,
+     * the new bitmap will always be considered opaque. When converting from 565,
+     * the new bitmap will be considered non-opaque, and will respect the value
+     * set by setPremultiplied().</p>
+     *
+     * <p>WARNING: This method should NOT be called on a bitmap currently used
+     * by the view system. It does not make guarantees about how the underlying
+     * pixel buffer is remapped to the new config, just that the allocation is
+     * reused. Additionally, the view system does not account for bitmap
+     * properties being modifying during use, e.g. while attached to
+     * drawables.</p>
+     *
+     * @see #setWidth(int)
+     * @see #setHeight(int)
+     * @see #setConfig(Config)
+     */
+    public void reconfigure(int width, int height, Config config) {
+        checkRecycled("Can't call reconfigure() on a recycled bitmap");
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("width and height must be > 0");
+        }
+        if (!isMutable()) {
+            throw new IllegalStateException("only mutable bitmaps may be reconfigured");
+        }
+        if (mBuffer == null) {
+            throw new IllegalStateException("native-backed bitmaps may not be reconfigured");
+        }
+
+        nativeReconfigure(mNativeBitmap, width, height, config.nativeInt, mBuffer.length,
+                mRequestPremultiplied);
+        mWidth = width;
+        mHeight = height;
+    }
+
+    /**
+     * <p>Convenience method for calling {@link #reconfigure(int, int, Config)}
+     * with the current height and config.</p>
+     *
+     * <p>WARNING: this method should not be used on bitmaps currently used by
+     * the view system, see {@link #reconfigure(int, int, Config)} for more
+     * details.</p>
+     *
+     * @see #reconfigure(int, int, Config)
+     * @see #setHeight(int)
+     * @see #setConfig(Config)
+     */
+    public void setWidth(int width) {
+        reconfigure(width, getHeight(), getConfig());
+    }
+
+    /**
+     * <p>Convenience method for calling {@link #reconfigure(int, int, Config)}
+     * with the current width and config.</p>
+     *
+     * <p>WARNING: this method should not be used on bitmaps currently used by
+     * the view system, see {@link #reconfigure(int, int, Config)} for more
+     * details.</p>
+     *
+     * @see #reconfigure(int, int, Config)
+     * @see #setWidth(int)
+     * @see #setConfig(Config)
+     */
+    public void setHeight(int height) {
+        reconfigure(getWidth(), height, getConfig());
+    }
+
+    /**
+     * <p>Convenience method for calling {@link #reconfigure(int, int, Config)}
+     * with the current height and width.</p>
+     *
+     * <p>WARNING: this method should not be used on bitmaps currently used by
+     * the view system, see {@link #reconfigure(int, int, Config)} for more
+     * details.</p>
+     *
+     * @see #reconfigure(int, int, Config)
+     * @see #setWidth(int)
+     * @see #setHeight(int)
+     */
+    public void setConfig(Config config) {
+        reconfigure(getWidth(), getHeight(), config);
+    }
+
     /**
      * Sets the nine patch chunk.
      *
@@ -177,16 +290,6 @@ public final class Bitmap implements Parcelable {
      */
     public void setNinePatchChunk(byte[] chunk) {
         mNinePatchChunk = chunk;
-    }
-
-    /**
-     * Sets the layout bounds as an array of left, top, right, bottom integers
-     * @param bounds the array containing the padding values
-     *
-     * @hide
-     */
-    public void setLayoutBounds(int[] bounds) {
-        mLayoutBounds = bounds;
     }
 
     /**
@@ -201,10 +304,15 @@ public final class Bitmap implements Parcelable {
      * there are no more references to this bitmap.
      */
     public void recycle() {
-        if (!mRecycled) {
-            mBuffer = null;
-            nativeRecycle(mNativeBitmap);
-            mNinePatchChunk = null;
+        if (!mRecycled && mFinalizer.mNativeBitmap != 0) {
+            if (nativeRecycle(mNativeBitmap)) {
+                // return value indicates whether native pixel object was actually recycled.
+                // false indicates that it is still in use at the native level and these
+                // objects should not be collected now. They will be collected later when the
+                // Bitmap itself is collected.
+                mBuffer = null;
+                mNinePatchChunk = null;
+            }
             mRecycled = true;
         }
     }
@@ -284,7 +392,7 @@ public final class Bitmap implements Parcelable {
          * No color information is stored.
          * With this configuration, each pixel requires 1 byte of memory.
          */
-        ALPHA_8     (2),
+        ALPHA_8     (1),
 
         /**
          * Each pixel is stored on 2 bytes and only the RGB channels are
@@ -300,7 +408,7 @@ public final class Bitmap implements Parcelable {
          * This configuration may be useful when using opaque bitmaps
          * that do not require high color fidelity.
          */
-        RGB_565     (4),
+        RGB_565     (3),
 
         /**
          * Each pixel is stored on 2 bytes. The three RGB color channels
@@ -313,12 +421,16 @@ public final class Bitmap implements Parcelable {
          * 
          * It is recommended to use {@link #ARGB_8888} instead of this
          * configuration.
+         *
+         * Note: as of {@link android.os.Build.VERSION_CODES#KITKAT},
+         * any bitmap created with this configuration will be created
+         * using {@link #ARGB_8888} instead.
          * 
          * @deprecated Because of the poor quality of this configuration,
          *             it is advised to use {@link #ARGB_8888} instead.
          */
         @Deprecated
-        ARGB_4444   (5),
+        ARGB_4444   (4),
 
         /**
          * Each pixel is stored on 4 bytes. Each channel (RGB and alpha
@@ -328,13 +440,13 @@ public final class Bitmap implements Parcelable {
          * This configuration is very flexible and offers the best
          * quality. It should be used whenever possible.
          */
-        ARGB_8888   (6);
+        ARGB_8888   (5);
 
         final int nativeInt;
 
         @SuppressWarnings({"deprecation"})
         private static Config sConfigs[] = {
-            null, null, ALPHA_8, null, RGB_565, ARGB_4444, ARGB_8888
+            null, ALPHA_8, null, RGB_565, ARGB_4444, ARGB_8888
         };
         
         Config(int ni) {
@@ -347,11 +459,18 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
-     * Copy the bitmap's pixels into the specified buffer (allocated by the
+     * <p>Copy the bitmap's pixels into the specified buffer (allocated by the
      * caller). An exception is thrown if the buffer is not large enough to
      * hold all of the pixels (taking into account the number of bytes per
      * pixel) or if the Buffer subclass is not one of the support types
-     * (ByteBuffer, ShortBuffer, IntBuffer).
+     * (ByteBuffer, ShortBuffer, IntBuffer).</p>
+     * <p>The content of the bitmap is copied into the buffer as-is. This means
+     * that if this bitmap stores its pixels pre-multiplied
+     * (see {@link #isPremultiplied()}, the values in the buffer will also be
+     * pre-multiplied.</p>
+     * <p>After this method returns, the current position of the buffer is
+     * updated: the position is incremented by the number of elements written
+     * in the buffer.</p>
      */
     public void copyPixelsToBuffer(Buffer dst) {
         int elements = dst.remaining();
@@ -382,10 +501,14 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
-     * Copy the pixels from the buffer, beginning at the current position,
+     * <p>Copy the pixels from the buffer, beginning at the current position,
      * overwriting the bitmap's pixels. The data in the buffer is not changed
      * in any way (unlike setPixels(), which converts from unpremultipled 32bit
-     * to whatever the bitmap's native format is.
+     * to whatever the bitmap's native format is.</p>
+     * <p>After this method returns, the current position of the buffer is
+     * updated: the position is incremented by the number of elements read from
+     * the buffer. If you need to read the bitmap from the buffer again you must
+     * first rewind the buffer.</p>
      */
     public void copyPixelsFromBuffer(Buffer src) {
         checkRecycled("copyPixelsFromBuffer called on recycled bitmap");
@@ -402,7 +525,7 @@ public final class Bitmap implements Parcelable {
             throw new RuntimeException("unsupported Buffer subclass");
         }
 
-        long bufferBytes = (long)elements << shift;
+        long bufferBytes = (long) elements << shift;
         long bitmapBytes = getByteCount();
 
         if (bufferBytes < bitmapBytes) {
@@ -410,6 +533,11 @@ public final class Bitmap implements Parcelable {
         }
 
         nativeCopyPixelsFromBuffer(mNativeBitmap, src);
+
+        // now update the buffer's position
+        int position = src.position();
+        position += bitmapBytes >> shift;
+        src.position(position);
     }
 
     /**
@@ -428,6 +556,7 @@ public final class Bitmap implements Parcelable {
         checkRecycled("Can't copy a recycled bitmap");
         Bitmap b = nativeCopy(mNativeBitmap, config.nativeInt, isMutable);
         if (b != null) {
+            b.setPremultiplied(mRequestPremultiplied);
             b.mDensity = mDensity;
         }
         return b;
@@ -436,7 +565,7 @@ public final class Bitmap implements Parcelable {
     /**
      * Creates a new bitmap, scaled from an existing bitmap, when possible. If the
      * specified width and height are the same as the current width and height of 
-     * the source btimap, the source bitmap is returned and now new bitmap is
+     * the source bitmap, the source bitmap is returned and no new bitmap is
      * created.
      *
      * @param src       The source bitmap.
@@ -444,6 +573,7 @@ public final class Bitmap implements Parcelable {
      * @param dstHeight The new bitmap's desired height.
      * @param filter    true if the source should be filtered.
      * @return The new scaled bitmap or the source bitmap if no scaling is required.
+     * @throws IllegalArgumentException if width is <= 0, or height is <= 0
      */
     public static Bitmap createScaledBitmap(Bitmap src, int dstWidth, int dstHeight,
             boolean filter) {
@@ -496,6 +626,9 @@ public final class Bitmap implements Parcelable {
      * @param width    The number of pixels in each row
      * @param height   The number of rows
      * @return A copy of a subset of the source bitmap or the source bitmap itself.
+     * @throws IllegalArgumentException if the x, y, width, height values are
+     *         outside of the dimensions of the source bitmap, or width is <= 0,
+     *         or height is <= 0
      */
     public static Bitmap createBitmap(Bitmap source, int x, int y, int width, int height) {
         return createBitmap(source, x, y, width, height, null, false);
@@ -522,7 +655,8 @@ public final class Bitmap implements Parcelable {
      *                   translation.
      * @return A bitmap that represents the specified subset of source
      * @throws IllegalArgumentException if the x, y, width, height values are
-     *         outside of the dimensions of the source bitmap.
+     *         outside of the dimensions of the source bitmap, or width is <= 0,
+     *         or height is <= 0
      */
     public static Bitmap createBitmap(Bitmap source, int x, int y, int width, int height,
             Matrix m, boolean filter) {
@@ -595,11 +729,13 @@ public final class Bitmap implements Parcelable {
                 paint.setAntiAlias(true);
             }
         }
-        
+
         // The new bitmap was created from a known bitmap source so assume that
         // they use the same density
         bitmap.mDensity = source.mDensity;
-        
+        bitmap.setHasAlpha(source.hasAlpha());
+        bitmap.setPremultiplied(source.mRequestPremultiplied);
+
         canvas.setBitmap(bitmap);
         canvas.drawBitmap(source, srcR, dstR, paint);
         canvas.setBitmap(null);
@@ -622,6 +758,22 @@ public final class Bitmap implements Parcelable {
 
     /**
      * Returns a mutable bitmap with the specified width and height.  Its
+     * initial density is determined from the given {@link DisplayMetrics}.
+     *
+     * @param display  Display metrics for the display this bitmap will be
+     *                 drawn on.
+     * @param width    The width of the bitmap
+     * @param height   The height of the bitmap
+     * @param config   The bitmap config to create.
+     * @throws IllegalArgumentException if the width or height are <= 0
+     */
+    public static Bitmap createBitmap(DisplayMetrics display, int width,
+            int height, Config config) {
+        return createBitmap(display, width, height, config, true);
+    }
+
+    /**
+     * Returns a mutable bitmap with the specified width and height.  Its
      * initial density is as per {@link #getDensity}.
      *
      * @param width    The width of the bitmap
@@ -634,19 +786,40 @@ public final class Bitmap implements Parcelable {
      * @throws IllegalArgumentException if the width or height are <= 0
      */
     private static Bitmap createBitmap(int width, int height, Config config, boolean hasAlpha) {
+        return createBitmap(null, width, height, config, hasAlpha);
+    }
+
+    /**
+     * Returns a mutable bitmap with the specified width and height.  Its
+     * initial density is determined from the given {@link DisplayMetrics}.
+     *
+     * @param display  Display metrics for the display this bitmap will be
+     *                 drawn on.
+     * @param width    The width of the bitmap
+     * @param height   The height of the bitmap
+     * @param config   The bitmap config to create.
+     * @param hasAlpha If the bitmap is ARGB_8888 this flag can be used to mark the
+     *                 bitmap as opaque. Doing so will clear the bitmap in black
+     *                 instead of transparent.  
+     * 
+     * @throws IllegalArgumentException if the width or height are <= 0
+     */
+    private static Bitmap createBitmap(DisplayMetrics display, int width, int height,
+            Config config, boolean hasAlpha) {
         if (width <= 0 || height <= 0) {
             throw new IllegalArgumentException("width and height must be > 0");
         }
         Bitmap bm = nativeCreate(null, 0, width, width, height, config.nativeInt, true);
+        if (display != null) {
+            bm.mDensity = display.densityDpi;
+        }
+        bm.setHasAlpha(hasAlpha);
         if (config == Config.ARGB_8888 && !hasAlpha) {
             nativeErase(bm.mNativeBitmap, 0xff000000);
-            nativeSetHasAlpha(bm.mNativeBitmap, hasAlpha);
-        } else {
-            // No need to initialize it to zeroes; it is backed by a VM byte array
-            // which is by definition preinitialized to all zeroes.
-            //
-            //nativeErase(bm.mNativeBitmap, 0);
         }
+        // No need to initialize the bitmap to zeroes with other configs;
+        // it is backed by a VM byte array which is by definition preinitialized
+        // to all zeroes.
         return bm;
     }
 
@@ -670,6 +843,31 @@ public final class Bitmap implements Parcelable {
      */
     public static Bitmap createBitmap(int colors[], int offset, int stride,
             int width, int height, Config config) {
+        return createBitmap(null, colors, offset, stride, width, height, config);
+    }
+
+    /**
+     * Returns a immutable bitmap with the specified width and height, with each
+     * pixel value set to the corresponding value in the colors array.  Its
+     * initial density is determined from the given {@link DisplayMetrics}.
+     *
+     * @param display  Display metrics for the display this bitmap will be
+     *                 drawn on.
+     * @param colors   Array of {@link Color} used to initialize the pixels.
+     * @param offset   Number of values to skip before the first color in the
+     *                 array of colors.
+     * @param stride   Number of colors in the array between rows (must be >=
+     *                 width or <= -width).
+     * @param width    The width of the bitmap
+     * @param height   The height of the bitmap
+     * @param config   The bitmap config to create. If the config does not
+     *                 support per-pixel alpha (e.g. RGB_565), then the alpha
+     *                 bytes in the colors[] will be ignored (assumed to be FF)
+     * @throws IllegalArgumentException if the width or height are <= 0, or if
+     *         the color array's length is less than the number of pixels.
+     */
+    public static Bitmap createBitmap(DisplayMetrics display, int colors[],
+            int offset, int stride, int width, int height, Config config) {
 
         checkWidthHeight(width, height);
         if (Math.abs(stride) < width) {
@@ -684,8 +882,12 @@ public final class Bitmap implements Parcelable {
         if (width <= 0 || height <= 0) {
             throw new IllegalArgumentException("width and height must be > 0");
         }
-        return nativeCreate(colors, offset, stride, width, height,
+        Bitmap bm = nativeCreate(colors, offset, stride, width, height,
                             config.nativeInt, false);
+        if (display != null) {
+            bm.mDensity = display.densityDpi;
+        }
+        return bm;
     }
 
     /**
@@ -704,7 +906,29 @@ public final class Bitmap implements Parcelable {
      *         the color array's length is less than the number of pixels.
      */
     public static Bitmap createBitmap(int colors[], int width, int height, Config config) {
-        return createBitmap(colors, 0, width, width, height, config);
+        return createBitmap(null, colors, 0, width, width, height, config);
+    }
+
+    /**
+     * Returns a immutable bitmap with the specified width and height, with each
+     * pixel value set to the corresponding value in the colors array.  Its
+     * initial density is determined from the given {@link DisplayMetrics}.
+     *
+     * @param display  Display metrics for the display this bitmap will be
+     *                 drawn on.
+     * @param colors   Array of {@link Color} used to initialize the pixels.
+     *                 This array must be at least as large as width * height.
+     * @param width    The width of the bitmap
+     * @param height   The height of the bitmap
+     * @param config   The bitmap config to create. If the config does not
+     *                 support per-pixel alpha (e.g. RGB_565), then the alpha
+     *                 bytes in the colors[] will be ignored (assumed to be FF)
+     * @throws IllegalArgumentException if the width or height are <= 0, or if
+     *         the color array's length is less than the number of pixels.
+     */
+    public static Bitmap createBitmap(DisplayMetrics display, int colors[],
+            int width, int height, Config config) {
+        return createBitmap(display, colors, 0, width, width, height, config);
     }
 
     /**
@@ -716,11 +940,22 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
+     * Populates a rectangle with the bitmap's optical insets.
+     *
+     * @param outInsets Rect to populate with optical insets
      * @hide
-     * @return the layout padding [left, right, top, bottom]
      */
-    public int[] getLayoutBounds() {
-        return mLayoutBounds;
+    public void getOpticalInsets(@NonNull Rect outInsets) {
+        if (mNinePatchInsets == null) {
+            outInsets.setEmpty();
+        } else {
+            outInsets.set(mNinePatchInsets.opticalRect);
+        }
+    }
+
+    /** @hide */
+    public NinePatch.InsetStruct getNinePatchInsets() {
+        return mNinePatchInsets;
     }
 
     /**
@@ -769,25 +1004,84 @@ public final class Bitmap implements Parcelable {
         if (quality < 0 || quality > 100) {
             throw new IllegalArgumentException("quality must be 0..100");
         }
-        return nativeCompress(mNativeBitmap, format.nativeInt, quality,
+        Trace.traceBegin(Trace.TRACE_TAG_RESOURCES, "Bitmap.compress");
+        boolean result = nativeCompress(mNativeBitmap, format.nativeInt, quality,
                               stream, new byte[WORKING_COMPRESS_STORAGE]);
+        Trace.traceEnd(Trace.TRACE_TAG_RESOURCES);
+        return result;
     }
 
     /**
-     * Returns true if the bitmap is marked as mutable (i.e. can be drawn into)
+     * Returns true if the bitmap is marked as mutable (i.e.&nbsp;can be drawn into)
      */
     public final boolean isMutable() {
         return mIsMutable;
     }
 
+    /**
+     * <p>Indicates whether pixels stored in this bitmaps are stored pre-multiplied.
+     * When a pixel is pre-multiplied, the RGB components have been multiplied by
+     * the alpha component. For instance, if the original color is a 50%
+     * translucent red <code>(128, 255, 0, 0)</code>, the pre-multiplied form is 
+     * <code>(128, 128, 0, 0)</code>.</p>
+     * 
+     * <p>This method always returns false if {@link #getConfig()} is
+     * {@link Bitmap.Config#RGB_565}.</p>
+     * 
+     * <p>The return value is undefined if {@link #getConfig()} is
+     * {@link Bitmap.Config#ALPHA_8}.</p>
+     *
+     * <p>This method only returns true if {@link #hasAlpha()} returns true.
+     * A bitmap with no alpha channel can be used both as a pre-multiplied and
+     * as a non pre-multiplied bitmap.</p>
+     *
+     * <p>Only pre-multiplied bitmaps may be drawn by the view system or
+     * {@link Canvas}. If a non-pre-multiplied bitmap with an alpha channel is
+     * drawn to a Canvas, a RuntimeException will be thrown.</p>
+     *
+     * @return true if the underlying pixels have been pre-multiplied, false
+     *         otherwise
+     *
+     * @see Bitmap#setPremultiplied(boolean)
+     * @see BitmapFactory.Options#inPremultiplied
+     */
+    public final boolean isPremultiplied() {
+        return nativeIsPremultiplied(mNativeBitmap);
+    }
+
+    /**
+     * Sets whether the bitmap should treat its data as pre-multiplied.
+     *
+     * <p>Bitmaps are always treated as pre-multiplied by the view system and
+     * {@link Canvas} for performance reasons. Storing un-pre-multiplied data in
+     * a Bitmap (through {@link #setPixel}, {@link #setPixels}, or {@link
+     * BitmapFactory.Options#inPremultiplied BitmapFactory.Options.inPremultiplied})
+     * can lead to incorrect blending if drawn by the framework.</p>
+     *
+     * <p>This method will not affect the behavior of a bitmap without an alpha
+     * channel, or if {@link #hasAlpha()} returns false.</p>
+     *
+     * <p>Calling {@link #createBitmap} or {@link #createScaledBitmap} with a source
+     * Bitmap whose colors are not pre-multiplied may result in a RuntimeException,
+     * since those functions require drawing the source, which is not supported for
+     * un-pre-multiplied Bitmaps.</p>
+     *
+     * @see Bitmap#isPremultiplied()
+     * @see BitmapFactory.Options#inPremultiplied
+     */
+    public final void setPremultiplied(boolean premultiplied) {
+        mRequestPremultiplied = premultiplied;
+        nativeSetPremultiplied(mNativeBitmap, premultiplied);
+    }
+
     /** Returns the bitmap's width */
     public final int getWidth() {
-        return mWidth == -1 ? mWidth = nativeWidth(mNativeBitmap) : mWidth;
+        return mWidth;
     }
 
     /** Returns the bitmap's height */
     public final int getHeight() {
-        return mHeight == -1 ? mHeight = nativeHeight(mNativeBitmap) : mHeight;
+        return mHeight;
     }
 
     /**
@@ -848,7 +1142,7 @@ public final class Bitmap implements Parcelable {
      * @hide
      */
     static public int scaleFromDensity(int size, int sdensity, int tdensity) {
-        if (sdensity == DENSITY_NONE || sdensity == tdensity) {
+        if (sdensity == DENSITY_NONE || tdensity == DENSITY_NONE || sdensity == tdensity) {
             return size;
         }
         
@@ -862,6 +1156,10 @@ public final class Bitmap implements Parcelable {
      * getPixels() or setPixels(), then the pixels are uniformly treated as
      * 32bit values, packed according to the Color class.
      *
+     * <p>As of {@link android.os.Build.VERSION_CODES#KITKAT}, this method
+     * should not be used to calculate the memory usage of the bitmap. Instead,
+     * see {@link #getAllocationByteCount()}.
+     *
      * @return number of bytes between rows of the native bitmap pixels.
      */
     public final int getRowBytes() {
@@ -869,11 +1167,38 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
-     * Returns the number of bytes used to store this bitmap's pixels.
+     * Returns the minimum number of bytes that can be used to store this bitmap's pixels.
+     *
+     * <p>As of {@link android.os.Build.VERSION_CODES#KITKAT}, the result of this method can
+     * no longer be used to determine memory usage of a bitmap. See {@link
+     * #getAllocationByteCount()}.</p>
      */
     public final int getByteCount() {
         // int result permits bitmaps up to 46,340 x 46,340
         return getRowBytes() * getHeight();
+    }
+
+    /**
+     * Returns the size of the allocated memory used to store this bitmap's pixels.
+     *
+     * <p>This can be larger than the result of {@link #getByteCount()} if a bitmap is reused to
+     * decode other bitmaps of smaller size, or by manual reconfiguration. See {@link
+     * #reconfigure(int, int, Config)}, {@link #setWidth(int)}, {@link #setHeight(int)}, {@link
+     * #setConfig(Bitmap.Config)}, and {@link BitmapFactory.Options#inBitmap
+     * BitmapFactory.Options.inBitmap}. If a bitmap is not modified in this way, this value will be
+     * the same as that returned by {@link #getByteCount()}.</p>
+     *
+     * <p>This value will not change over the lifetime of a Bitmap.</p>
+     *
+     * @see #reconfigure(int, int, Config)
+     */
+    public final int getAllocationByteCount() {
+        if (mBuffer == null) {
+            // native backed bitmaps don't support reconfiguration,
+            // so alloc size is always content size
+            return getByteCount();
+        }
+        return mBuffer.length;
     }
 
     /**
@@ -907,7 +1232,52 @@ public final class Bitmap implements Parcelable {
      * non-opaque per-pixel alpha values.
      */
     public void setHasAlpha(boolean hasAlpha) {
-        nativeSetHasAlpha(mNativeBitmap, hasAlpha);
+        nativeSetHasAlpha(mNativeBitmap, hasAlpha, mRequestPremultiplied);
+    }
+
+    /**
+     * Indicates whether the renderer responsible for drawing this
+     * bitmap should attempt to use mipmaps when this bitmap is drawn
+     * scaled down.
+     * 
+     * If you know that you are going to draw this bitmap at less than
+     * 50% of its original size, you may be able to obtain a higher
+     * quality
+     * 
+     * This property is only a suggestion that can be ignored by the
+     * renderer. It is not guaranteed to have any effect.
+     * 
+     * @return true if the renderer should attempt to use mipmaps,
+     *         false otherwise
+     * 
+     * @see #setHasMipMap(boolean)
+     */
+    public final boolean hasMipMap() {
+        return nativeHasMipMap(mNativeBitmap);
+    }
+
+    /**
+     * Set a hint for the renderer responsible for drawing this bitmap
+     * indicating that it should attempt to use mipmaps when this bitmap
+     * is drawn scaled down.
+     *
+     * If you know that you are going to draw this bitmap at less than
+     * 50% of its original size, you may be able to obtain a higher
+     * quality by turning this property on.
+     * 
+     * Note that if the renderer respects this hint it might have to
+     * allocate extra memory to hold the mipmap levels for this bitmap.
+     *
+     * This property is only a suggestion that can be ignored by the
+     * renderer. It is not guaranteed to have any effect.
+     *
+     * @param hasMipMap indicates whether the renderer should attempt
+     *                  to use mipmaps
+     *
+     * @see #hasMipMap()
+     */
+    public final void setHasMipMap(boolean hasMipMap) {
+        nativeSetHasMipMap(mNativeBitmap, hasMipMap);
     }
 
     /**
@@ -926,7 +1296,7 @@ public final class Bitmap implements Parcelable {
     /**
      * Returns the {@link Color} at the specified location. Throws an exception
      * if x or y are out of bounds (negative or >= to the width or height
-     * respectively).
+     * respectively). The returned color is a non-premultiplied ARGB value.
      *
      * @param x    The x coordinate (0...width-1) of the pixel to return
      * @param y    The y coordinate (0...height-1) of the pixel to return
@@ -944,6 +1314,7 @@ public final class Bitmap implements Parcelable {
      * a packed int representing a {@link Color}. The stride parameter allows
      * the caller to allow for gaps in the returned pixels array between
      * rows. For normal packed results, just pass width for the stride value.
+     * The returned colors are non-premultiplied ARGB values.
      *
      * @param pixels   The array to receive the bitmap's colors
      * @param offset   The first index to write into pixels[]
@@ -955,6 +1326,7 @@ public final class Bitmap implements Parcelable {
      *                 the bitmap
      * @param width    The number of pixels to read from each row
      * @param height   The number of rows to read
+     *
      * @throws IllegalArgumentException if x, y, width, height exceed the
      *         bounds of the bitmap, or if abs(stride) < width.
      * @throws ArrayIndexOutOfBoundsException if the pixels array is too small
@@ -974,6 +1346,7 @@ public final class Bitmap implements Parcelable {
     /**
      * Shared code to check for illegal arguments passed to getPixel()
      * or setPixel()
+     * 
      * @param x x coordinate of the pixel
      * @param y y coordinate of the pixel
      */
@@ -1029,12 +1402,14 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
-     * Write the specified {@link Color} into the bitmap (assuming it is
-     * mutable) at the x,y coordinate.
+     * <p>Write the specified {@link Color} into the bitmap (assuming it is
+     * mutable) at the x,y coordinate. The color must be a
+     * non-premultiplied ARGB value.</p>
      *
      * @param x     The x coordinate of the pixel to replace (0...width-1)
      * @param y     The y coordinate of the pixel to replace (0...height-1)
-     * @param color The {@link Color} to write into the bitmap
+     * @param color The ARGB color to write into the bitmap
+     *
      * @throws IllegalStateException if the bitmap is not mutable
      * @throws IllegalArgumentException if x, y are outside of the bitmap's
      *         bounds.
@@ -1049,8 +1424,9 @@ public final class Bitmap implements Parcelable {
     }
 
     /**
-     * Replace pixels in the bitmap with the colors in the array. Each element
-     * in the array is a packed int prepresenting a {@link Color}
+     * <p>Replace pixels in the bitmap with the colors in the array. Each element
+     * in the array is a packed int prepresenting a non-premultiplied ARGB
+     * {@link Color}.</p>
      *
      * @param pixels   The colors to write to the bitmap
      * @param offset   The index of the first color to read from pixels[]
@@ -1063,6 +1439,7 @@ public final class Bitmap implements Parcelable {
      *                 the bitmap.
      * @param width    The number of colors to copy from pixels[] per row
      * @param height   The number of rows to write to the bitmap
+     *
      * @throws IllegalStateException if the bitmap is not mutable
      * @throws IllegalArgumentException if x, y, width, height are outside of
      *         the bitmap's bounds.
@@ -1070,7 +1447,7 @@ public final class Bitmap implements Parcelable {
      *         to receive the specified number of pixels.
      */
     public void setPixels(int[] pixels, int offset, int stride,
-                          int x, int y, int width, int height) {
+            int x, int y, int width, int height) {
         checkRecycled("Can't call setPixels() on a recycled bitmap");
         if (!isMutable()) {
             throw new IllegalStateException();
@@ -1160,7 +1537,7 @@ public final class Bitmap implements Parcelable {
      */
     public Bitmap extractAlpha(Paint paint, int[] offsetXY) {
         checkRecycled("Can't extractAlpha on a recycled bitmap");
-        int nativePaint = paint != null ? paint.mNativePaint : 0;
+        long nativePaint = paint != null ? paint.mNativePaint : 0;
         Bitmap bm = nativeExtractAlpha(mNativeBitmap, nativePaint, offsetXY);
         if (bm == null) {
             throw new RuntimeException("Failed to extractAlpha on Bitmap");
@@ -1194,10 +1571,19 @@ public final class Bitmap implements Parcelable {
     }
 
     private static class BitmapFinalizer {
-        private final int mNativeBitmap;
+        private long mNativeBitmap;
 
-        BitmapFinalizer(int nativeBitmap) {
+        // Native memory allocated for the duration of the Bitmap,
+        // if pixel data allocated into native memory, instead of java byte[]
+        private final int mNativeAllocationByteCount;
+
+        BitmapFinalizer(long nativeBitmap, int nativeAllocationByteCount) {
             mNativeBitmap = nativeBitmap;
+            mNativeAllocationByteCount = nativeAllocationByteCount;
+
+            if (mNativeAllocationByteCount != 0) {
+                VMRuntime.getRuntime().registerNativeAllocation(mNativeAllocationByteCount);
+            }
         }
 
         @Override
@@ -1207,7 +1593,11 @@ public final class Bitmap implements Parcelable {
             } catch (Throwable t) {
                 // Ignore
             } finally {
+                if (mNativeAllocationByteCount != 0) {
+                    VMRuntime.getRuntime().registerNativeFree(mNativeAllocationByteCount);
+                }
                 nativeDestructor(mNativeBitmap);
+                mNativeBitmap = 0;
             }
         }
     }
@@ -1216,53 +1606,60 @@ public final class Bitmap implements Parcelable {
 
     private static native Bitmap nativeCreate(int[] colors, int offset,
                                               int stride, int width, int height,
-                                            int nativeConfig, boolean mutable);
-    private static native Bitmap nativeCopy(int srcBitmap, int nativeConfig,
+                                              int nativeConfig, boolean mutable);
+    private static native Bitmap nativeCopy(long nativeSrcBitmap, int nativeConfig,
                                             boolean isMutable);
-    private static native void nativeDestructor(int nativeBitmap);
-    private static native void nativeRecycle(int nativeBitmap);
+    private static native void nativeDestructor(long nativeBitmap);
+    private static native boolean nativeRecycle(long nativeBitmap);
+    private static native void nativeReconfigure(long nativeBitmap, int width, int height,
+                                                 int config, int allocSize,
+                                                 boolean isPremultiplied);
 
-    private static native boolean nativeCompress(int nativeBitmap, int format,
+    private static native boolean nativeCompress(long nativeBitmap, int format,
                                             int quality, OutputStream stream,
                                             byte[] tempStorage);
-    private static native void nativeErase(int nativeBitmap, int color);
-    private static native int nativeWidth(int nativeBitmap);
-    private static native int nativeHeight(int nativeBitmap);
-    private static native int nativeRowBytes(int nativeBitmap);
-    private static native int nativeConfig(int nativeBitmap);
-    private static native boolean nativeHasAlpha(int nativeBitmap);
+    private static native void nativeErase(long nativeBitmap, int color);
+    private static native int nativeRowBytes(long nativeBitmap);
+    private static native int nativeConfig(long nativeBitmap);
 
-    private static native int nativeGetPixel(int nativeBitmap, int x, int y);
-    private static native void nativeGetPixels(int nativeBitmap, int[] pixels,
-                                               int offset, int stride, int x,
-                                               int y, int width, int height);
+    private static native int nativeGetPixel(long nativeBitmap, int x, int y);
+    private static native void nativeGetPixels(long nativeBitmap, int[] pixels,
+                                               int offset, int stride, int x, int y,
+                                               int width, int height);
 
-    private static native void nativeSetPixel(int nativeBitmap, int x, int y,
-                                              int color);
-    private static native void nativeSetPixels(int nativeBitmap, int[] colors,
-                                               int offset, int stride, int x,
-                                               int y, int width, int height);
-    private static native void nativeCopyPixelsToBuffer(int nativeBitmap,
+    private static native void nativeSetPixel(long nativeBitmap, int x, int y, int color);
+    private static native void nativeSetPixels(long nativeBitmap, int[] colors,
+                                               int offset, int stride, int x, int y,
+                                               int width, int height);
+    private static native void nativeCopyPixelsToBuffer(long nativeBitmap,
                                                         Buffer dst);
-    private static native void nativeCopyPixelsFromBuffer(int nb, Buffer src);
-    private static native int nativeGenerationId(int nativeBitmap);
+    private static native void nativeCopyPixelsFromBuffer(long nativeBitmap, Buffer src);
+    private static native int nativeGenerationId(long nativeBitmap);
 
     private static native Bitmap nativeCreateFromParcel(Parcel p);
     // returns true on success
-    private static native boolean nativeWriteToParcel(int nativeBitmap,
+    private static native boolean nativeWriteToParcel(long nativeBitmap,
                                                       boolean isMutable,
                                                       int density,
                                                       Parcel p);
     // returns a new bitmap built from the native bitmap's alpha, and the paint
-    private static native Bitmap nativeExtractAlpha(int nativeBitmap,
-                                                    int nativePaint,
+    private static native Bitmap nativeExtractAlpha(long nativeBitmap,
+                                                    long nativePaint,
                                                     int[] offsetXY);
 
-    private static native void nativePrepareToDraw(int nativeBitmap);
-    private static native void nativeSetHasAlpha(int nBitmap, boolean hasAlpha);
-    private static native boolean nativeSameAs(int nb0, int nb1);
-    
-    /* package */ final int ni() {
+    private static native void nativePrepareToDraw(long nativeBitmap);
+    private static native boolean nativeHasAlpha(long nativeBitmap);
+    private static native boolean nativeIsPremultiplied(long nativeBitmap);
+    private static native void nativeSetPremultiplied(long nativeBitmap,
+                                                      boolean isPremul);
+    private static native void nativeSetHasAlpha(long nativeBitmap,
+                                                 boolean hasAlpha,
+                                                 boolean requestPremul);
+    private static native boolean nativeHasMipMap(long nativeBitmap);
+    private static native void nativeSetHasMipMap(long nativeBitmap, boolean hasMipMap);
+    private static native boolean nativeSameAs(long nativeBitmap0, long nativeBitmap1);
+
+    /* package */ final long ni() {
         return mNativeBitmap;
     }
 }

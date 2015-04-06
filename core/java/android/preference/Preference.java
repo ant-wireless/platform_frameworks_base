@@ -77,7 +77,7 @@ import java.util.Set;
  * @attr ref android.R.styleable#Preference_defaultValue
  * @attr ref android.R.styleable#Preference_shouldDisableView
  */
-public class Preference implements Comparable<Preference>, OnDependencyChangeListener { 
+public class Preference implements Comparable<Preference> {
     /**
      * Specify for {@link #setOrder(int)} if a specific order is not required.
      */
@@ -115,6 +115,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     private String mDependencyKey;
     private Object mDefaultValue;
     private boolean mDependencyMet = true;
+    private boolean mParentDependencyMet = true;
     
     /**
      * @see #setShouldDisableView(boolean)
@@ -123,7 +124,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     
     private int mLayoutResId = com.android.internal.R.layout.preference;
     private int mWidgetLayoutResId;
-    private boolean mHasSpecifiedLayout = false;
+    private boolean mCanRecycleLayout = true;
     
     private OnPreferenceChangeInternalListener mListener;
     
@@ -187,31 +188,34 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
 
     /**
      * Perform inflation from XML and apply a class-specific base style. This
-     * constructor of Preference allows subclasses to use their own base
-     * style when they are inflating. For example, a {@link CheckBoxPreference}
+     * constructor of Preference allows subclasses to use their own base style
+     * when they are inflating. For example, a {@link CheckBoxPreference}
      * constructor calls this version of the super class constructor and
-     * supplies {@code android.R.attr.checkBoxPreferenceStyle} for <var>defStyle</var>.
-     * This allows the theme's checkbox preference style to modify all of the base
-     * preference attributes as well as the {@link CheckBoxPreference} class's
-     * attributes.
-     * 
+     * supplies {@code android.R.attr.checkBoxPreferenceStyle} for
+     * <var>defStyleAttr</var>. This allows the theme's checkbox preference
+     * style to modify all of the base preference attributes as well as the
+     * {@link CheckBoxPreference} class's attributes.
+     *
      * @param context The Context this is associated with, through which it can
-     *            access the current theme, resources, {@link SharedPreferences},
-     *            etc.
-     * @param attrs The attributes of the XML tag that is inflating the preference.
-     * @param defStyle The default style to apply to this preference. If 0, no style
-     *            will be applied (beyond what is included in the theme). This
-     *            may either be an attribute resource, whose value will be
-     *            retrieved from the current theme, or an explicit style
-     *            resource.
+     *            access the current theme, resources,
+     *            {@link SharedPreferences}, etc.
+     * @param attrs The attributes of the XML tag that is inflating the
+     *            preference.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *            reference to a style resource that supplies default values for
+     *            the view. Can be 0 to not look for defaults.
+     * @param defStyleRes A resource identifier of a style resource that
+     *            supplies default values for the view, used only if
+     *            defStyleAttr is 0 or can not be found in the theme. Can be 0
+     *            to not look for defaults.
      * @see #Preference(Context, AttributeSet)
      */
-    public Preference(Context context, AttributeSet attrs, int defStyle) {
+    public Preference(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         mContext = context;
 
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.Preference, defStyle, 0);
-        for (int i = a.getIndexCount(); i >= 0; i--) {
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.Preference, defStyleAttr, defStyleRes);
+        for (int i = a.getIndexCount() - 1; i >= 0; i--) {
             int attr = a.getIndex(i); 
             switch (attr) {
                 case com.android.internal.R.styleable.Preference_icon:
@@ -274,10 +278,35 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
         }
         a.recycle();
 
-        if (!getClass().getName().startsWith("android.preference")) {
-            // For subclasses not in this package, assume the worst and don't cache views
-            mHasSpecifiedLayout = true;
+        if (!getClass().getName().startsWith("android.preference")
+                && !getClass().getName().startsWith("com.android")) {
+            // For non-framework subclasses, assume the worst and don't cache views.
+            mCanRecycleLayout = false;
         }
+    }
+
+    /**
+     * Perform inflation from XML and apply a class-specific base style. This
+     * constructor of Preference allows subclasses to use their own base style
+     * when they are inflating. For example, a {@link CheckBoxPreference}
+     * constructor calls this version of the super class constructor and
+     * supplies {@code android.R.attr.checkBoxPreferenceStyle} for
+     * <var>defStyleAttr</var>. This allows the theme's checkbox preference
+     * style to modify all of the base preference attributes as well as the
+     * {@link CheckBoxPreference} class's attributes.
+     *
+     * @param context The Context this is associated with, through which it can
+     *            access the current theme, resources,
+     *            {@link SharedPreferences}, etc.
+     * @param attrs The attributes of the XML tag that is inflating the
+     *            preference.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *            reference to a style resource that supplies default values for
+     *            the view. Can be 0 to not look for defaults.
+     * @see #Preference(Context, AttributeSet)
+     */
+    public Preference(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
     }
     
     /**
@@ -398,7 +427,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     public void setLayoutResource(int layoutResId) {
         if (layoutResId != mLayoutResId) {
             // Layout changed
-            mHasSpecifiedLayout = true;
+            mCanRecycleLayout = false;
         }
 
         mLayoutResId = layoutResId;
@@ -414,7 +443,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     }
     
     /**
-     * Sets The layout for the controllable widget portion of this Preference. This
+     * Sets the layout for the controllable widget portion of this Preference. This
      * is inflated into the main layout. For example, a {@link CheckBoxPreference}
      * would specify a custom layout (consisting of just the CheckBox) here,
      * instead of creating its own main layout.
@@ -426,7 +455,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     public void setWidgetLayoutResource(int widgetLayoutResId) {
         if (widgetLayoutResId != mWidgetLayoutResId) {
             // Layout changed
-            mHasSpecifiedLayout = true;
+            mCanRecycleLayout = false;
         }
         mWidgetLayoutResId = widgetLayoutResId;
     }
@@ -504,8 +533,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
      * @see #onCreateView(ViewGroup)
      */
     protected void onBindView(View view) {
-        final TextView titleView = (TextView) view.findViewById(
-                com.android.internal.R.id.title);
+        final TextView titleView = (TextView) view.findViewById(com.android.internal.R.id.title);
         if (titleView != null) {
             final CharSequence title = getTitle();
             if (!TextUtils.isEmpty(title)) {
@@ -528,17 +556,22 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
             }
         }
 
-        ImageView imageView = (ImageView) view.findViewById(com.android.internal.R.id.icon);
+        final ImageView imageView = (ImageView) view.findViewById(com.android.internal.R.id.icon);
         if (imageView != null) {
             if (mIconResId != 0 || mIcon != null) {
                 if (mIcon == null) {
-                    mIcon = getContext().getResources().getDrawable(mIconResId);
+                    mIcon = getContext().getDrawable(mIconResId);
                 }
                 if (mIcon != null) {
                     imageView.setImageDrawable(mIcon);
                 }
             }
             imageView.setVisibility(mIcon != null ? View.VISIBLE : View.GONE);
+        }
+
+        final View imageFrame = view.findViewById(com.android.internal.R.id.icon_frame);
+        if (imageFrame != null) {
+            imageFrame.setVisibility(mIcon != null ? View.VISIBLE : View.GONE);
         }
 
         if (mShouldDisableView) {
@@ -665,7 +698,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
      */
     public void setIcon(int iconResId) {
         mIconResId = iconResId;
-        setIcon(mContext.getResources().getDrawable(iconResId));
+        setIcon(mContext.getDrawable(iconResId));
     }
 
     /**
@@ -733,7 +766,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
      * @return True if this Preference is enabled, false otherwise.
      */
     public boolean isEnabled() {
-        return mEnabled && mDependencyMet;
+        return mEnabled && mDependencyMet && mParentDependencyMet;
     }
 
     /**
@@ -939,8 +972,9 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
      * @param preferenceScreen A {@link PreferenceScreen} whose hierarchy click
      *            listener should be called in the proper order (between other
      *            processing). May be null.
+     * @hide
      */
-    void performClick(PreferenceScreen preferenceScreen) {
+    public void performClick(PreferenceScreen preferenceScreen) {
         
         if (!isEnabled()) {
             return;
@@ -1066,11 +1100,14 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
      * @return 0 if the same; less than 0 if this Preference sorts ahead of <var>another</var>;
      *          greater than 0 if this Preference sorts after <var>another</var>.
      */
+    @Override
     public int compareTo(Preference another) {
-        if (mOrder != DEFAULT_ORDER
-                || (mOrder == DEFAULT_ORDER && another.mOrder != DEFAULT_ORDER)) {
+        if (mOrder != another.mOrder) {
             // Do order comparison
-            return mOrder - another.mOrder; 
+            return mOrder - another.mOrder;
+        } else if (mTitle == another.mTitle) {
+            // If titles are null or share same object comparison
+            return 0;
         } else if (mTitle == null) {
             return 1;
         } else if (another.mTitle == null) {
@@ -1255,7 +1292,24 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
             notifyChanged();
         }
     }
-    
+
+    /**
+     * Called when the implicit parent dependency changes.
+     *
+     * @param parent The Preference that this Preference depends on.
+     * @param disableChild Set true to disable this Preference.
+     */
+    public void onParentChanged(Preference parent, boolean disableChild) {
+        if (mParentDependencyMet == disableChild) {
+            mParentDependencyMet = !disableChild;
+
+            // Enabled state can change dependent preferences' states, so notify
+            notifyDependencyChange(shouldDisableDependents());
+
+            notifyChanged();
+        }
+    }
+
     /**
      * Checks whether this preference's dependents should currently be
      * disabled.
@@ -1372,7 +1426,7 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
     protected boolean persistString(String value) {
         if (shouldPersist()) {
             // Shouldn't store null
-            if (value == getPersistedString(null)) {
+            if (TextUtils.equals(value, getPersistedString(null))) {
                 // It's already there, so the same as persisting
                 return true;
             }
@@ -1637,8 +1691,8 @@ public class Preference implements Comparable<Preference>, OnDependencyChangeLis
         return mPreferenceManager.getSharedPreferences().getBoolean(mKey, defaultReturnValue);
     }
     
-    boolean hasSpecifiedLayout() {
-        return mHasSpecifiedLayout;
+    boolean canRecycleLayout() {
+        return mCanRecycleLayout;
     }
     
     @Override

@@ -8,7 +8,6 @@ page.title=OEM USB Drivers
     <li><a href="#InstallingDriver">Installing a USB Driver</a>
       <ol>
         <li><a href="#Win7">Windows 7</a></li>
-        <li><a href="#WinXp">Windows XP</a></li>
         <li><a href="#WinVista">Windows Vista</a></li>
       </ol>
     </li>
@@ -58,7 +57,6 @@ development.</p>
 
 <ol class="nolist">
   <li><a href="#Win7">Windows 7</a></li>
-  <li><a href="#WinXp">Windows XP</a></li>
   <li><a href="#WinVista">Windows Vista</a></li>
 </ol>
 
@@ -109,50 +107,6 @@ driver:</p>
   <li>Select <strong>Search for the best driver in these locations</strong>; un-check
 <strong>Search removable media</strong>; and check <strong>Include this location in the
 search</strong>.</li>
-  <li>Click <strong>Browse</strong> and locate the USB driver folder. (The Google USB
-Driver is located in {@code &lt;sdk&gt;\extras\google\usb_driver\}.)</li>
-  <li>Click <strong>Next</strong> to upgrade the driver.</li>
-</ol>
-
-
-
-
-
-<h3 id="WinXp">Windows XP</h3>
-
-<p>To install the Android USB driver on Windows XP for the first time:</p>
-
-<ol>
-  <li>Connect your Android-powered device to your computer's USB port. Windows 
-    will detect the device and launch the Hardware Update Wizard.</li>
-  <li>Select <strong>Install from a list or specific location</strong> and click
-    <strong>Next</strong>.</li>
-  <li>Select <strong>Search for the best driver in these locations</strong>; un-check
-<strong>Search
-    removable media</strong>; and check <strong>Include
-this location in the search</strong>.</li>
-  <li>Click <strong>Browse</strong> and locate the USB driver folder. (The Google USB
-Driver is located in {@code &lt;sdk&gt;\extras\google\usb_driver\}.)</li>
-  <li>Click <strong>Next</strong> to install the driver.</li>
-</ol>
-
-<p>Or, to <em>upgrade</em> an existing Android USB driver on Windows XP with the new
-driver:</p>
-
-<ol>
-  <li>Connect your Android-powered device to your computer's USB port.</li>
-  <li>Right-click on <em>My Computer</em> from your desktop or Windows Explorer,
-    and select <strong>Manage</strong>.</li>
-  <li>Select <strong>Device Manager</strong> in the left pane.</li>
-  <li>Locate and expand <em>Android Phone</em> in the right pane.</li>
-  <li>Right-click <em>Android Composite ADB Interface</em> and select <strong>Update
-  Driver</strong>.
-    This will launch the Hardware Update Wizard.</li>
-  <li>Select <strong>Install from a list or specific location</strong> and click
-    <strong>Next</strong>.</li>
-  <li>Select <strong>Search for the best driver in these locations</strong>; un-check <strong>Search
-    removable media</strong>; and check <strong>Include
-this location in the search</strong>.</li>
   <li>Click <strong>Browse</strong> and locate the USB driver folder. (The Google USB
 Driver is located in {@code &lt;sdk&gt;\extras\google\usb_driver\}.)</li>
   <li>Click <strong>Next</strong> to upgrade the driver.</li>
@@ -211,7 +165,7 @@ exact location of the
 <h2 id="Drivers">OEM Drivers</h2>
 
 <p class="note"><strong>Note:</strong> If your device is one of the Android Developer Phones
-(purchased from the Google Play publisher site), a Nexus One, or a Nexus S, then you need
+(purchased from the Google Play Developer Console), a Nexus One, or a Nexus S, then you need
 the <a href="{@docRoot}sdk/win-usb.html">Google USB Driver</a>, instead of an OEM driver. The Galaxy
 Nexus driver, however, is distributed by <a
 href="http://www.samsung.com/us/support/downloads/verizon-wireless/SCH-I515MSAVZW">Samsung</a>
@@ -227,7 +181,7 @@ href="http://www.acer.com/worldwide/support/mobile.html">http://www.acer.com/wor
   <tr>
     <td style="font-variant:small-caps">alcatel one touch</td>
     <td><a
-href="http://www.alcatel-mobilephones.com/global/Android-Downloads">http://www.alcatel-mobilephones.com/global/Android-Downloads</a></td>
+href="http://www.alcatelonetouch.com/global-en/support/faq/usbdriver.html">http://www.alcatelonetouch.com/global-en/support/faq/usbdriver.html</a></td>
   </tr>
   <tr>
     <td>Asus</td>
@@ -245,14 +199,6 @@ href="http://drivers.cmcs.com.tw/">http://drivers.cmcs.com.tw/</a></td>
   <tr>
     <td>
       Fujitsu
-    </td>
-    <td><a
-href="http://www.fmworld.net/product/phone/sp/android/develop/">http://www.fmworld.net/product/phone/sp/android/develop/</a>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      Fujitsu Toshiba
     </td>
     <td><a
 href="http://www.fmworld.net/product/phone/sp/android/develop/">http://www.fmworld.net/product/phone/sp/android/develop/</a>
@@ -292,16 +238,25 @@ href="http://www.kttech.co.kr/cscenter/download05.asp">http://www.kttech.co.kr/c
     </td>
   </tr>
   <tr>
-    <td>Lenevo</td>
+    <td>Lenovo</td>
     <td><a href="http://developer.lenovomm.com/developer/download.jsp"
         >http://developer.lenovomm.com/developer/download.jsp</a>
     </td>
   </tr>
   <tr><td>LGE</td>	<td><a
 href="http://www.lg.com/us/mobile-phones/mobile-support/mobile-lg-mobile-phone-support.jsp">http://www.lg.com/us/mobile-phones/mobile-support/mobile-lg-mobile-phone-support.jsp</a></td>
-</tr><tr><td>Motorola</td>	<td><a
+</tr>
+<tr><td>Motorola</td> <td><a
 href="http://developer.motorola.com/docstools/USB_Drivers/">http://developer.motorola.com/docstools/USB_Drivers/</a></td>
-</tr><tr><td>Pantech</td>	<td><a
+</tr>
+<tr><td>MTK</td> <td><a
+href="http://online.mediatek.com/Public%20Documents/MTK_Android_USB_Driver.zip">http://online.mediatek.com/Public%20Documents/MTK_Android_USB_Driver.zip</a></td>
+</tr>
+<tr><td>Oppo</td> <td><a
+href="http://www.oppo.com/index.php?q=software/view&sw_id=631"
+>http://www.oppo.com/index.php?q=software/view&sw_id=631</a></td>
+</tr>
+<tr><td>Pantech</td>	<td><a
 href="http://www.isky.co.kr/cs/software/software.sky?fromUrl=index">http://www.isky.co.kr/cs/software/software.sky?fromUrl=index</a></td>
 </tr><tr><td>Pegatron</td>	<td><a
 href="http://www.pegatroncorp.com/download/New_Duke_PC_Driver_0705.zip">http://www.pegatroncorp.com/download/New_Duke_PC_Driver_0705.zip</a> (ZIP download)</td>
@@ -311,17 +266,24 @@ href="http://www.samsung.com/us/support/downloads">http://www.samsung.com/us/sup
 href="http://k-tai.sharp.co.jp/support/">http://k-tai.sharp.co.jp/support/</a></td>
 </tr><tr><td>SK Telesys</td>	<td><a
 href="http://www.sk-w.com/service/wDownload/wDownload.jsp">http://www.sk-w.com/service/wDownload/wDownload.jsp</a></td></tr><tr>
-<td>Sony Ericsson</td>	<td><a
-href="http://developer.sonyericsson.com/wportal/devworld/search-downloads/driver?cc=gb&lc=en">http://developer.sonyericsson.com/wportal/devworld/search-downloads/driver?cc=gb&amp;lc=en</a></td></tr>
+<td>Sony Mobile Communications</td>	<td><a
+href="http://developer.sonymobile.com/downloads/drivers/">http://developer.sonymobile.com/downloads/drivers/</a></td></tr>
 
 <tr><td>Teleepoch</td>	<td><a
 href="http://www.teleepoch.com/android.html">http://www.teleepoch.com/android.html</a></td>
+</tr>
+
+<tr><td>Toshiba</td>  <td><a
+href="http://support.toshiba.com/sscontent?docId=4001814">http://support.toshiba.com/sscontent?docId=4001814</a></td>
 </tr>
 
 <tr><td>Yulong Coolpad</td>	<td><a
 href="http://www.yulong.com/product/product/product/downloadList.html#downListUL">http://www.yulong.com/product/product/product/downloadList.html#downListUL</a></td>
 </tr>
 
+<tr><td>Xiaomi</td>  <td><a
+href="http://www.xiaomi.com/c/driver/index.html">http://www.xiaomi.com/c/driver/index.html</a></td>
+</tr>
 <tr>
 <td>ZTE</td>	<td><a
 href="http://support.zte.com.cn/support/news/NewsDetail.aspx?newsId=1000442">http://support.zte.com.cn/support/news/NewsDetail.aspx?newsId=1000442</a></td></tr>

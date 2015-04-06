@@ -15,15 +15,20 @@
  */
 
 #define LOG_TAG "OpenGLRenderer"
+#define ATRACE_TAG ATRACE_TAG_VIEW
 
 #include <GLES2/gl2.h>
 
 #include <SkCanvas.h>
+#include <SkPixelRef.h>
 
-#include <utils/threads.h>
+#include <utils/Mutex.h>
 
+#include "AssetAtlas.h"
+#include "Caches.h"
 #include "TextureCache.h"
 #include "Properties.h"
+#include "utils/TraceUtils.h"
 
 namespace android {
 namespace uirenderer {
@@ -33,9 +38,9 @@ namespace uirenderer {
 ///////////////////////////////////////////////////////////////////////////////
 
 TextureCache::TextureCache():
-        mCache(GenerationCache<SkBitmap*, Texture*>::kUnlimitedCapacity),
+        mCache(LruCache<uint32_t, Texture*>::kUnlimitedCapacity),
         mSize(0), mMaxSize(MB(DEFAULT_TEXTURE_CACHE_SIZE)),
-        mFlushRate(DEFAULT_TEXTURE_CACHE_FLUSH_RATE) {
+        mFlushRate(DEFAULT_TEXTURE_CACHE_FLUSH_RATE), mAssetAtlas(0) {
     char property[PROPERTY_VALUE_MAX];
     if (property_get(PROPERTY_TEXTURE_CACHE_SIZE, property, NULL) > 0) {
         INIT_LOGD("  Setting texture cache size to %sMB", property);
@@ -57,8 +62,8 @@ TextureCache::TextureCache():
 }
 
 TextureCache::TextureCache(uint32_t maxByteSize):
-        mCache(GenerationCache<SkBitmap*, Texture*>::kUnlimitedCapacity),
-        mSize(0), mMaxSize(maxByteSize) {
+        mCache(LruCache<uint32_t, Texture*>::kUnlimitedCapacity),
+        mSize(0), mMaxSize(maxByteSize), mAssetAtlas(0) {
     init();
 }
 
@@ -102,7 +107,7 @@ void TextureCache::setFlushRate(float flushRate) {
 // Callbacks
 ///////////////////////////////////////////////////////////////////////////////
 
-void TextureCache::operator()(SkBitmap*& bitmap, Texture*& texture) {
+void TextureCache::operator()(uint32_t&, Texture*& texture) {
     // This will be called already locked
     if (texture) {
         mSize -= texture->bitmapSize;
@@ -111,7 +116,7 @@ void TextureCache::operator()(SkBitmap*& bitmap, Texture*& texture) {
         if (mDebugEnabled) {
             ALOGD("Texture deleted, size = %d", texture->bitmapSize);
         }
-        glDeleteTextures(1, &texture->id);
+        texture->deleteTexture();
         delete texture;
     }
 }
@@ -120,48 +125,105 @@ void TextureCache::operator()(SkBitmap*& bitmap, Texture*& texture) {
 // Caching
 ///////////////////////////////////////////////////////////////////////////////
 
-Texture* TextureCache::get(SkBitmap* bitmap) {
-    Texture* texture = mCache.get(bitmap);
+void TextureCache::setAssetAtlas(AssetAtlas* assetAtlas) {
+    mAssetAtlas = assetAtlas;
+}
+
+void TextureCache::resetMarkInUse() {
+    LruCache<uint32_t, Texture*>::Iterator iter(mCache);
+    while (iter.next()) {
+        iter.value()->isInUse = false;
+    }
+}
+
+bool TextureCache::canMakeTextureFromBitmap(const SkBitmap* bitmap) {
+    if (bitmap->width() > mMaxTextureSize || bitmap->height() > mMaxTextureSize) {
+        ALOGW("Bitmap too large to be uploaded into a texture (%dx%d, max=%dx%d)",
+                bitmap->width(), bitmap->height(), mMaxTextureSize, mMaxTextureSize);
+        return false;
+    }
+    return true;
+}
+
+// Returns a prepared Texture* that either is already in the cache or can fit
+// in the cache (and is thus added to the cache)
+Texture* TextureCache::getCachedTexture(const SkBitmap* bitmap) {
+    if (CC_LIKELY(mAssetAtlas)) {
+        AssetAtlas::Entry* entry = mAssetAtlas->getEntry(bitmap);
+        if (CC_UNLIKELY(entry)) {
+            return entry->texture;
+        }
+    }
+
+    Texture* texture = mCache.get(bitmap->pixelRef()->getStableID());
 
     if (!texture) {
-        if (bitmap->width() > mMaxTextureSize || bitmap->height() > mMaxTextureSize) {
-            ALOGW("Bitmap too large to be uploaded into a texture (%dx%d, max=%dx%d)",
-                    bitmap->width(), bitmap->height(), mMaxTextureSize, mMaxTextureSize);
+        if (!canMakeTextureFromBitmap(bitmap)) {
             return NULL;
         }
 
         const uint32_t size = bitmap->rowBytes() * bitmap->height();
+        bool canCache = size < mMaxSize;
         // Don't even try to cache a bitmap that's bigger than the cache
-        if (size < mMaxSize) {
-            while (mSize + size > mMaxSize) {
+        while (canCache && mSize + size > mMaxSize) {
+            Texture* oldest = mCache.peekOldestValue();
+            if (oldest && !oldest->isInUse) {
                 mCache.removeOldest();
+            } else {
+                canCache = false;
             }
         }
 
-        texture = new Texture;
-        texture->bitmapSize = size;
-        generateTexture(bitmap, texture, false);
+        if (canCache) {
+            texture = new Texture();
+            texture->bitmapSize = size;
+            generateTexture(bitmap, texture, false);
 
-        if (size < mMaxSize) {
             mSize += size;
             TEXTURE_LOGD("TextureCache::get: create texture(%p): name, size, mSize = %d, %d, %d",
                      bitmap, texture->id, size, mSize);
             if (mDebugEnabled) {
                 ALOGD("Texture created, size = %d", size);
             }
-            mCache.put(bitmap, texture);
-        } else {
-            texture->cleanup = true;
+            mCache.put(bitmap->pixelRef()->getStableID(), texture);
         }
-    } else if (bitmap->getGenerationID() != texture->generation) {
+    } else if (!texture->isInUse && bitmap->getGenerationID() != texture->generation) {
+        // Texture was in the cache but is dirty, re-upload
+        // TODO: Re-adjust the cache size if the bitmap's dimensions have changed
         generateTexture(bitmap, texture, true);
     }
 
     return texture;
 }
 
-Texture* TextureCache::getTransient(SkBitmap* bitmap) {
-    Texture* texture = new Texture;
+bool TextureCache::prefetchAndMarkInUse(const SkBitmap* bitmap) {
+    Texture* texture = getCachedTexture(bitmap);
+    if (texture) {
+        texture->isInUse = true;
+    }
+    return texture;
+}
+
+Texture* TextureCache::get(const SkBitmap* bitmap) {
+    Texture* texture = getCachedTexture(bitmap);
+
+    if (!texture) {
+        if (!canMakeTextureFromBitmap(bitmap)) {
+            return NULL;
+        }
+
+        const uint32_t size = bitmap->rowBytes() * bitmap->height();
+        texture = new Texture();
+        texture->bitmapSize = size;
+        generateTexture(bitmap, texture, false);
+        texture->cleanup = true;
+    }
+
+    return texture;
+}
+
+Texture* TextureCache::getTransient(const SkBitmap* bitmap) {
+    Texture* texture = new Texture();
     texture->bitmapSize = bitmap->rowBytes() * bitmap->height();
     texture->cleanup = true;
 
@@ -170,20 +232,19 @@ Texture* TextureCache::getTransient(SkBitmap* bitmap) {
     return texture;
 }
 
-void TextureCache::remove(SkBitmap* bitmap) {
-    mCache.remove(bitmap);
-}
+void TextureCache::releaseTexture(const SkBitmap* bitmap) {
+    if (!bitmap || !bitmap->pixelRef()) return;
 
-void TextureCache::removeDeferred(SkBitmap* bitmap) {
     Mutex::Autolock _l(mLock);
-    mGarbage.push(bitmap);
+    mGarbage.push(bitmap->pixelRef()->getStableID());
 }
 
 void TextureCache::clearGarbage() {
     Mutex::Autolock _l(mLock);
     size_t count = mGarbage.size();
     for (size_t i = 0; i < count; i++) {
-        mCache.remove(mGarbage.itemAt(i));
+        uint32_t pixelRefId = mGarbage.itemAt(i);
+        mCache.remove(pixelRefId);
     }
     mGarbage.clear();
 }
@@ -208,7 +269,7 @@ void TextureCache::flush() {
     }
 }
 
-void TextureCache::generateTexture(SkBitmap* bitmap, Texture* texture, bool regenerate) {
+void TextureCache::generateTexture(const SkBitmap* bitmap, Texture* texture, bool regenerate) {
     SkAutoLockPixels alp(*bitmap);
 
     if (!bitmap->readyToDraw()) {
@@ -216,8 +277,17 @@ void TextureCache::generateTexture(SkBitmap* bitmap, Texture* texture, bool rege
         return;
     }
 
+    ATRACE_FORMAT("Upload %ux%u Texture", bitmap->width(), bitmap->height());
+
+    // We could also enable mipmapping if both bitmap dimensions are powers
+    // of 2 but we'd have to deal with size changes. Let's keep this simple
+    const bool canMipMap = Extensions::getInstance().hasNPot();
+
+    // If the texture had mipmap enabled but not anymore,
+    // force a glTexImage2D to discard the mipmap levels
     const bool resize = !regenerate || bitmap->width() != int(texture->width) ||
-            bitmap->height() != int(texture->height);
+            bitmap->height() != int(texture->height) ||
+            (regenerate && canMipMap && texture->mipMap && !bitmap->hasHardwareMipMap());
 
     if (!regenerate) {
         glGenTextures(1, &texture->id);
@@ -227,40 +297,45 @@ void TextureCache::generateTexture(SkBitmap* bitmap, Texture* texture, bool rege
     texture->width = bitmap->width();
     texture->height = bitmap->height();
 
-    glBindTexture(GL_TEXTURE_2D, texture->id);
-    if (!regenerate) {
-        glPixelStorei(GL_UNPACK_ALIGNMENT, bitmap->bytesPerPixel());
-    }
+    Caches::getInstance().bindTexture(texture->id);
 
-    switch (bitmap->getConfig()) {
-    case SkBitmap::kA8_Config:
-        if (!regenerate) {
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        }
-        uploadToTexture(resize, GL_ALPHA, bitmap->rowBytesAsPixels(), texture->height,
-                GL_UNSIGNED_BYTE, bitmap->getPixels());
+    switch (bitmap->colorType()) {
+    case kAlpha_8_SkColorType:
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        uploadToTexture(resize, GL_ALPHA, bitmap->rowBytesAsPixels(), bitmap->bytesPerPixel(),
+                texture->width, texture->height, GL_UNSIGNED_BYTE, bitmap->getPixels());
         texture->blend = true;
         break;
-    case SkBitmap::kRGB_565_Config:
-        uploadToTexture(resize, GL_RGB, bitmap->rowBytesAsPixels(), texture->height,
-                GL_UNSIGNED_SHORT_5_6_5, bitmap->getPixels());
+    case kRGB_565_SkColorType:
+        glPixelStorei(GL_UNPACK_ALIGNMENT, bitmap->bytesPerPixel());
+        uploadToTexture(resize, GL_RGB, bitmap->rowBytesAsPixels(), bitmap->bytesPerPixel(),
+                texture->width, texture->height, GL_UNSIGNED_SHORT_5_6_5, bitmap->getPixels());
         texture->blend = false;
         break;
-    case SkBitmap::kARGB_8888_Config:
-        uploadToTexture(resize, GL_RGBA, bitmap->rowBytesAsPixels(), texture->height,
-                GL_UNSIGNED_BYTE, bitmap->getPixels());
+    case kN32_SkColorType:
+        glPixelStorei(GL_UNPACK_ALIGNMENT, bitmap->bytesPerPixel());
+        uploadToTexture(resize, GL_RGBA, bitmap->rowBytesAsPixels(), bitmap->bytesPerPixel(),
+                texture->width, texture->height, GL_UNSIGNED_BYTE, bitmap->getPixels());
         // Do this after calling getPixels() to make sure Skia's deferred
         // decoding happened
         texture->blend = !bitmap->isOpaque();
         break;
-    case SkBitmap::kARGB_4444_Config:
-    case SkBitmap::kIndex8_Config:
+    case kARGB_4444_SkColorType:
+    case kIndex_8_SkColorType:
+        glPixelStorei(GL_UNPACK_ALIGNMENT, bitmap->bytesPerPixel());
         uploadLoFiTexture(resize, bitmap, texture->width, texture->height);
         texture->blend = !bitmap->isOpaque();
         break;
     default:
-        ALOGW("Unsupported bitmap config: %d", bitmap->getConfig());
+        ALOGW("Unsupported bitmap colorType: %d", bitmap->colorType());
         break;
+    }
+
+    if (canMipMap) {
+        texture->mipMap = bitmap->hasHardwareMipMap();
+        if (texture->mipMap) {
+            glGenerateMipmap(GL_TEXTURE_2D);
+        }
     }
 
     if (!regenerate) {
@@ -269,27 +344,58 @@ void TextureCache::generateTexture(SkBitmap* bitmap, Texture* texture, bool rege
     }
 }
 
-void TextureCache::uploadLoFiTexture(bool resize, SkBitmap* bitmap,
+void TextureCache::uploadLoFiTexture(bool resize, const SkBitmap* bitmap,
         uint32_t width, uint32_t height) {
     SkBitmap rgbaBitmap;
-    rgbaBitmap.setConfig(SkBitmap::kARGB_8888_Config, width, height);
-    rgbaBitmap.allocPixels();
+    rgbaBitmap.allocPixels(SkImageInfo::MakeN32(width, height, bitmap->alphaType()));
     rgbaBitmap.eraseColor(0);
-    rgbaBitmap.setIsOpaque(bitmap->isOpaque());
 
     SkCanvas canvas(rgbaBitmap);
     canvas.drawBitmap(*bitmap, 0.0f, 0.0f, NULL);
 
-    uploadToTexture(resize, GL_RGBA, rgbaBitmap.rowBytesAsPixels(), height,
-            GL_UNSIGNED_BYTE, rgbaBitmap.getPixels());
+    uploadToTexture(resize, GL_RGBA, rgbaBitmap.rowBytesAsPixels(), rgbaBitmap.bytesPerPixel(),
+            width, height, GL_UNSIGNED_BYTE, rgbaBitmap.getPixels());
 }
 
-void TextureCache::uploadToTexture(bool resize, GLenum format, GLsizei width, GLsizei height,
-        GLenum type, const GLvoid * data) {
-    if (resize) {
-        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, type, data);
+void TextureCache::uploadToTexture(bool resize, GLenum format, GLsizei stride, GLsizei bpp,
+        GLsizei width, GLsizei height, GLenum type, const GLvoid * data) {
+    const bool useStride = stride != width && Extensions::getInstance().hasUnpackRowLength();
+    if ((stride == width) || useStride) {
+        if (useStride) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, stride);
+        }
+
+        if (resize) {
+            glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, type, data);
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, type, data);
+        }
+
+        if (useStride) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
     } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, type, data);
+        //  With OpenGL ES 2.0 we need to copy the bitmap in a temporary buffer
+        //  if the stride doesn't match the width
+
+        GLvoid * temp = (GLvoid *) malloc(width * height * bpp);
+        if (!temp) return;
+
+        uint8_t * pDst = (uint8_t *)temp;
+        uint8_t * pSrc = (uint8_t *)data;
+        for (GLsizei i = 0; i < height; i++) {
+            memcpy(pDst, pSrc, width * bpp);
+            pDst += width * bpp;
+            pSrc += stride * bpp;
+        }
+
+        if (resize) {
+            glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, type, temp);
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, type, temp);
+        }
+
+        free(temp);
     }
 }
 

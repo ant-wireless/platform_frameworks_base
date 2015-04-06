@@ -17,7 +17,6 @@
 package android.hardware.usb;
 
 import android.os.ParcelFileDescriptor;
-import android.util.Log;
 
 import java.io.FileDescriptor;
 
@@ -33,7 +32,7 @@ public class UsbDeviceConnection {
     private final UsbDevice mDevice;
 
     // used by the JNI code
-    private int mNativeContext;
+    private long mNativeContext;
 
     /**
      * UsbDevice should only be instantiated by UsbService implementation
@@ -102,12 +101,36 @@ public class UsbDeviceConnection {
     }
 
     /**
+     * Sets the current {@link android.hardware.usb.UsbInterface}.
+     * Used to select between two interfaces with the same ID but different alternate setting.
+     *
+     * @return true if the interface was successfully selected
+     */
+    public boolean setInterface(UsbInterface intf) {
+        return native_set_interface(intf.getId(), intf.getAlternateSetting());
+    }
+
+    /**
+     * Sets the device's current {@link android.hardware.usb.UsbConfiguration}.
+     *
+     * @return true if the configuration was successfully set
+     */
+    public boolean setConfiguration(UsbConfiguration configuration) {
+        return native_set_configuration(configuration.getId());
+    }
+
+    /**
      * Performs a control transaction on endpoint zero for this device.
      * The direction of the transfer is determined by the request type.
      * If requestType & {@link UsbConstants#USB_ENDPOINT_DIR_MASK} is
      * {@link UsbConstants#USB_DIR_OUT}, then the transfer is a write,
      * and if it is {@link UsbConstants#USB_DIR_IN}, then the transfer
      * is a read.
+     * <p>
+     * This method transfers data starting from index 0 in the buffer.
+     * To specify a different offset, use
+     * {@link #controlTransfer(int, int, int, int, byte[], int, int, int)}.
+     * </p>
      *
      * @param requestType request type for this transaction
      * @param request request ID for this transaction
@@ -122,22 +145,73 @@ public class UsbDeviceConnection {
      */
     public int controlTransfer(int requestType, int request, int value,
             int index, byte[] buffer, int length, int timeout) {
-        return native_control_request(requestType, request, value, index, buffer, length, timeout);
+        return controlTransfer(requestType, request, value, index, buffer, 0, length, timeout);
     }
 
     /**
-     * Performs a bulk transaction on the given endpoint.
-     * The direction of the transfer is determined by the direction of the endpoint
+     * Performs a control transaction on endpoint zero for this device.
+     * The direction of the transfer is determined by the request type.
+     * If requestType & {@link UsbConstants#USB_ENDPOINT_DIR_MASK} is
+     * {@link UsbConstants#USB_DIR_OUT}, then the transfer is a write,
+     * and if it is {@link UsbConstants#USB_DIR_IN}, then the transfer
+     * is a read.
      *
-     * @param endpoint the endpoint for this transaction
-     * @param buffer buffer for data to send or receive,
+     * @param requestType request type for this transaction
+     * @param request request ID for this transaction
+     * @param value value field for this transaction
+     * @param index index field for this transaction
+     * @param buffer buffer for data portion of transaction,
+     * or null if no data needs to be sent or received
+     * @param offset the index of the first byte in the buffer to send or receive
      * @param length the length of the data to send or receive
      * @param timeout in milliseconds
      * @return length of data transferred (or zero) for success,
      * or negative value for failure
      */
-    public int bulkTransfer(UsbEndpoint endpoint, byte[] buffer, int length, int timeout) {
-        return native_bulk_request(endpoint.getAddress(), buffer, length, timeout);
+    public int controlTransfer(int requestType, int request, int value, int index,
+            byte[] buffer, int offset, int length, int timeout) {
+        checkBounds(buffer, offset, length);
+        return native_control_request(requestType, request, value, index,
+                buffer, offset, length, timeout);
+    }
+
+    /**
+     * Performs a bulk transaction on the given endpoint.
+     * The direction of the transfer is determined by the direction of the endpoint.
+     * <p>
+     * This method transfers data starting from index 0 in the buffer.
+     * To specify a different offset, use
+     * {@link #bulkTransfer(UsbEndpoint, byte[], int, int, int)}.
+     * </p>
+     *
+     * @param endpoint the endpoint for this transaction
+     * @param buffer buffer for data to send or receive
+     * @param length the length of the data to send or receive
+     * @param timeout in milliseconds
+     * @return length of data transferred (or zero) for success,
+     * or negative value for failure
+     */
+    public int bulkTransfer(UsbEndpoint endpoint,
+            byte[] buffer, int length, int timeout) {
+        return bulkTransfer(endpoint, buffer, 0, length, timeout);
+    }
+
+    /**
+     * Performs a bulk transaction on the given endpoint.
+     * The direction of the transfer is determined by the direction of the endpoint.
+     *
+     * @param endpoint the endpoint for this transaction
+     * @param buffer buffer for data to send or receive
+     * @param offset the index of the first byte in the buffer to send or receive
+     * @param length the length of the data to send or receive
+     * @param timeout in milliseconds
+     * @return length of data transferred (or zero) for success,
+     * or negative value for failure
+     */
+    public int bulkTransfer(UsbEndpoint endpoint,
+            byte[] buffer, int offset, int length, int timeout) {
+        checkBounds(buffer, offset, length);
+        return native_bulk_request(endpoint.getAddress(), buffer, offset, length, timeout);
     }
 
     /**
@@ -168,15 +242,25 @@ public class UsbDeviceConnection {
         return native_get_serial();
     }
 
+    private static void checkBounds(byte[] buffer, int start, int length) {
+        final int bufferLength = (buffer != null ? buffer.length : 0);
+        if (start < 0 || start + length > bufferLength) {
+            throw new IllegalArgumentException("Buffer start or length out of bounds.");
+        }
+    }
+
     private native boolean native_open(String deviceName, FileDescriptor pfd);
     private native void native_close();
     private native int native_get_fd();
     private native byte[] native_get_desc();
     private native boolean native_claim_interface(int interfaceID, boolean force);
     private native boolean native_release_interface(int interfaceID);
+    private native boolean native_set_interface(int interfaceID, int alternateSetting);
+    private native boolean native_set_configuration(int configurationID);
     private native int native_control_request(int requestType, int request, int value,
-            int index, byte[] buffer, int length, int timeout);
-    private native int native_bulk_request(int endpoint, byte[] buffer, int length, int timeout);
+            int index, byte[] buffer, int offset, int length, int timeout);
+    private native int native_bulk_request(int endpoint, byte[] buffer,
+            int offset, int length, int timeout);
     private native UsbRequest native_request_wait();
     private native String native_get_serial();
 }

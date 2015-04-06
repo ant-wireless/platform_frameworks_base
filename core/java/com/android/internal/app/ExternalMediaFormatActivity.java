@@ -25,6 +25,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Bundle;
+import android.os.storage.StorageVolume;
 import android.util.Log;
 
 /**
@@ -58,7 +59,6 @@ public class ExternalMediaFormatActivity extends AlertActivity implements Dialog
         Log.d("ExternalMediaFormatActivity", "onCreate!");
         // Set up the "dialog"
         final AlertController.AlertParams p = mAlertParams;
-        p.mIconId = com.android.internal.R.drawable.stat_sys_warning;
         p.mTitle = getString(com.android.internal.R.string.extmedia_format_title);
         p.mMessage = getString(com.android.internal.R.string.extmedia_format_message);
         p.mPositiveButtonText = getString(com.android.internal.R.string.extmedia_format_button_format);
@@ -95,6 +95,10 @@ public class ExternalMediaFormatActivity extends AlertActivity implements Dialog
         if (which == POSITIVE_BUTTON) {
             Intent intent = new Intent(ExternalStorageFormatter.FORMAT_ONLY);
             intent.setComponent(ExternalStorageFormatter.COMPONENT_NAME);
+            // Transfer the storage volume to the new intent
+            final StorageVolume storageVolume = getIntent().getParcelableExtra(
+                    StorageVolume.EXTRA_STORAGE_VOLUME);
+            intent.putExtra(StorageVolume.EXTRA_STORAGE_VOLUME, storageVolume);
             startService(intent);
         }
 

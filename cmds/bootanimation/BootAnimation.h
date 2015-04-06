@@ -21,7 +21,7 @@
 #include <sys/types.h>
 
 #include <androidfw/AssetManager.h>
-#include <utils/threads.h>
+#include <utils/Thread.h>
 
 #include <EGL/egl.h>
 #include <GLES/gl.h>
@@ -30,6 +30,7 @@ class SkBitmap;
 
 namespace android {
 
+class AudioPlayer;
 class Surface;
 class SurfaceComposerClient;
 class SurfaceControl;
@@ -71,6 +72,8 @@ private:
             String8 path;
             SortedVector<Frame> frames;
             bool playUntilComplete;
+            float backgroundColor[3];
+            FileMap* audioFile;
         };
         int fps;
         int width;
@@ -79,13 +82,15 @@ private:
     };
 
     status_t initTexture(Texture* texture, AssetManager& asset, const char* name);
-    status_t initTexture(void* buffer, size_t len);
+    status_t initTexture(const Animation::Frame& frame);
     bool android();
+    bool readFile(const char* name, String8& outString);
     bool movie();
 
     void checkExit();
 
     sp<SurfaceComposerClient>       mSession;
+    sp<AudioPlayer>                 mAudioPlayer;
     AssetManager mAssets;
     Texture     mAndroid[2];
     int         mWidth;
@@ -95,8 +100,7 @@ private:
     EGLDisplay  mSurface;
     sp<SurfaceControl> mFlingerSurfaceControl;
     sp<Surface> mFlingerSurface;
-    bool        mAndroidAnimation;
-    ZipFileRO   mZip;
+    ZipFileRO   *mZip;
 };
 
 // ---------------------------------------------------------------------------

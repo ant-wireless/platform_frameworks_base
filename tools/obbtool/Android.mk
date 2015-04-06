@@ -18,9 +18,10 @@ LOCAL_CFLAGS := -Wall -Werror
 #LOCAL_C_INCLUDES +=
 
 LOCAL_STATIC_LIBRARIES := \
-	libutils \
 	libandroidfw \
-	libcutils
+	libutils \
+	libcutils \
+	liblog
 
 ifeq ($(HOST_OS),linux)
 LOCAL_LDLIBS += -ldl -lpthread
@@ -38,7 +39,6 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_CFLAGS := -Wall -Werror
 LOCAL_SRC_FILES := pbkdf2gen.cpp
 LOCAL_LDLIBS += -ldl
-LOCAL_C_INCLUDES := external/openssl/include $(LOCAL_C_INCLUDES)
 LOCAL_STATIC_LIBRARIES := libcrypto_static
 
 include $(BUILD_HOST_EXECUTABLE)

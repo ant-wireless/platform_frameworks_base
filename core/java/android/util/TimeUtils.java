@@ -18,8 +18,11 @@ package android.util;
 
 import android.content.res.Resources;
 import android.content.res.XmlResourceParser;
+import android.os.SystemClock;
+import android.text.format.DateUtils;
 
-import libcore.util.ZoneInfoDB;
+import com.android.internal.util.XmlUtils;
+
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 
@@ -28,10 +31,10 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
-import java.util.TimeZone;
 import java.util.Date;
+import java.util.TimeZone;
 
-import com.android.internal.util.XmlUtils;
+import libcore.util.ZoneInfoDB;
 
 /**
  * A class containing utility methods related to time zones.
@@ -59,10 +62,7 @@ public class TimeUtils {
      */
     public static TimeZone getTimeZone(int offset, boolean dst, long when, String country) {
         TimeZone best = null;
-
-        Resources r = Resources.getSystem();
-        XmlResourceParser parser = r.getXml(com.android.internal.R.xml.time_zones_by_country);
-        Date d = new Date(when);
+        final Date d = new Date(when);
 
         TimeZone current = TimeZone.getDefault();
         String currentName = current.getID();
@@ -232,7 +232,7 @@ public class TimeUtils {
      * during the lifetime of an activity.
      */
     public static String getTimeZoneDatabaseVersion() {
-        return ZoneInfoDB.getVersion();
+        return ZoneInfoDB.getInstance().getVersion();
     }
 
     /** @hide Field length that can hold 999 days of time */
@@ -242,8 +242,13 @@ public class TimeUtils {
     private static final int SECONDS_PER_HOUR = 60 * 60;
     private static final int SECONDS_PER_DAY = 24 * 60 * 60;
 
+    /** @hide */
+    public static final long NANOS_PER_MS = 1000000;
+
     private static final Object sFormatSync = new Object();
     private static char[] sFormatStr = new char[HUNDRED_DAY_FIELD_LEN+5];
+
+    private static final long LARGEST_DURATION = (1000 * DateUtils.DAY_IN_MILLIS) - 1;
 
     static private int accumField(int amt, int suffix, boolean always, int zeropad) {
         if (amt > 99 || (always && zeropad >= 3)) {
@@ -305,6 +310,10 @@ public class TimeUtils {
         } else {
             prefix = '-';
             duration = -duration;
+        }
+
+        if (duration > LARGEST_DURATION) {
+            duration = LARGEST_DURATION;
         }
 
         int millis = (int)(duration%1000);
@@ -381,6 +390,18 @@ public class TimeUtils {
             return;
         }
         formatDuration(time-now, pw, 0);
+    }
+
+    /** @hide Just for debugging; not internationalized. */
+    public static String formatUptime(long time) {
+        final long diff = time - SystemClock.uptimeMillis();
+        if (diff > 0) {
+            return time + " (in " + diff + " ms)";
+        }
+        if (diff < 0) {
+            return time + " (" + -diff + " ms ago)";
+        }
+        return time + " (now)";
     }
 
     /**

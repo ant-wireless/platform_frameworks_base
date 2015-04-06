@@ -22,6 +22,7 @@ include $(all-subdir-makefiles)
 # Build main libfilterfw
 
 include $(CLEAR_VARS)
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 
 LOCAL_MODULE := libfilterfw
 
@@ -30,24 +31,16 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_WHOLE_STATIC_LIBRARIES := libfilterfw_jni \
                                 libfilterfw_native
 
-LOCAL_SHARED_LIBRARIES := libstlport \
+LOCAL_SHARED_LIBRARIES := \
                           libGLESv2 \
                           libEGL \
                           libgui \
                           libdl \
                           libcutils \
                           libutils \
+                          liblog \
                           libandroid \
                           libjnigraphics \
-                          libmedia \
-                          libmedia_native
-
-# Don't prelink this library.  For more efficient code, you may want
-# to add this library to the prelink map and set this to true. However,
-# it's difficult to do this for applications that are not supplied as
-# part of a system image.
-LOCAL_PRELINK_MODULE := false
+                          libmedia
 
 include $(BUILD_SHARED_LIBRARY)
-
-

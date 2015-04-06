@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * and does not constitute a generic threading framework. AsyncTasks should ideally be
  * used for short operations (a few seconds at the most.) If you need to keep threads
  * running for long periods of time, it is highly recommended you use the various APIs
- * provided by the <code>java.util.concurrent</code> pacakge such as {@link Executor},
+ * provided by the <code>java.util.concurrent</code> package such as {@link Executor},
  * {@link ThreadPoolExecutor} and {@link FutureTask}.</p>
  *
  * <p>An asynchronous task is defined by a computation that runs on a background thread and
@@ -110,7 +110,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <h2>The 4 steps</h2>
  * <p>When an asynchronous task is executed, the task goes through 4 steps:</p>
  * <ol>
- *     <li>{@link #onPreExecute()}, invoked on the UI thread immediately after the task
+ *     <li>{@link #onPreExecute()}, invoked on the UI thread before the task
  *     is executed. This step is normally used to setup the task, for instance by
  *     showing a progress bar in the user interface.</li>
  *     <li>{@link #doInBackground}, invoked on the background thread
@@ -177,8 +177,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public abstract class AsyncTask<Params, Progress, Result> {
     private static final String LOG_TAG = "AsyncTask";
 
-    private static final int CORE_POOL_SIZE = 5;
-    private static final int MAXIMUM_POOL_SIZE = 128;
+    private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
+    private static final int CORE_POOL_SIZE = CPU_COUNT + 1;
+    private static final int MAXIMUM_POOL_SIZE = CPU_COUNT * 2 + 1;
     private static final int KEEP_ALIVE = 1;
 
     private static final ThreadFactory sThreadFactory = new ThreadFactory() {
@@ -190,7 +191,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
     };
 
     private static final BlockingQueue<Runnable> sPoolWorkQueue =
-            new LinkedBlockingQueue<Runnable>(10);
+            new LinkedBlockingQueue<Runnable>(128);
 
     /**
      * An {@link Executor} that can be used to execute tasks in parallel.
@@ -208,9 +209,9 @@ public abstract class AsyncTask<Params, Progress, Result> {
     private static final int MESSAGE_POST_RESULT = 0x1;
     private static final int MESSAGE_POST_PROGRESS = 0x2;
 
-    private static final InternalHandler sHandler = new InternalHandler();
-
     private static volatile Executor sDefaultExecutor = SERIAL_EXECUTOR;
+    private static InternalHandler sHandler;
+
     private final WorkerRunnable<Params, Result> mWorker;
     private final FutureTask<Result> mFuture;
 
@@ -264,9 +265,13 @@ public abstract class AsyncTask<Params, Progress, Result> {
         FINISHED,
     }
 
-    /** @hide Used to force static handler to be created. */
-    public static void init() {
-        sHandler.getLooper();
+    private static Handler getHandler() {
+        synchronized (AsyncTask.class) {
+            if (sHandler == null) {
+                sHandler = new InternalHandler();
+            }
+            return sHandler;
+        }
     }
 
     /** @hide */
@@ -314,7 +319,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
 
     private Result postResult(Result result) {
         @SuppressWarnings("unchecked")
-        Message message = sHandler.obtainMessage(MESSAGE_POST_RESULT,
+        Message message = getHandler().obtainMessage(MESSAGE_POST_RESULT,
                 new AsyncTaskResult<Result>(this, result));
         message.sendToTarget();
         return result;
@@ -609,7 +614,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
      * still running. Each call to this method will trigger the execution of
      * {@link #onProgressUpdate} on the UI thread.
      *
-     * {@link #onProgressUpdate} will note be called if the task has been
+     * {@link #onProgressUpdate} will not be called if the task has been
      * canceled.
      *
      * @param values The progress values to update the UI with.
@@ -619,7 +624,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
      */
     protected final void publishProgress(Progress... values) {
         if (!isCancelled()) {
-            sHandler.obtainMessage(MESSAGE_POST_PROGRESS,
+            getHandler().obtainMessage(MESSAGE_POST_PROGRESS,
                     new AsyncTaskResult<Progress>(this, values)).sendToTarget();
         }
     }
@@ -634,10 +639,14 @@ public abstract class AsyncTask<Params, Progress, Result> {
     }
 
     private static class InternalHandler extends Handler {
+        public InternalHandler() {
+            super(Looper.getMainLooper());
+        }
+
         @SuppressWarnings({"unchecked", "RawUseOfParameterizedType"})
         @Override
         public void handleMessage(Message msg) {
-            AsyncTaskResult result = (AsyncTaskResult) msg.obj;
+            AsyncTaskResult<?> result = (AsyncTaskResult<?>) msg.obj;
             switch (msg.what) {
                 case MESSAGE_POST_RESULT:
                     // There is only one result

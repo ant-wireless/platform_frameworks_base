@@ -16,9 +16,16 @@
 
 package android.appwidget;
 
+import android.annotation.NonNull;
+import android.content.Context;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.content.res.Resources;
+import android.graphics.drawable.Drawable;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.content.ComponentName;
+import android.os.UserHandle;
 
 /**
  * Describes the meta data for an installed AppWidget provider.  The fields in this class
@@ -42,6 +49,21 @@ public class AppWidgetProviderInfo implements Parcelable {
      * Widget is resizable in both the horizontal and vertical axes.
      */
     public static final int RESIZE_BOTH = RESIZE_HORIZONTAL | RESIZE_VERTICAL;
+
+    /**
+     * Indicates that the widget can be displayed on the home screen. This is the default value.
+     */
+    public static final int WIDGET_CATEGORY_HOME_SCREEN = 1;
+
+    /**
+     * Indicates that the widget can be displayed on the keyguard.
+     */
+    public static final int WIDGET_CATEGORY_KEYGUARD = 2;
+
+    /**
+     * Indicates that the widget can be displayed within a space reserved for the search box.
+     */
+    public static final int WIDGET_CATEGORY_SEARCHBOX = 4;
 
     /**
      * Identity of this AppWidget component.  This component should be a {@link
@@ -111,6 +133,16 @@ public class AppWidgetProviderInfo implements Parcelable {
     public int initialLayout;
 
     /**
+     * The resource id of the initial layout for this AppWidget when it is displayed on keyguard.
+     * This parameter only needs to be provided if the widget can be displayed on the keyguard,
+     * see {@link #widgetCategory}.
+     *
+     * <p>This field corresponds to the <code>android:initialKeyguardLayout</code> attribute in
+     * the AppWidget meta-data file.
+     */
+    public int initialKeyguardLayout;
+
+    /**
      * The activity to launch that will configure the AppWidget.
      *
      * <p>This class name of field corresponds to the <code>android:configure</code> attribute in
@@ -120,16 +152,15 @@ public class AppWidgetProviderInfo implements Parcelable {
     public ComponentName configure;
 
     /**
-     * The label to display to the user in the AppWidget picker.  If not supplied in the
-     * xml, the application label will be used.
+     * The label to display to the user in the AppWidget picker.
      *
-     * <p>This field corresponds to the <code>android:label</code> attribute in
-     * the <code>&lt;receiver&gt;</code> element in the AndroidManifest.xml file.
+     * @deprecated Use {@link #loadLabel(android.content.pm.PackageManager)}.
      */
+    @Deprecated
     public String label;
 
     /**
-     * The icon to display for this AppWidget in the AppWidget picker.  If not supplied in the
+     * The icon to display for this AppWidget in the AppWidget picker. If not supplied in the
      * xml, the application icon will be used.
      *
      * <p>This field corresponds to the <code>android:icon</code> attribute in
@@ -152,7 +183,7 @@ public class AppWidgetProviderInfo implements Parcelable {
      * <p>This field corresponds to the <code>android:previewImage</code> attribute in
      * the <code>&lt;receiver&gt;</code> element in the AndroidManifest.xml file.
      */
-	public int previewImage;
+    public int previewImage;
 
     /**
      * The rules by which a widget can be resized. See {@link #RESIZE_NONE},
@@ -164,12 +195,28 @@ public class AppWidgetProviderInfo implements Parcelable {
      */
     public int resizeMode;
 
+    /**
+     * Determines whether this widget can be displayed on the home screen, the keyguard, or both.
+     * A widget which is displayed on both needs to ensure that it follows the design guidelines
+     * for both widget classes. This can be achieved by querying the AppWidget options in its
+     * widget provider's update method.
+     *
+     * <p>This field corresponds to the <code>widgetCategory</code> attribute in
+     * the AppWidget meta-data file.
+     */
+    public int widgetCategory;
+
+    /** @hide */
+    public ActivityInfo providerInfo;
+
     public AppWidgetProviderInfo() {
+
     }
 
     /**
      * Unflatten the AppWidgetProviderInfo from a parcel.
      */
+    @SuppressWarnings("deprecation")
     public AppWidgetProviderInfo(Parcel in) {
         if (0 != in.readInt()) {
             this.provider = new ComponentName(in);
@@ -180,6 +227,7 @@ public class AppWidgetProviderInfo implements Parcelable {
         this.minResizeHeight = in.readInt();
         this.updatePeriodMillis = in.readInt();
         this.initialLayout = in.readInt();
+        this.initialKeyguardLayout = in.readInt();
         if (0 != in.readInt()) {
             this.configure = new ComponentName(in);
         }
@@ -188,8 +236,75 @@ public class AppWidgetProviderInfo implements Parcelable {
         this.previewImage = in.readInt();
         this.autoAdvanceViewId = in.readInt();
         this.resizeMode = in.readInt();
+        this.widgetCategory = in.readInt();
+        this.providerInfo = in.readParcelable(null);
     }
 
+    /**
+     * Loads the localized label to display to the user in the AppWidget picker.
+     *
+     * @param packageManager Package manager instance for loading resources.
+     * @return The label for the current locale.
+     */
+    public final String loadLabel(PackageManager packageManager) {
+        CharSequence label = providerInfo.loadLabel(packageManager);
+        if (label != null) {
+            return label.toString().trim();
+        }
+        return null;
+    }
+
+    /**
+     * Loads the icon to display for this AppWidget in the AppWidget picker. If not
+     * supplied in the xml, the application icon will be used. A client can optionally
+     * provide a desired density such as {@link android.util.DisplayMetrics#DENSITY_LOW}
+     * {@link android.util.DisplayMetrics#DENSITY_MEDIUM}, etc. If no density is
+     * provided, the density of the current display will be used.
+     * <p>
+     * The loaded icon corresponds to the <code>android:icon</code> attribute in
+     * the <code>&lt;receiver&gt;</code> element in the AndroidManifest.xml file.
+     * </p>
+     *
+     * @param context Context for accessing resources.
+     * @param density The optional desired density as per
+     *         {@link android.util.DisplayMetrics#densityDpi}.
+     * @return The provider icon.
+     */
+    public final Drawable loadIcon(@NonNull Context context, int density) {
+        return loadDrawable(context, density, providerInfo.getIconResource(), true);
+    }
+
+    /**
+     * Loads a preview of what the AppWidget will look like after it's configured.
+     * A client can optionally provide a desired density such as
+     * {@link android.util.DisplayMetrics#DENSITY_LOW}
+     * {@link android.util.DisplayMetrics#DENSITY_MEDIUM}, etc. If no density is
+     * provided, the density of the current display will be used.
+     * <p>
+     * The loaded image corresponds to the <code>android:previewImage</code> attribute
+     * in the <code>&lt;receiver&gt;</code> element in the AndroidManifest.xml file.
+     * </p>
+     *
+     * @param context Context for accessing resources.
+     * @param density The optional desired density as per
+     *         {@link android.util.DisplayMetrics#densityDpi}.
+     * @return The widget preview image or null if preview image is not available.
+     */
+    public final Drawable loadPreviewImage(@NonNull Context context, int density) {
+        return loadDrawable(context, density, previewImage, false);
+    }
+
+    /**
+     * Gets the user profile in which the provider resides.
+     *
+     * @return The hosting user profile.
+     */
+    public final UserHandle getProfile() {
+        return new UserHandle(UserHandle.getUserId(providerInfo.applicationInfo.uid));
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
     public void writeToParcel(android.os.Parcel out, int flags) {
         if (this.provider != null) {
             out.writeInt(1);
@@ -203,6 +318,7 @@ public class AppWidgetProviderInfo implements Parcelable {
         out.writeInt(this.minResizeHeight);
         out.writeInt(this.updatePeriodMillis);
         out.writeInt(this.initialLayout);
+        out.writeInt(this.initialKeyguardLayout);
         if (this.configure != null) {
             out.writeInt(1);
             this.configure.writeToParcel(out, flags);
@@ -214,10 +330,52 @@ public class AppWidgetProviderInfo implements Parcelable {
         out.writeInt(this.previewImage);
         out.writeInt(this.autoAdvanceViewId);
         out.writeInt(this.resizeMode);
+        out.writeInt(this.widgetCategory);
+        out.writeParcelable(this.providerInfo, flags);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public AppWidgetProviderInfo clone() {
+        AppWidgetProviderInfo that = new AppWidgetProviderInfo();
+        that.provider = this.provider == null ? null : this.provider.clone();
+        that.minWidth = this.minWidth;
+        that.minHeight = this.minHeight;
+        that.minResizeWidth = this.minResizeHeight;
+        that.minResizeHeight = this.minResizeHeight;
+        that.updatePeriodMillis = this.updatePeriodMillis;
+        that.initialLayout = this.initialLayout;
+        that.initialKeyguardLayout = this.initialKeyguardLayout;
+        that.configure = this.configure == null ? null : this.configure.clone();
+        that.label = this.label == null ? null : this.label.substring(0);
+        that.icon = this.icon;
+        that.previewImage = this.previewImage;
+        that.autoAdvanceViewId = this.autoAdvanceViewId;
+        that.resizeMode = this.resizeMode;
+        that.widgetCategory = this.widgetCategory;
+        that.providerInfo = this.providerInfo;
+        return that;
     }
 
     public int describeContents() {
         return 0;
+    }
+
+    private Drawable loadDrawable(Context context, int density, int resourceId,
+            boolean loadDefaultIcon) {
+        try {
+            Resources resources = context.getPackageManager().getResourcesForApplication(
+                    providerInfo.applicationInfo);
+            if (resourceId > 0) {
+                if (density <= 0) {
+                    density = context.getResources().getDisplayMetrics().densityDpi;
+                }
+                return resources.getDrawableForDensity(resourceId, density);
+            }
+        } catch (PackageManager.NameNotFoundException | Resources.NotFoundException e) {
+            /* ignore */
+        }
+        return loadDefaultIcon ? providerInfo.loadIcon(context.getPackageManager()) : null;
     }
 
     /**
@@ -238,6 +396,6 @@ public class AppWidgetProviderInfo implements Parcelable {
     };
 
     public String toString() {
-        return "AppWidgetProviderInfo(provider=" + this.provider + ")";
+        return "AppWidgetProviderInfo(" + getProfile() + '/' + provider + ')';
     }
 }

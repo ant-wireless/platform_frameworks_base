@@ -19,16 +19,25 @@ package android.widget;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
 import android.content.res.Resources;
+import android.graphics.Canvas;
 import android.media.AudioManager;
+import android.media.ClosedCaptionRenderer;
+import android.media.MediaFormat;
 import android.media.MediaPlayer;
-import android.media.Metadata;
 import android.media.MediaPlayer.OnCompletionListener;
 import android.media.MediaPlayer.OnErrorListener;
+import android.media.MediaPlayer.OnInfoListener;
+import android.media.Metadata;
+import android.media.SubtitleController;
+import android.media.SubtitleTrack.RenderingWidget;
+import android.media.TtmlRenderer;
+import android.media.WebVttRenderer;
 import android.net.Uri;
+import android.os.Looper;
 import android.util.AttributeSet;
 import android.util.Log;
+import android.util.Pair;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
@@ -39,21 +48,33 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.MediaController.MediaPlayerControl;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Map;
+import java.util.Vector;
 
 /**
  * Displays a video file.  The VideoView class
  * can load images from various sources (such as resources or content
  * providers), takes care of computing its measurement from the video so that
  * it can be used in any layout manager, and provides various display options
- * such as scaling and tinting.
+ * such as scaling and tinting.<p>
+ *
+ * <em>Note: VideoView does not retain its full state when going into the
+ * background.</em>  In particular, it does not restore the current play state,
+ * play position, selected tracks, or any subtitle tracks added via
+ * {@link #addSubtitleSource addSubtitleSource()}.  Applications should
+ * save and restore these on their own in
+ * {@link android.app.Activity#onSaveInstanceState} and
+ * {@link android.app.Activity#onRestoreInstanceState}.<p>
+ * Also note that the audio session id (from {@link #getAudioSessionId}) may
+ * change from its previously returned value when the VideoView is restored.
  */
-public class VideoView extends SurfaceView implements MediaPlayerControl {
+public class VideoView extends SurfaceView
+        implements MediaPlayerControl, SubtitleController.Anchor {
     private String TAG = "VideoView";
     // settable by the client
     private Uri         mUri;
     private Map<String, String> mHeaders;
-    private int         mDuration;
 
     // all possible internal states
     private static final int STATE_ERROR              = -1;
@@ -75,6 +96,7 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
     // All the stuff we need for playing and showing a video
     private SurfaceHolder mSurfaceHolder = null;
     private MediaPlayer mMediaPlayer = null;
+    private int         mAudioSession;
     private int         mVideoWidth;
     private int         mVideoHeight;
     private int         mSurfaceWidth;
@@ -84,10 +106,17 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
     private MediaPlayer.OnPreparedListener mOnPreparedListener;
     private int         mCurrentBufferPercentage;
     private OnErrorListener mOnErrorListener;
+    private OnInfoListener  mOnInfoListener;
     private int         mSeekWhenPrepared;  // recording the seek position while preparing
     private boolean     mCanPause;
     private boolean     mCanSeekBack;
     private boolean     mCanSeekForward;
+
+    /** Subtitle rendering widget overlaid on top of the video. */
+    private RenderingWidget mSubtitleWidget;
+
+    /** Listener for changes to subtitle data, used to redraw when needed. */
+    private RenderingWidget.OnChangedListener mSubtitlesChangedListener;
 
     public VideoView(Context context) {
         super(context);
@@ -99,30 +128,76 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         initVideoView();
     }
 
-    public VideoView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public VideoView(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public VideoView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         initVideoView();
     }
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        //Log.i("@@@@", "onMeasure");
+        //Log.i("@@@@", "onMeasure(" + MeasureSpec.toString(widthMeasureSpec) + ", "
+        //        + MeasureSpec.toString(heightMeasureSpec) + ")");
+
         int width = getDefaultSize(mVideoWidth, widthMeasureSpec);
         int height = getDefaultSize(mVideoHeight, heightMeasureSpec);
         if (mVideoWidth > 0 && mVideoHeight > 0) {
-            if ( mVideoWidth * height  > width * mVideoHeight ) {
-                //Log.i("@@@", "image too tall, correcting");
+
+            int widthSpecMode = MeasureSpec.getMode(widthMeasureSpec);
+            int widthSpecSize = MeasureSpec.getSize(widthMeasureSpec);
+            int heightSpecMode = MeasureSpec.getMode(heightMeasureSpec);
+            int heightSpecSize = MeasureSpec.getSize(heightMeasureSpec);
+
+            if (widthSpecMode == MeasureSpec.EXACTLY && heightSpecMode == MeasureSpec.EXACTLY) {
+                // the size is fixed
+                width = widthSpecSize;
+                height = heightSpecSize;
+
+                // for compatibility, we adjust size based on aspect ratio
+                if ( mVideoWidth * height  < width * mVideoHeight ) {
+                    //Log.i("@@@", "image too wide, correcting");
+                    width = height * mVideoWidth / mVideoHeight;
+                } else if ( mVideoWidth * height  > width * mVideoHeight ) {
+                    //Log.i("@@@", "image too tall, correcting");
+                    height = width * mVideoHeight / mVideoWidth;
+                }
+            } else if (widthSpecMode == MeasureSpec.EXACTLY) {
+                // only the width is fixed, adjust the height to match aspect ratio if possible
+                width = widthSpecSize;
                 height = width * mVideoHeight / mVideoWidth;
-            } else if ( mVideoWidth * height  < width * mVideoHeight ) {
-                //Log.i("@@@", "image too wide, correcting");
+                if (heightSpecMode == MeasureSpec.AT_MOST && height > heightSpecSize) {
+                    // couldn't match aspect ratio within the constraints
+                    height = heightSpecSize;
+                }
+            } else if (heightSpecMode == MeasureSpec.EXACTLY) {
+                // only the height is fixed, adjust the width to match aspect ratio if possible
+                height = heightSpecSize;
                 width = height * mVideoWidth / mVideoHeight;
+                if (widthSpecMode == MeasureSpec.AT_MOST && width > widthSpecSize) {
+                    // couldn't match aspect ratio within the constraints
+                    width = widthSpecSize;
+                }
             } else {
-                //Log.i("@@@", "aspect ratio is correct: " +
-                        //width+"/"+height+"="+
-                        //mVideoWidth+"/"+mVideoHeight);
+                // neither the width nor the height are fixed, try to use actual video size
+                width = mVideoWidth;
+                height = mVideoHeight;
+                if (heightSpecMode == MeasureSpec.AT_MOST && height > heightSpecSize) {
+                    // too tall, decrease both width and height
+                    height = heightSpecSize;
+                    width = height * mVideoWidth / mVideoHeight;
+                }
+                if (widthSpecMode == MeasureSpec.AT_MOST && width > widthSpecSize) {
+                    // too wide, decrease both width and height
+                    width = widthSpecSize;
+                    height = width * mVideoHeight / mVideoWidth;
+                }
             }
+        } else {
+            // no size yet, just adopt the given spec sizes
         }
-        //Log.i("@@@@@@@@@@", "setting size: " + width + 'x' + height);
         setMeasuredDimension(width, height);
     }
 
@@ -139,33 +214,8 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
     }
 
     public int resolveAdjustedSize(int desiredSize, int measureSpec) {
-        int result = desiredSize;
-        int specMode = MeasureSpec.getMode(measureSpec);
-        int specSize =  MeasureSpec.getSize(measureSpec);
-
-        switch (specMode) {
-            case MeasureSpec.UNSPECIFIED:
-                /* Parent says we can be as big as we want. Just don't be larger
-                 * than max size imposed on ourselves.
-                 */
-                result = desiredSize;
-                break;
-
-            case MeasureSpec.AT_MOST:
-                /* Parent says we can be as big as we want, up to specSize.
-                 * Don't be larger than specSize, and don't be larger than
-                 * the max size imposed on ourselves.
-                 */
-                result = Math.min(desiredSize, specSize);
-                break;
-
-            case MeasureSpec.EXACTLY:
-                // No choice. Do what we are told.
-                result = specSize;
-                break;
-        }
-        return result;
-}
+        return getDefaultSize(desiredSize, measureSpec);
+    }
 
     private void initVideoView() {
         mVideoWidth = 0;
@@ -175,20 +225,38 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         setFocusable(true);
         setFocusableInTouchMode(true);
         requestFocus();
+        mPendingSubtitleTracks = new Vector<Pair<InputStream, MediaFormat>>();
         mCurrentState = STATE_IDLE;
         mTargetState  = STATE_IDLE;
     }
 
+    /**
+     * Sets video path.
+     *
+     * @param path the path of the video.
+     */
     public void setVideoPath(String path) {
         setVideoURI(Uri.parse(path));
     }
 
+    /**
+     * Sets video URI.
+     *
+     * @param uri the URI of the video.
+     */
     public void setVideoURI(Uri uri) {
         setVideoURI(uri, null);
     }
 
     /**
-     * @hide
+     * Sets video URI using specific headers.
+     *
+     * @param uri     the URI of the video.
+     * @param headers the headers for the URI request.
+     *                Note that the cross domain redirection is allowed by default, but that can be
+     *                changed with key/value pairs through the headers parameter with
+     *                "android-allow-cross-domain-redirect" as the key and "0" or "1" as the value
+     *                to disallow or allow cross domain redirection.
      */
     public void setVideoURI(Uri uri, Map<String, String> headers) {
         mUri = uri;
@@ -199,6 +267,43 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         invalidate();
     }
 
+    /**
+     * Adds an external subtitle source file (from the provided input stream.)
+     *
+     * Note that a single external subtitle source may contain multiple or no
+     * supported tracks in it. If the source contained at least one track in
+     * it, one will receive an {@link MediaPlayer#MEDIA_INFO_METADATA_UPDATE}
+     * info message. Otherwise, if reading the source takes excessive time,
+     * one will receive a {@link MediaPlayer#MEDIA_INFO_SUBTITLE_TIMED_OUT}
+     * message. If the source contained no supported track (including an empty
+     * source file or null input stream), one will receive a {@link
+     * MediaPlayer#MEDIA_INFO_UNSUPPORTED_SUBTITLE} message. One can find the
+     * total number of available tracks using {@link MediaPlayer#getTrackInfo()}
+     * to see what additional tracks become available after this method call.
+     *
+     * @param is     input stream containing the subtitle data.  It will be
+     *               closed by the media framework.
+     * @param format the format of the subtitle track(s).  Must contain at least
+     *               the mime type ({@link MediaFormat#KEY_MIME}) and the
+     *               language ({@link MediaFormat#KEY_LANGUAGE}) of the file.
+     *               If the file itself contains the language information,
+     *               specify "und" for the language.
+     */
+    public void addSubtitleSource(InputStream is, MediaFormat format) {
+        if (mMediaPlayer == null) {
+            mPendingSubtitleTracks.add(Pair.create(is, format));
+        } else {
+            try {
+                mMediaPlayer.addSubtitleSource(is, format);
+            } catch (IllegalStateException e) {
+                mInfoListener.onInfo(
+                        mMediaPlayer, MediaPlayer.MEDIA_INFO_UNSUPPORTED_SUBTITLE, 0);
+            }
+        }
+    }
+
+    private Vector<Pair<InputStream, MediaFormat>> mPendingSubtitleTracks;
+
     public void stopPlayback() {
         if (mMediaPlayer != null) {
             mMediaPlayer.stop();
@@ -206,6 +311,8 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             mMediaPlayer = null;
             mCurrentState = STATE_IDLE;
             mTargetState  = STATE_IDLE;
+            AudioManager am = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+            am.abandonAudioFocus(null);
         }
     }
 
@@ -214,22 +321,35 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             // not ready for playback just yet, will try again later
             return;
         }
-        // Tell the music playback service to pause
-        // TODO: these constants need to be published somewhere in the framework.
-        Intent i = new Intent("com.android.music.musicservicecommand");
-        i.putExtra("command", "pause");
-        mContext.sendBroadcast(i);
-
         // we shouldn't clear the target state, because somebody might have
         // called start() previously
         release(false);
+
+        AudioManager am = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+
         try {
             mMediaPlayer = new MediaPlayer();
+            // TODO: create SubtitleController in MediaPlayer, but we need
+            // a context for the subtitle renderers
+            final Context context = getContext();
+            final SubtitleController controller = new SubtitleController(
+                    context, mMediaPlayer.getMediaTimeProvider(), mMediaPlayer);
+            controller.registerRenderer(new WebVttRenderer(context));
+            controller.registerRenderer(new TtmlRenderer(context));
+            controller.registerRenderer(new ClosedCaptionRenderer(context));
+            mMediaPlayer.setSubtitleAnchor(controller, this);
+
+            if (mAudioSession != 0) {
+                mMediaPlayer.setAudioSessionId(mAudioSession);
+            } else {
+                mAudioSession = mMediaPlayer.getAudioSessionId();
+            }
             mMediaPlayer.setOnPreparedListener(mPreparedListener);
             mMediaPlayer.setOnVideoSizeChangedListener(mSizeChangedListener);
-            mDuration = -1;
             mMediaPlayer.setOnCompletionListener(mCompletionListener);
             mMediaPlayer.setOnErrorListener(mErrorListener);
+            mMediaPlayer.setOnInfoListener(mInfoListener);
             mMediaPlayer.setOnBufferingUpdateListener(mBufferingUpdateListener);
             mCurrentBufferPercentage = 0;
             mMediaPlayer.setDataSource(mContext, mUri, mHeaders);
@@ -237,6 +357,16 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
             mMediaPlayer.setScreenOnWhilePlaying(true);
             mMediaPlayer.prepareAsync();
+
+            for (Pair<InputStream, MediaFormat> pending: mPendingSubtitleTracks) {
+                try {
+                    mMediaPlayer.addSubtitleSource(pending.first, pending.second);
+                } catch (IllegalStateException e) {
+                    mInfoListener.onInfo(
+                            mMediaPlayer, MediaPlayer.MEDIA_INFO_UNSUPPORTED_SUBTITLE, 0);
+                }
+            }
+
             // we don't set the target state here either, but preserve the
             // target state that was there before.
             mCurrentState = STATE_PREPARING;
@@ -253,6 +383,8 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             mTargetState = STATE_ERROR;
             mErrorListener.onError(mMediaPlayer, MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
             return;
+        } finally {
+            mPendingSubtitleTracks.clear();
         }
     }
 
@@ -281,6 +413,7 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
                 mVideoHeight = mp.getVideoHeight();
                 if (mVideoWidth != 0 && mVideoHeight != 0) {
                     getHolder().setFixedSize(mVideoWidth, mVideoHeight);
+                    requestLayout();
                 }
             }
     };
@@ -358,6 +491,16 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             if (mOnCompletionListener != null) {
                 mOnCompletionListener.onCompletion(mMediaPlayer);
             }
+        }
+    };
+
+    private MediaPlayer.OnInfoListener mInfoListener =
+        new MediaPlayer.OnInfoListener() {
+        public  boolean onInfo(MediaPlayer mp, int arg1, int arg2) {
+            if (mOnInfoListener != null) {
+                mOnInfoListener.onInfo(mp, arg1, arg2);
+            }
+            return true;
         }
     };
 
@@ -455,6 +598,16 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         mOnErrorListener = l;
     }
 
+    /**
+     * Register a callback to be invoked when an informational event
+     * occurs during playback or setup.
+     *
+     * @param l The callback that will be run
+     */
+    public void setOnInfoListener(OnInfoListener l) {
+        mOnInfoListener = l;
+    }
+
     SurfaceHolder.Callback mSHCallback = new SurfaceHolder.Callback()
     {
         public void surfaceChanged(SurfaceHolder holder, int format,
@@ -495,10 +648,13 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
             mMediaPlayer.reset();
             mMediaPlayer.release();
             mMediaPlayer = null;
+            mPendingSubtitleTracks.clear();
             mCurrentState = STATE_IDLE;
             if (cleartargetstate) {
                 mTargetState  = STATE_IDLE;
             }
+            AudioManager am = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+            am.abandonAudioFocus(null);
         }
     }
 
@@ -568,6 +724,7 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         }
     }
 
+    @Override
     public void start() {
         if (isInPlaybackState()) {
             mMediaPlayer.start();
@@ -576,6 +733,7 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         mTargetState = STATE_PLAYING;
     }
 
+    @Override
     public void pause() {
         if (isInPlaybackState()) {
             if (mMediaPlayer.isPlaying()) {
@@ -594,19 +752,16 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         openVideo();
     }
 
-    // cache duration as mDuration for faster access
+    @Override
     public int getDuration() {
         if (isInPlaybackState()) {
-            if (mDuration > 0) {
-                return mDuration;
-            }
-            mDuration = mMediaPlayer.getDuration();
-            return mDuration;
+            return mMediaPlayer.getDuration();
         }
-        mDuration = -1;
-        return mDuration;
+
+        return -1;
     }
 
+    @Override
     public int getCurrentPosition() {
         if (isInPlaybackState()) {
             return mMediaPlayer.getCurrentPosition();
@@ -614,6 +769,7 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         return 0;
     }
 
+    @Override
     public void seekTo(int msec) {
         if (isInPlaybackState()) {
             mMediaPlayer.seekTo(msec);
@@ -623,10 +779,12 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
         }
     }
 
+    @Override
     public boolean isPlaying() {
         return isInPlaybackState() && mMediaPlayer.isPlaying();
     }
 
+    @Override
     public int getBufferPercentage() {
         if (mMediaPlayer != null) {
             return mCurrentBufferPercentage;
@@ -641,15 +799,127 @@ public class VideoView extends SurfaceView implements MediaPlayerControl {
                 mCurrentState != STATE_PREPARING);
     }
 
+    @Override
     public boolean canPause() {
         return mCanPause;
     }
 
+    @Override
     public boolean canSeekBackward() {
         return mCanSeekBack;
     }
 
+    @Override
     public boolean canSeekForward() {
         return mCanSeekForward;
+    }
+
+    @Override
+    public int getAudioSessionId() {
+        if (mAudioSession == 0) {
+            MediaPlayer foo = new MediaPlayer();
+            mAudioSession = foo.getAudioSessionId();
+            foo.release();
+        }
+        return mAudioSession;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+
+        if (mSubtitleWidget != null) {
+            mSubtitleWidget.onAttachedToWindow();
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+
+        if (mSubtitleWidget != null) {
+            mSubtitleWidget.onDetachedFromWindow();
+        }
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        super.onLayout(changed, left, top, right, bottom);
+
+        if (mSubtitleWidget != null) {
+            measureAndLayoutSubtitleWidget();
+        }
+    }
+
+    @Override
+    public void draw(Canvas canvas) {
+        super.draw(canvas);
+
+        if (mSubtitleWidget != null) {
+            final int saveCount = canvas.save();
+            canvas.translate(getPaddingLeft(), getPaddingTop());
+            mSubtitleWidget.draw(canvas);
+            canvas.restoreToCount(saveCount);
+        }
+    }
+
+    /**
+     * Forces a measurement and layout pass for all overlaid views.
+     *
+     * @see #setSubtitleWidget(RenderingWidget)
+     */
+    private void measureAndLayoutSubtitleWidget() {
+        final int width = getWidth() - getPaddingLeft() - getPaddingRight();
+        final int height = getHeight() - getPaddingTop() - getPaddingBottom();
+
+        mSubtitleWidget.setSize(width, height);
+    }
+
+    /** @hide */
+    @Override
+    public void setSubtitleWidget(RenderingWidget subtitleWidget) {
+        if (mSubtitleWidget == subtitleWidget) {
+            return;
+        }
+
+        final boolean attachedToWindow = isAttachedToWindow();
+        if (mSubtitleWidget != null) {
+            if (attachedToWindow) {
+                mSubtitleWidget.onDetachedFromWindow();
+            }
+
+            mSubtitleWidget.setOnChangedListener(null);
+        }
+
+        mSubtitleWidget = subtitleWidget;
+
+        if (subtitleWidget != null) {
+            if (mSubtitlesChangedListener == null) {
+                mSubtitlesChangedListener = new RenderingWidget.OnChangedListener() {
+                    @Override
+                    public void onChanged(RenderingWidget renderingWidget) {
+                        invalidate();
+                    }
+                };
+            }
+
+            setWillNotDraw(false);
+            subtitleWidget.setOnChangedListener(mSubtitlesChangedListener);
+
+            if (attachedToWindow) {
+                subtitleWidget.onAttachedToWindow();
+                requestLayout();
+            }
+        } else {
+            setWillNotDraw(true);
+        }
+
+        invalidate();
+    }
+
+    /** @hide */
+    @Override
+    public Looper getSubtitleLooper() {
+        return Looper.getMainLooper();
     }
 }

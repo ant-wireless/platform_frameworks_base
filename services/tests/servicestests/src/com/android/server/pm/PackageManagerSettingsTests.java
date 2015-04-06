@@ -21,22 +21,15 @@ import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED
 import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER;
 import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
 
-import com.android.internal.content.PackageHelper;
+import android.test.AndroidTestCase;
+import android.util.ArraySet;
+import android.util.Log;
+
 import com.android.internal.os.AtomicFile;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.util.HashSet;
-
-import android.os.Debug;
-import android.os.Environment;
-import android.os.IBinder;
-import android.os.RemoteException;
-import android.os.ServiceManager;
-import android.os.storage.IMountService;
-import android.test.AndroidTestCase;
-import android.util.Log;
 
 public class PackageManagerSettingsTests extends AndroidTestCase {
 
@@ -111,9 +104,9 @@ public class PackageManagerSettingsTests extends AndroidTestCase {
 
     private void writePackagesList() {
         writeFile(new File(getContext().getFilesDir(), "system/packages.list"),
-                ( "com.google.app1 11000 0 /data/data/com.google.app1"
-                + "com.google.app2 11001 0 /data/data/com.google.app2"
-                + "com.android.app3 11030 0 /data/data/com.android.app3")
+                ( "com.google.app1 11000 0 /data/data/com.google.app1 seinfo1"
+                + "com.google.app2 11001 0 /data/data/com.google.app2 seinfo2"
+                + "com.android.app3 11030 0 /data/data/com.android.app3 seinfo3")
                 .getBytes());
     }
 
@@ -138,8 +131,8 @@ public class PackageManagerSettingsTests extends AndroidTestCase {
 
         // Write the package files and make sure they're parsed properly the first time
         writeOldFiles();
-        Settings settings = new Settings(getContext().getFilesDir());
-        assertEquals(true, settings.readLPw(null));
+        Settings settings = new Settings(getContext(), getContext().getFilesDir());
+        assertEquals(true, settings.readLPw(null, null, 0, false));
         assertNotNull(settings.peekPackageLPr(PACKAGE_NAME_3));
         assertNotNull(settings.peekPackageLPr(PACKAGE_NAME_1));
 
@@ -156,12 +149,12 @@ public class PackageManagerSettingsTests extends AndroidTestCase {
     public void testNewPackageRestrictionsFile() {
         // Write the package files and make sure they're parsed properly the first time
         writeOldFiles();
-        Settings settings = new Settings(getContext().getFilesDir());
-        assertEquals(true, settings.readLPw(null));
+        Settings settings = new Settings(getContext(), getContext().getFilesDir());
+        assertEquals(true, settings.readLPw(null, null, 0, false));
 
         // Create Settings again to make it read from the new files
-        settings = new Settings(getContext().getFilesDir());
-        assertEquals(true, settings.readLPw(null));
+        settings = new Settings(getContext(), getContext().getFilesDir());
+        assertEquals(true, settings.readLPw(null, null, 0, false));
 
         PackageSetting ps = settings.peekPackageLPr(PACKAGE_NAME_2);
         assertEquals(COMPONENT_ENABLED_STATE_DISABLED_USER, ps.getEnabled(0));
@@ -171,22 +164,22 @@ public class PackageManagerSettingsTests extends AndroidTestCase {
     public void testEnableDisable() {
         // Write the package files and make sure they're parsed properly the first time
         writeOldFiles();
-        Settings settings = new Settings(getContext().getFilesDir());
-        assertEquals(true, settings.readLPw(null));
+        Settings settings = new Settings(getContext(), getContext().getFilesDir());
+        assertEquals(true, settings.readLPw(null, null, 0, false));
 
         // Enable/Disable a package
         PackageSetting ps = settings.peekPackageLPr(PACKAGE_NAME_1);
-        ps.setEnabled(COMPONENT_ENABLED_STATE_DISABLED, 0);
-        ps.setEnabled(COMPONENT_ENABLED_STATE_ENABLED, 1);
+        ps.setEnabled(COMPONENT_ENABLED_STATE_DISABLED, 0, null);
+        ps.setEnabled(COMPONENT_ENABLED_STATE_ENABLED, 1, null);
         assertEquals(COMPONENT_ENABLED_STATE_DISABLED, ps.getEnabled(0));
         assertEquals(COMPONENT_ENABLED_STATE_ENABLED, ps.getEnabled(1));
 
         // Enable/Disable a component
-        HashSet<String> components = new HashSet<String>();
+        ArraySet<String> components = new ArraySet<String>();
         String component1 = PACKAGE_NAME_1 + "/.Component1";
         components.add(component1);
         ps.setDisabledComponents(components, 0);
-        HashSet<String> componentsDisabled = ps.getDisabledComponents(0);
+        ArraySet<String> componentsDisabled = ps.getDisabledComponents(0);
         assertEquals(1, componentsDisabled.size());
         assertEquals(component1, componentsDisabled.toArray()[0]);
         boolean hasEnabled =

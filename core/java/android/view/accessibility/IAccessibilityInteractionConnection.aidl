@@ -16,7 +16,10 @@
 
 package android.view.accessibility;
 
+import android.graphics.Region;
+import android.graphics.Point;
 import android.os.Bundle;
+import android.view.MagnificationSpec;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.IAccessibilityInteractionConnectionCallback;
 
@@ -28,25 +31,25 @@ import android.view.accessibility.IAccessibilityInteractionConnectionCallback;
  */
 oneway interface IAccessibilityInteractionConnection {
 
-    void findAccessibilityNodeInfoByAccessibilityId(long accessibilityNodeId, int windowLeft,
-        int windowTop, int interactionId, IAccessibilityInteractionConnectionCallback callback,
-        int flags, int interrogatingPid, long interrogatingTid);
-
-    void findAccessibilityNodeInfoByViewId(long accessibilityNodeId, int viewId, int windowLeft,
-        int windowTop, int interactionId, IAccessibilityInteractionConnectionCallback callback,
-        int flags, int interrogatingPid, long interrogatingTid);
-
-    void findAccessibilityNodeInfosByText(long accessibilityNodeId, String text, int windowLeft,
-        int windowTop, int interactionId, IAccessibilityInteractionConnectionCallback callback,
-        int flags, int interrogatingPid, long interrogatingTid);
-
-    void findFocus(long accessibilityNodeId, int focusType, int windowLeft, int windowTop,
+    void findAccessibilityNodeInfoByAccessibilityId(long accessibilityNodeId, in Region bounds,
         int interactionId, IAccessibilityInteractionConnectionCallback callback, int flags,
-        int interrogatingPid, long interrogatingTid);
+        int interrogatingPid, long interrogatingTid, in MagnificationSpec spec);
 
-    void focusSearch(long accessibilityNodeId, int direction, int windowLeft, int windowTop,
+    void findAccessibilityNodeInfosByViewId(long accessibilityNodeId, String viewId,
+        in Region bounds, int interactionId, IAccessibilityInteractionConnectionCallback callback,
+        int flags, int interrogatingPid, long interrogatingTid, in MagnificationSpec spec);
+
+    void findAccessibilityNodeInfosByText(long accessibilityNodeId, String text, in Region bounds,
         int interactionId, IAccessibilityInteractionConnectionCallback callback, int flags,
-        int interrogatingPid, long interrogatingTid);
+        int interrogatingPid, long interrogatingTid, in MagnificationSpec spec);
+
+    void findFocus(long accessibilityNodeId, int focusType, in Region bounds, int interactionId,
+        IAccessibilityInteractionConnectionCallback callback, int flags, int interrogatingPid,
+        long interrogatingTid, in MagnificationSpec spec);
+
+    void focusSearch(long accessibilityNodeId, int direction, in Region bounds, int interactionId,
+        IAccessibilityInteractionConnectionCallback callback, int flags, int interrogatingPid,
+        long interrogatingTid, in MagnificationSpec spec);
 
     void performAccessibilityAction(long accessibilityNodeId, int action, in Bundle arguments,
         int interactionId, IAccessibilityInteractionConnectionCallback callback, int flags,

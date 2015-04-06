@@ -20,9 +20,6 @@ import android.content.BroadcastReceiver;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.Context;
-import android.app.Instrumentation;
-import android.os.Handler;
-import android.os.Message;
 import android.net.NetworkInfo;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiConfiguration;
@@ -33,10 +30,7 @@ import android.net.wifi.SupplicantState;
 import android.test.suitebuilder.annotation.LargeTest;
 import android.test.AndroidTestCase;
 
-import java.util.ArrayList;
 import java.util.List;
-
-import android.util.Log;
 
 /**
  * Test wifi client
@@ -44,7 +38,6 @@ import android.util.Log;
 public class WifiClientTest extends AndroidTestCase {
 
     private WifiManager mWifiManager;
-    private final String TAG = "WifiClientTest";
 
     //10s delay for turning on wifi
     private static final int DELAY = 10000;

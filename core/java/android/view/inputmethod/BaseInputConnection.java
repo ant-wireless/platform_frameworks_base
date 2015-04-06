@@ -42,7 +42,8 @@ class ComposingText implements NoCopySpan {
  * Base class for implementors of the InputConnection interface, taking care
  * of most of the common behavior for providing a connection to an Editable.
  * Implementors of this class will want to be sure to implement
- * {@link #getEditable} to provide access to their own editable object.
+ * {@link #getEditable} to provide access to their own editable object, and
+ * to refer to the documentation in {@link InputConnection}.
  */
 public class BaseInputConnection implements InputConnection {
     private static final boolean DEBUG = false;
@@ -194,6 +195,7 @@ public class BaseInputConnection implements InputConnection {
     public boolean commitText(CharSequence text, int newCursorPosition) {
         if (DEBUG) Log.v(TAG, "commitText " + text);
         replaceText(text, newCursorPosition, false);
+        mIMM.notifyUserAction();
         sendCurrentText();
         return true;
     }
@@ -268,8 +270,9 @@ public class BaseInputConnection implements InputConnection {
         if (content != null) {
             beginBatchEdit();
             removeComposingSpans(content);
-            endBatchEdit();
+            // Note: sendCurrentText does nothing unless mDummyMode is set
             sendCurrentText();
+            endBatchEdit();
         }
         return true;
     }
@@ -426,6 +429,13 @@ public class BaseInputConnection implements InputConnection {
     }
 
     /**
+     * The default implementation does nothing.
+     */
+    public boolean requestCursorUpdates(int cursorUpdateMode) {
+        return false;
+    }
+
+    /**
      * The default implementation places the given text into the editable,
      * replacing any existing composing text.  The new text is marked as
      * in a composing state with the composing style.
@@ -433,6 +443,7 @@ public class BaseInputConnection implements InputConnection {
     public boolean setComposingText(CharSequence text, int newCursorPosition) {
         if (DEBUG) Log.v(TAG, "setComposingText " + text);
         replaceText(text, newCursorPosition, true);
+        mIMM.notifyUserAction();
         return true;
     }
 
@@ -466,8 +477,9 @@ public class BaseInputConnection implements InputConnection {
             content.setSpan(COMPOSING, a, b,
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE | Spanned.SPAN_COMPOSING);
 
-            endBatchEdit();
+            // Note: sendCurrentText does nothing unless mDummyMode is set
             sendCurrentText();
+            endBatchEdit();
         }
         return true;
     }
@@ -481,10 +493,10 @@ public class BaseInputConnection implements InputConnection {
         final Editable content = getEditable();
         if (content == null) return false;
         int len = content.length();
-        if (start > len || end > len) {
+        if (start > len || end > len || start < 0 || end < 0) {
             // If the given selection is out of bounds, just ignore it.
             // Most likely the text was changed out from under the IME,
-            // the the IME is going to have to update all of its state
+            // and the IME is going to have to update all of its state
             // anyway.
             return true;
         }
@@ -515,6 +527,7 @@ public class BaseInputConnection implements InputConnection {
                 viewRootImpl.dispatchKeyFromIme(event);
             }
         }
+        mIMM.notifyUserAction();
         return false;
     }
     
@@ -598,7 +611,7 @@ public class BaseInputConnection implements InputConnection {
         }
         
         beginBatchEdit();
-        
+
         // delete composing text set previously.
         int a = getComposingSpanStart(content);
         int b = getComposingSpanEnd(content);

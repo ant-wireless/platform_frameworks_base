@@ -138,6 +138,21 @@ public interface InputMethodSession {
     public void dispatchTrackballEvent(int seq, MotionEvent event, EventCallback callback);
 
     /**
+     * This method is called when there is a generic motion event.
+     *
+     * <p>
+     * If the input method wants to handle this event, return true, otherwise
+     * return false and the caller (i.e. the application) will handle the event.
+     *
+     * @param event The motion event.
+     *
+     * @return Whether the input method wants to handle this event.
+     *
+     * @see android.view.MotionEvent
+     */
+    public void dispatchGenericMotionEvent(int seq, MotionEvent event, EventCallback callback);
+
+    /**
      * Process a private command sent from the application to the input method.
      * This can be used to provide domain-specific features that are
      * only known between certain input methods and their clients.
@@ -150,7 +165,7 @@ public interface InputMethodSession {
     public void appPrivateCommand(String action, Bundle data);
     
     /**
-     * Toggle the soft input window. 
+     * Toggle the soft input window.
      * Applications can toggle the state of the soft input window.
      * @param showFlags Provides additional operating flags.  May be
      * 0 or have the {@link InputMethodManager#SHOW_IMPLICIT},
@@ -160,4 +175,14 @@ public interface InputMethodSession {
      * {@link  InputMethodManager#HIDE_NOT_ALWAYS} bit set.
      */
     public void toggleSoftInput(int showFlags, int hideFlags);
+
+    /**
+     * This method is called when the cursor and/or the character position relevant to text input
+     * is changed on the screen.  This is not called by default.  It will only be reported if
+     * requested by the input method.
+     *
+     * @param cursorAnchorInfo Positional information relevant to text input, such as text
+     * insertion point and composition string.
+     */
+    public void updateCursorAnchorInfo(CursorAnchorInfo cursorAnchorInfo);
 }

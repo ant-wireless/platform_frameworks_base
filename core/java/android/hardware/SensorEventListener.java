@@ -30,7 +30,7 @@ public interface SensorEventListener {
      * 
      * <p><b>NOTE:</b> The application doesn't own the
      * {@link android.hardware.SensorEvent event}
-     * object passed as a parameter and therefore cannot hold on o it.
+     * object passed as a parameter and therefore cannot hold on to it.
      * The object may be part of an internal pool and may be reused by
      * the framework.
      *
@@ -39,11 +39,13 @@ public interface SensorEventListener {
     public void onSensorChanged(SensorEvent event);
 
     /**
-     * Called when the accuracy of a sensor has changed.
-     * <p>See {@link android.hardware.SensorManager SensorManager}
-     * for details.
+     * Called when the accuracy of the registered sensor has changed.
      *
-     * @param accuracy The new accuracy of this sensor
+     * <p>See the SENSOR_STATUS_* constants in
+     * {@link android.hardware.SensorManager SensorManager} for details.
+     *
+     * @param accuracy The new accuracy of this sensor, one of
+     *         {@code SensorManager.SENSOR_STATUS_*}
      */
-    public void onAccuracyChanged(Sensor sensor, int accuracy);    
+    public void onAccuracyChanged(Sensor sensor, int accuracy);
 }

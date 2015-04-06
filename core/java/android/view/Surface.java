@@ -16,285 +16,344 @@
 
 package android.view;
 
+import android.annotation.IntDef;
 import android.content.res.CompatibilityInfo.Translator;
-import android.graphics.*;
-import android.os.Parcelable;
+import android.graphics.Canvas;
+import android.graphics.Matrix;
+import android.graphics.Rect;
+import android.graphics.SurfaceTexture;
 import android.os.Parcel;
-import android.os.SystemProperties;
+import android.os.Parcelable;
 import android.util.Log;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
+import dalvik.system.CloseGuard;
 
 /**
  * Handle onto a raw buffer that is being managed by the screen compositor.
  */
 public class Surface implements Parcelable {
-    private static final String LOG_TAG = "Surface";
-    private static final boolean DEBUG_RELEASE = false;
-    
-    /* orientations for setOrientation() */
-    public static final int ROTATION_0       = 0;
-    public static final int ROTATION_90      = 1;
-    public static final int ROTATION_180     = 2;
-    public static final int ROTATION_270     = 3;
+    private static final String TAG = "Surface";
 
-    private static final boolean headless = "1".equals(
-        SystemProperties.get("ro.config.headless", "0"));
+    private static native long nativeCreateFromSurfaceTexture(SurfaceTexture surfaceTexture)
+            throws OutOfResourcesException;
+    private static native long nativeCreateFromSurfaceControl(long surfaceControlNativeObject);
 
-    private static void checkHeadless() {
-        if(headless) {
-            throw new UnsupportedOperationException("Device is headless");
+    private static native long nativeLockCanvas(long nativeObject, Canvas canvas, Rect dirty)
+            throws OutOfResourcesException;
+    private static native void nativeUnlockCanvasAndPost(long nativeObject, Canvas canvas);
+
+    private static native void nativeRelease(long nativeObject);
+    private static native boolean nativeIsValid(long nativeObject);
+    private static native boolean nativeIsConsumerRunningBehind(long nativeObject);
+    private static native long nativeReadFromParcel(long nativeObject, Parcel source);
+    private static native void nativeWriteToParcel(long nativeObject, Parcel dest);
+
+    private static native void nativeAllocateBuffers(long nativeObject);
+
+    private static native int nativeGetWidth(long nativeObject);
+    private static native int nativeGetHeight(long nativeObject);
+
+    public static final Parcelable.Creator<Surface> CREATOR =
+            new Parcelable.Creator<Surface>() {
+        @Override
+        public Surface createFromParcel(Parcel source) {
+            try {
+                Surface s = new Surface();
+                s.readFromParcel(source);
+                return s;
+            } catch (Exception e) {
+                Log.e(TAG, "Exception creating surface from parcel", e);
+                return null;
+            }
         }
+
+        @Override
+        public Surface[] newArray(int size) {
+            return new Surface[size];
+        }
+    };
+
+    private final CloseGuard mCloseGuard = CloseGuard.get();
+
+    // Guarded state.
+    final Object mLock = new Object(); // protects the native state
+    private String mName;
+    long mNativeObject; // package scope only for SurfaceControl access
+    private long mLockedObject;
+    private int mGenerationId; // incremented each time mNativeObject changes
+    private final Canvas mCanvas = new CompatibleCanvas();
+
+    // A matrix to scale the matrix set by application. This is set to null for
+    // non compatibility mode.
+    private Matrix mCompatibleMatrix;
+
+    private HwuiContext mHwuiContext;
+
+    /** @hide */
+    @IntDef({ROTATION_0, ROTATION_90, ROTATION_180, ROTATION_270})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface Rotation {}
+
+    /**
+     * Rotation constant: 0 degree rotation (natural orientation)
+     */
+    public static final int ROTATION_0 = 0;
+
+    /**
+     * Rotation constant: 90 degree rotation.
+     */
+    public static final int ROTATION_90 = 1;
+
+    /**
+     * Rotation constant: 180 degree rotation.
+     */
+    public static final int ROTATION_180 = 2;
+
+    /**
+     * Rotation constant: 270 degree rotation.
+     */
+    public static final int ROTATION_270 = 3;
+
+    /**
+     * Create an empty surface, which will later be filled in by readFromParcel().
+     * @hide
+     */
+    public Surface() {
     }
 
     /**
      * Create Surface from a {@link SurfaceTexture}.
      *
      * Images drawn to the Surface will be made available to the {@link
-     * SurfaceTexture}, which can attach them an OpenGL ES texture via {@link
+     * SurfaceTexture}, which can attach them to an OpenGL ES texture via {@link
      * SurfaceTexture#updateTexImage}.
      *
      * @param surfaceTexture The {@link SurfaceTexture} that is updated by this
      * Surface.
+     * @throws OutOfResourcesException if the surface could not be created.
      */
     public Surface(SurfaceTexture surfaceTexture) {
-        checkHeadless();
-
-        if (DEBUG_RELEASE) {
-            mCreationStack = new Exception();
+        if (surfaceTexture == null) {
+            throw new IllegalArgumentException("surfaceTexture must not be null");
         }
-        mCanvas = new CompatibleCanvas();
-        initFromSurfaceTexture(surfaceTexture);
+
+        synchronized (mLock) {
+            mName = surfaceTexture.toString();
+            setNativeObjectLocked(nativeCreateFromSurfaceTexture(surfaceTexture));
+        }
     }
 
-    /**
-     * Does this object hold a valid surface?  Returns true if it holds
-     * a physical surface, so lockCanvas() will succeed.  Otherwise
-     * returns false.
-     */
-    public native   boolean isValid();
-
-    /** Release the local reference to the server-side surface.  
-     * Always call release() when you're done with a Surface. This will
-     * make the surface invalid.
-     */
-    public native void release();
-
-    /** draw into a surface */
-    public Canvas lockCanvas(Rect dirty) throws OutOfResourcesException, IllegalArgumentException {
-        /*
-         * the dirty rectangle may be expanded to the surface's size, if for
-         * instance it has been resized or if the bits were lost, since the last
-         * call.
-         */
-        return lockCanvasNative(dirty);
+    /* called from android_view_Surface_createFromIGraphicBufferProducer() */
+    private Surface(long nativeObject) {
+        synchronized (mLock) {
+            setNativeObjectLocked(nativeObject);
+        }
     }
-
-    /** unlock the surface and asks a page flip */
-    public native   void unlockCanvasAndPost(Canvas canvas);
-
-    /** 
-     * unlock the surface. the screen won't be updated until
-     * post() or postAll() is called
-     */
-    public native   void unlockCanvas(Canvas canvas);
 
     @Override
-    public String toString() {
-        return "Surface(name=" + mName + ", identity=" + getIdentity() + ")";
-    }
-
-    public int describeContents() {
-        return 0;
-    }
-
-    public native   void readFromParcel(Parcel source);
-    public native   void writeToParcel(Parcel dest, int flags);
-
-    /**
-     * Exception thrown when a surface couldn't be created or resized
-     */
-    public static class OutOfResourcesException extends Exception {
-        public OutOfResourcesException() {
-        }
-        public OutOfResourcesException(String name) {
-            super(name);
+    protected void finalize() throws Throwable {
+        try {
+            if (mCloseGuard != null) {
+                mCloseGuard.warnIfOpen();
+            }
+            release();
+        } finally {
+            super.finalize();
         }
     }
-    
-    /*
-     * -----------------------------------------------------------------------
-     * No user serviceable parts beyond this point
-     * -----------------------------------------------------------------------
-     */
 
-    /* flags used in constructor (keep in sync with ISurfaceComposer.h) */
-
-    /** Surface is created hidden @hide */
-    public static final int HIDDEN              = 0x00000004;
-
-    /** The surface contains secure content, special measures will
-     * be taken to disallow the surface's content to be copied from
-     * another process. In particular, screenshots and VNC servers will
-     * be disabled, but other measures can take place, for instance the
-     * surface might not be hardware accelerated. 
-     * @hide*/
-    public static final int SECURE              = 0x00000080;
-    
-    /** Creates a surface where color components are interpreted as 
-     *  "non pre-multiplied" by their alpha channel. Of course this flag is
-     *  meaningless for surfaces without an alpha channel. By default
-     *  surfaces are pre-multiplied, which means that each color component is
-     *  already multiplied by its alpha value. In this case the blending
-     *  equation used is:
-     *  
-     *    DEST = SRC + DEST * (1-SRC_ALPHA)
-     *    
-     *  By contrast, non pre-multiplied surfaces use the following equation:
-     *  
-     *    DEST = SRC * SRC_ALPHA * DEST * (1-SRC_ALPHA)
-     *    
-     *  pre-multiplied surfaces must always be used if transparent pixels are
-     *  composited on top of each-other into the surface. A pre-multiplied
-     *  surface can never lower the value of the alpha component of a given
-     *  pixel.
-     *  
-     *  In some rare situations, a non pre-multiplied surface is preferable.
-     *  
-     *  @hide
-     */
-    public static final int NON_PREMULTIPLIED   = 0x00000100;
-    
     /**
-     * Indicates that the surface must be considered opaque, even if its
-     * pixel format is set to translucent. This can be useful if an
-     * application needs full RGBA 8888 support for instance but will
-     * still draw every pixel opaque.
-     * 
+     * Release the local reference to the server-side surface.
+     * Always call release() when you're done with a Surface.
+     * This will make the surface invalid.
+     */
+    public void release() {
+        synchronized (mLock) {
+            if (mNativeObject != 0) {
+                nativeRelease(mNativeObject);
+                setNativeObjectLocked(0);
+            }
+            if (mHwuiContext != null) {
+                mHwuiContext.destroy();
+                mHwuiContext = null;
+            }
+        }
+    }
+
+    /**
+     * Free all server-side state associated with this surface and
+     * release this object's reference.  This method can only be
+     * called from the process that created the service.
      * @hide
      */
-    public static final int OPAQUE              = 0x00000400;
-    
+    public void destroy() {
+        release();
+    }
+
     /**
-     * Application requires a hardware-protected path to an
-     * external display sink. If a hardware-protected path is not available,
-     * then this surface will not be displayed on the external sink.
+     * Returns true if this object holds a valid surface.
      *
+     * @return True if it holds a physical surface, so lockCanvas() will succeed.
+     * Otherwise returns false.
+     */
+    public boolean isValid() {
+        synchronized (mLock) {
+            if (mNativeObject == 0) return false;
+            return nativeIsValid(mNativeObject);
+        }
+    }
+
+    /**
+     * Gets the generation number of this surface, incremented each time
+     * the native surface contained within this object changes.
+     *
+     * @return The current generation number.
      * @hide
      */
-    public static final int PROTECTED_APP       = 0x00000800;
+    public int getGenerationId() {
+        synchronized (mLock) {
+            return mGenerationId;
+        }
+    }
 
-    // 0x1000 is reserved for an independent DRM protected flag in framework
-
-    /** Creates a normal surface. This is the default. @hide */
-    public static final int FX_SURFACE_NORMAL   = 0x00000000;
-    
-    /** Creates a Blur surface. Everything behind this surface is blurred
-     * by some amount. The quality and refresh speed of the blur effect
-     * is not settable or guaranteed.
-     * It is an error to lock a Blur surface, since it doesn't have
-     * a backing store.
+    /**
+     * Returns true if the consumer of this Surface is running behind the producer.
+     *
+     * @return True if the consumer is more than one buffer ahead of the producer.
      * @hide
-     * @deprecated
+     */
+    public boolean isConsumerRunningBehind() {
+        synchronized (mLock) {
+            checkNotReleasedLocked();
+            return nativeIsConsumerRunningBehind(mNativeObject);
+        }
+    }
+
+    /**
+     * Gets a {@link Canvas} for drawing into this surface.
+     *
+     * After drawing into the provided {@link Canvas}, the caller must
+     * invoke {@link #unlockCanvasAndPost} to post the new contents to the surface.
+     *
+     * @param inOutDirty A rectangle that represents the dirty region that the caller wants
+     * to redraw.  This function may choose to expand the dirty rectangle if for example
+     * the surface has been resized or if the previous contents of the surface were
+     * not available.  The caller must redraw the entire dirty region as represented
+     * by the contents of the inOutDirty rectangle upon return from this function.
+     * The caller may also pass <code>null</code> instead, in the case where the
+     * entire surface should be redrawn.
+     * @return A canvas for drawing into the surface.
+     *
+     * @throws IllegalArgumentException If the inOutDirty rectangle is not valid.
+     * @throws OutOfResourcesException If the canvas cannot be locked.
+     */
+    public Canvas lockCanvas(Rect inOutDirty)
+            throws Surface.OutOfResourcesException, IllegalArgumentException {
+        synchronized (mLock) {
+            checkNotReleasedLocked();
+            if (mLockedObject != 0) {
+                // Ideally, nativeLockCanvas() would throw in this situation and prevent the
+                // double-lock, but that won't happen if mNativeObject was updated.  We can't
+                // abandon the old mLockedObject because it might still be in use, so instead
+                // we just refuse to re-lock the Surface.
+                throw new IllegalArgumentException("Surface was already locked");
+            }
+            mLockedObject = nativeLockCanvas(mNativeObject, mCanvas, inOutDirty);
+            return mCanvas;
+        }
+    }
+
+    /**
+     * Posts the new contents of the {@link Canvas} to the surface and
+     * releases the {@link Canvas}.
+     *
+     * @param canvas The canvas previously obtained from {@link #lockCanvas}.
+     */
+    public void unlockCanvasAndPost(Canvas canvas) {
+        synchronized (mLock) {
+            checkNotReleasedLocked();
+
+            if (mHwuiContext != null) {
+                mHwuiContext.unlockAndPost(canvas);
+            } else {
+                unlockSwCanvasAndPost(canvas);
+            }
+        }
+    }
+
+    private void unlockSwCanvasAndPost(Canvas canvas) {
+        if (canvas != mCanvas) {
+            throw new IllegalArgumentException("canvas object must be the same instance that "
+                    + "was previously returned by lockCanvas");
+        }
+        if (mNativeObject != mLockedObject) {
+            Log.w(TAG, "WARNING: Surface's mNativeObject (0x" +
+                    Long.toHexString(mNativeObject) + ") != mLockedObject (0x" +
+                    Long.toHexString(mLockedObject) +")");
+        }
+        if (mLockedObject == 0) {
+            throw new IllegalStateException("Surface was not locked");
+        }
+        try {
+            nativeUnlockCanvasAndPost(mLockedObject, canvas);
+        } finally {
+            nativeRelease(mLockedObject);
+            mLockedObject = 0;
+        }
+    }
+
+    /**
+     * Gets a {@link Canvas} for drawing into this surface.
+     *
+     * After drawing into the provided {@link Canvas}, the caller must
+     * invoke {@link #unlockCanvasAndPost} to post the new contents to the surface.
+     *
+     * Unlike {@link #lockCanvas(Rect)} this will return a hardware-accelerated
+     * canvas. See the <a href="{@docRoot}guide/topics/graphics/hardware-accel.html#unsupported">
+     * unsupported drawing operations</a> for a list of what is and isn't
+     * supported in a hardware-accelerated canvas. It is also required to
+     * fully cover the surface every time {@link #lockHardwareCanvas()} is
+     * called as the buffer is not preserved between frames. Partial updates
+     * are not supported.
+     *
+     * @return A canvas for drawing into the surface.
+     *
+     * @throws IllegalStateException If the canvas cannot be locked.
+     * @hide
+     */
+    public Canvas lockHardwareCanvas() {
+        synchronized (mLock) {
+            checkNotReleasedLocked();
+            if (mHwuiContext == null) {
+                mHwuiContext = new HwuiContext();
+            }
+            return mHwuiContext.lockCanvas(
+                    nativeGetWidth(mNativeObject),
+                    nativeGetHeight(mNativeObject));
+        }
+    }
+
+    /**
+     * @deprecated This API has been removed and is not supported.  Do not use.
      */
     @Deprecated
-    public static final int FX_SURFACE_BLUR     = 0x00010000;
-    
-    /** Creates a Dim surface. Everything behind this surface is dimmed
-     * by the amount specified in {@link #setAlpha}.
-     * It is an error to lock a Dim surface, since it doesn't have
-     * a backing store.
-     * @hide
-     */
-    public static final int FX_SURFACE_DIM     = 0x00020000;
-
-    /** @hide */
-    public static final int FX_SURFACE_SCREENSHOT   = 0x00030000;
-
-    /** Mask used for FX values above @hide */
-    public static final int FX_SURFACE_MASK     = 0x000F0000;
-
-    /* flags used with setFlags() (keep in sync with ISurfaceComposer.h) */
-    
-    /** Hide the surface. Equivalent to calling hide(). @hide */
-    public static final int SURFACE_HIDDEN    = 0x01;
-    
-    /** Freeze the surface. Equivalent to calling freeze(). @hide */
-    public static final int SURFACE_FROZEN     = 0x02;
-
-    /** Enable dithering when compositing this surface @hide */
-    public static final int SURFACE_DITHER    = 0x04;
-
-    // The mSurfaceControl will only be present for Surfaces used by the window
-    // server or system processes. When this class is parceled we defer to the
-    // mSurfaceControl to do the parceling. Otherwise we parcel the
-    // mNativeSurface.
-    private int mSurfaceControl;
-    private int mSaveCount;
-    private Canvas mCanvas;
-    private int mNativeSurface;
-    private int mSurfaceGenerationId;
-    private String mName;
-
-    // The Translator for density compatibility mode.  This is used for scaling
-    // the canvas to perform the appropriate density transformation.
-    private Translator mCompatibilityTranslator;
-
-    // A matrix to scale the matrix set by application. This is set to null for
-    // non compatibility mode.
-    private Matrix mCompatibleMatrix;
-
-    private Exception mCreationStack;
-
-
-    /*
-     * We use a class initializer to allow the native code to cache some
-     * field offsets.
-     */
-    native private static void nativeClassInit();
-    static { nativeClassInit(); }
-
-    /** create a surface @hide */
-    public Surface(SurfaceSession s,
-            int pid, int display, int w, int h, int format, int flags)
-        throws OutOfResourcesException {
-        checkHeadless();
-
-        if (DEBUG_RELEASE) {
-            mCreationStack = new Exception();
-        }
-        mCanvas = new CompatibleCanvas();
-        init(s,pid,null,display,w,h,format,flags);
-    }
-
-    /** create a surface with a name @hide */
-    public Surface(SurfaceSession s,
-            int pid, String name, int display, int w, int h, int format, int flags)
-        throws OutOfResourcesException {
-        checkHeadless();
-
-        if (DEBUG_RELEASE) {
-            mCreationStack = new Exception();
-        }
-        mCanvas = new CompatibleCanvas();
-        init(s,pid,name,display,w,h,format,flags);
-        mName = name;
+    public void unlockCanvas(Canvas canvas) {
+        throw new UnsupportedOperationException();
     }
 
     /**
-     * Create an empty surface, which will later be filled in by
-     * readFromParcel().
-     * @hide
+     * Sets the translator used to scale canvas's width/height in compatibility
+     * mode.
      */
-    public Surface() {
-        checkHeadless();
-
-        if (DEBUG_RELEASE) {
-            mCreationStack = new Exception();
+    void setCompatibilityTranslator(Translator translator) {
+        if (translator != null) {
+            float appScale = translator.applicationScale;
+            mCompatibleMatrix = new Matrix();
+            mCompatibleMatrix.setScale(appScale, appScale);
         }
-        mCanvas = new CompatibleCanvas();
-    }
-
-    private Surface(Parcel source) throws OutOfResourcesException {
-        init(source);
     }
 
     /**
@@ -306,35 +365,171 @@ public class Surface implements Parcelable {
      * in to it.
      * @hide
      */
-    public native void copyFrom(Surface o);
+    public void copyFrom(SurfaceControl other) {
+        if (other == null) {
+            throw new IllegalArgumentException("other must not be null");
+        }
 
-    /**
-     * Transfer the native state from 'o' to this surface, releasing it
-     * from 'o'.  This is for use in the client side for drawing into a
-     * surface; not guaranteed to work on the window manager side.
-     * This is for use by the client to move the underlying surface from
-     * one Surface object to another, in particular in SurfaceFlinger.
-     * @hide.
-     */
-    public native void transferFrom(Surface o);
+        long surfaceControlPtr = other.mNativeObject;
+        if (surfaceControlPtr == 0) {
+            throw new NullPointerException(
+                    "SurfaceControl native object is null. Are you using a released SurfaceControl?");
+        }
+        long newNativeObject = nativeCreateFromSurfaceControl(surfaceControlPtr);
 
-    /** @hide */
-    public int getGenerationId() {
-        return mSurfaceGenerationId;
+        synchronized (mLock) {
+            if (mNativeObject != 0) {
+                nativeRelease(mNativeObject);
+            }
+            setNativeObjectLocked(newNativeObject);
+        }
     }
 
+    /**
+     * This is intended to be used by {@link SurfaceView#updateWindow} only.
+     * @param other access is not thread safe
+     * @hide
+     * @deprecated
+     */
+    @Deprecated
+    public void transferFrom(Surface other) {
+        if (other == null) {
+            throw new IllegalArgumentException("other must not be null");
+        }
+        if (other != this) {
+            final long newPtr;
+            synchronized (other.mLock) {
+                newPtr = other.mNativeObject;
+                other.setNativeObjectLocked(0);
+            }
+
+            synchronized (mLock) {
+                if (mNativeObject != 0) {
+                    nativeRelease(mNativeObject);
+                }
+                setNativeObjectLocked(newPtr);
+            }
+        }
+    }
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    public void readFromParcel(Parcel source) {
+        if (source == null) {
+            throw new IllegalArgumentException("source must not be null");
+        }
+
+        synchronized (mLock) {
+            // nativeReadFromParcel() will either return mNativeObject, or
+            // create a new native Surface and return it after reducing
+            // the reference count on mNativeObject.  Either way, it is
+            // not necessary to call nativeRelease() here.
+            mName = source.readString();
+            setNativeObjectLocked(nativeReadFromParcel(mNativeObject, source));
+        }
+    }
+
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        if (dest == null) {
+            throw new IllegalArgumentException("dest must not be null");
+        }
+        synchronized (mLock) {
+            dest.writeString(mName);
+            nativeWriteToParcel(mNativeObject, dest);
+        }
+        if ((flags & Parcelable.PARCELABLE_WRITE_RETURN_VALUE) != 0) {
+            release();
+        }
+    }
+
+    @Override
+    public String toString() {
+        synchronized (mLock) {
+            return "Surface(name=" + mName + ")/@0x" +
+                    Integer.toHexString(System.identityHashCode(this));
+        }
+    }
+
+    private void setNativeObjectLocked(long ptr) {
+        if (mNativeObject != ptr) {
+            if (mNativeObject == 0 && ptr != 0) {
+                mCloseGuard.open("release");
+            } else if (mNativeObject != 0 && ptr == 0) {
+                mCloseGuard.close();
+            }
+            mNativeObject = ptr;
+            mGenerationId += 1;
+            if (mHwuiContext != null) {
+                mHwuiContext.updateSurface();
+            }
+        }
+    }
+
+    private void checkNotReleasedLocked() {
+        if (mNativeObject == 0) {
+            throw new IllegalStateException("Surface has already been released.");
+        }
+    }
 
     /**
-     * Whether the consumer of this Surface is running behind the producer;
-     * that is, isConsumerRunningBehind() returns true if the consumer is more
-     * than one buffer ahead of the producer.
+     * Allocate buffers ahead of time to avoid allocation delays during rendering
      * @hide
      */
-    public native boolean isConsumerRunningBehind();
+    public void allocateBuffers() {
+        synchronized (mLock) {
+            checkNotReleasedLocked();
+            nativeAllocateBuffers(mNativeObject);
+        }
+    }
 
     /**
-     * A Canvas class that can handle the compatibility mode. This does two
-     * things differently.
+     * Exception thrown when a Canvas couldn't be locked with {@link Surface#lockCanvas}, or
+     * when a SurfaceTexture could not successfully be allocated.
+     */
+    @SuppressWarnings("serial")
+    public static class OutOfResourcesException extends RuntimeException {
+        public OutOfResourcesException() {
+        }
+        public OutOfResourcesException(String name) {
+            super(name);
+        }
+    }
+
+    /**
+     * Returns a human readable representation of a rotation.
+     *
+     * @param rotation The rotation.
+     * @return The rotation symbolic name.
+     *
+     * @hide
+     */
+    public static String rotationToString(int rotation) {
+        switch (rotation) {
+            case Surface.ROTATION_0: {
+                return "ROTATION_0";
+            }
+            case Surface.ROTATION_90: {
+                return "ROATATION_90";
+            }
+            case Surface.ROTATION_180: {
+                return "ROATATION_180";
+            }
+            case Surface.ROTATION_270: {
+                return "ROATATION_270";
+            }
+            default: {
+                throw new IllegalArgumentException("Invalid rotation: " + rotation);
+            }
+        }
+    }
+
+    /**
+     * A Canvas class that can handle the compatibility mode.
+     * This does two things differently.
      * <ul>
      * <li>Returns the width and height of the target metrics, rather than
      * native. For example, the canvas returns 320x480 even if an app is running
@@ -347,27 +542,9 @@ public class Surface implements Parcelable {
      * that this model does not work, but we hope this works for many apps.
      * </ul>
      */
-    private class CompatibleCanvas extends Canvas {
+    private final class CompatibleCanvas extends Canvas {
         // A temp matrix to remember what an application obtained via {@link getMatrix}
         private Matrix mOrigMatrix = null;
-
-        @Override
-        public int getWidth() {
-            int w = super.getWidth();
-            if (mCompatibilityTranslator != null) {
-                w = (int)(w * mCompatibilityTranslator.applicationInvertedScale + .5f);
-            }
-            return w;
-        }
-
-        @Override
-        public int getHeight() {
-            int h = super.getHeight();
-            if (mCompatibilityTranslator != null) {
-                h = (int)(h * mCompatibilityTranslator.applicationInvertedScale + .5f);
-            }
-            return h;
-        }
 
         @Override
         public void setMatrix(Matrix matrix) {
@@ -382,181 +559,60 @@ public class Surface implements Parcelable {
             }
         }
 
+        @SuppressWarnings("deprecation")
         @Override
         public void getMatrix(Matrix m) {
             super.getMatrix(m);
             if (mOrigMatrix == null) {
-                mOrigMatrix = new Matrix(); 
+                mOrigMatrix = new Matrix();
             }
             mOrigMatrix.set(m);
         }
     }
 
-    /**
-     * Sets the translator used to scale canvas's width/height in compatibility
-     * mode.
-     */
-    void setCompatibilityTranslator(Translator translator) {
-        if (translator != null) {
-            float appScale = translator.applicationScale;
-            mCompatibleMatrix = new Matrix();
-            mCompatibleMatrix.setScale(appScale, appScale);
+    private final class HwuiContext {
+        private final RenderNode mRenderNode;
+        private long mHwuiRenderer;
+        private HardwareCanvas mCanvas;
+
+        HwuiContext() {
+            mRenderNode = RenderNode.create("HwuiCanvas", null);
+            mRenderNode.setClipToBounds(false);
+            mHwuiRenderer = nHwuiCreate(mRenderNode.mNativeRenderNode, mNativeObject);
         }
-    }
-    
-    /** Free all server-side state associated with this surface and
-     * release this object's reference. @hide */
-    public native void destroy();
-    
-    private native Canvas lockCanvasNative(Rect dirty);   
-    
-    /*
-     * set display parameters & screenshots
-     */
-    
-    /**
-     * Freezes the specified display, No updating of the screen will occur
-     * until unfreezeDisplay() is called. Everything else works as usual though,
-     * in particular transactions.
-     * @param display
-     * @hide
-     */
-    public static native   void freezeDisplay(int display);
 
-    /**
-     * resume updating the specified display.
-     * @param display
-     * @hide
-     */
-    public static native   void unfreezeDisplay(int display);
-
-    /**
-     * set the orientation of the given display.
-     * @param display
-     * @param orientation
-     * @param flags Currently unused, set to 0.
-     * @hide
-     */
-    public static native   void setOrientation(int display, int orientation, int flags);
-
-    /**
-     * set the orientation of the given display.
-     * @param display
-     * @param orientation
-     * @hide
-     */
-    public static void setOrientation(int display, int orientation) {
-        setOrientation(display, orientation, 0);
-    }
-    
-    /**
-     * Like {@link #screenshot(int, int, int, int)} but includes all
-     * Surfaces in the screenshot.
-     *
-     * @hide
-     */
-    public static native Bitmap screenshot(int width, int height);
-    
-    /**
-     * Copy the current screen contents into a bitmap and return it.
-     *
-     * @param width The desired width of the returned bitmap; the raw
-     * screen will be scaled down to this size.
-     * @param height The desired height of the returned bitmap; the raw
-     * screen will be scaled down to this size.
-     * @param minLayer The lowest (bottom-most Z order) surface layer to
-     * include in the screenshot.
-     * @param maxLayer The highest (top-most Z order) surface layer to
-     * include in the screenshot.
-     * @return Returns a Bitmap containing the screen contents.
-     *
-     * @hide
-     */
-    public static native Bitmap screenshot(int width, int height, int minLayer, int maxLayer);
-
-    
-    /*
-     * set surface parameters.
-     * needs to be inside open/closeTransaction block
-     */
-    
-    /** start a transaction @hide */
-    public static native   void openTransaction();
-    /** end a transaction @hide */
-    public static native   void closeTransaction();
-    /** @hide */
-    public native   void setLayer(int zorder);
-    /** @hide */
-    public void setPosition(int x, int y) { setPosition((float)x, (float)y); }
-    /** @hide */
-    public native   void setPosition(float x, float y);
-    /** @hide */
-    public native   void setSize(int w, int h);
-    /** @hide */
-    public native   void hide();
-    /** @hide */
-    public native   void show();
-    /** @hide */
-    public native   void setTransparentRegionHint(Region region);
-    /** @hide */
-    public native   void setAlpha(float alpha);
-    /** @hide */
-    public native   void setMatrix(float dsdx, float dtdx, float dsdy, float dtdy);
-    /** @hide */
-    public native   void freeze();
-    /** @hide */
-    public native   void unfreeze();
-    /** @hide */
-    public native   void setFreezeTint(int tint);
-    /** @hide */
-    public native   void setFlags(int flags, int mask);
-    /** @hide */
-    public native   void setWindowCrop(Rect crop);
-
-
-   
-    public static final Parcelable.Creator<Surface> CREATOR
-            = new Parcelable.Creator<Surface>()
-    {
-        public Surface createFromParcel(Parcel source) {
-            try {
-                return new Surface(source);
-            } catch (Exception e) {
-                Log.e(LOG_TAG, "Exception creating surface from parcel", e);
+        Canvas lockCanvas(int width, int height) {
+            if (mCanvas != null) {
+                throw new IllegalStateException("Surface was already locked!");
             }
-            return null;
+            mCanvas = mRenderNode.start(width, height);
+            return mCanvas;
         }
 
-        public Surface[] newArray(int size) {
-            return new Surface[size];
-        }
-    };
-
-    @Override
-    protected void finalize() throws Throwable {
-        try {
-            super.finalize();
-        } finally {
-            if (mNativeSurface != 0 || mSurfaceControl != 0) {
-                if (DEBUG_RELEASE) {
-                    Log.w(LOG_TAG, "Surface.finalize() has work. You should have called release() (" 
-                            + mNativeSurface + ", " + mSurfaceControl + ")", mCreationStack);
-                } else {
-                    Log.w(LOG_TAG, "Surface.finalize() has work. You should have called release() (" 
-                            + mNativeSurface + ", " + mSurfaceControl + ")");
-                }
+        void unlockAndPost(Canvas canvas) {
+            if (canvas != mCanvas) {
+                throw new IllegalArgumentException("canvas object must be the same instance that "
+                        + "was previously returned by lockCanvas");
             }
-            release();            
+            mRenderNode.end(mCanvas);
+            mCanvas = null;
+            nHwuiDraw(mHwuiRenderer);
+        }
+
+        void updateSurface() {
+            nHwuiSetSurface(mHwuiRenderer, mNativeObject);
+        }
+
+        void destroy() {
+            if (mHwuiRenderer != 0) {
+                nHwuiDestroy(mHwuiRenderer);
+                mHwuiRenderer = 0;
+            }
         }
     }
-    
-    private native void init(SurfaceSession s,
-            int pid, String name, int display, int w, int h, int format, int flags)
-            throws OutOfResourcesException;
 
-    private native void init(Parcel source);
-
-    private native void initFromSurfaceTexture(SurfaceTexture surfaceTexture);
-
-    private native int getIdentity();
+    private static native long nHwuiCreate(long rootNode, long surface);
+    private static native void nHwuiSetSurface(long renderer, long surface);
+    private static native void nHwuiDraw(long renderer);
+    private static native void nHwuiDestroy(long renderer);
 }

@@ -16,6 +16,8 @@
 
 package android.os;
 
+import android.content.Context;
+import android.media.AudioAttributes;
 import android.util.Log;
 
 /**
@@ -34,6 +36,12 @@ public class SystemVibrator extends Vibrator {
                 ServiceManager.getService("vibrator"));
     }
 
+    public SystemVibrator(Context context) {
+        super(context);
+        mService = IVibratorService.Stub.asInterface(
+                ServiceManager.getService("vibrator"));
+    }
+
     @Override
     public boolean hasVibrator() {
         if (mService == null) {
@@ -47,21 +55,28 @@ public class SystemVibrator extends Vibrator {
         return false;
     }
 
+    /**
+     * @hide
+     */
     @Override
-    public void vibrate(long milliseconds) {
+    public void vibrate(int uid, String opPkg, long milliseconds, AudioAttributes attributes) {
         if (mService == null) {
             Log.w(TAG, "Failed to vibrate; no vibrator service.");
             return;
         }
         try {
-            mService.vibrate(milliseconds, mToken);
+            mService.vibrate(uid, opPkg, milliseconds, usageForAttributes(attributes), mToken);
         } catch (RemoteException e) {
             Log.w(TAG, "Failed to vibrate.", e);
         }
     }
 
+    /**
+     * @hide
+     */
     @Override
-    public void vibrate(long[] pattern, int repeat) {
+    public void vibrate(int uid, String opPkg, long[] pattern, int repeat,
+            AudioAttributes attributes) {
         if (mService == null) {
             Log.w(TAG, "Failed to vibrate; no vibrator service.");
             return;
@@ -71,13 +86,18 @@ public class SystemVibrator extends Vibrator {
         // anyway
         if (repeat < pattern.length) {
             try {
-                mService.vibratePattern(pattern, repeat, mToken);
+                mService.vibratePattern(uid, opPkg, pattern, repeat, usageForAttributes(attributes),
+                        mToken);
             } catch (RemoteException e) {
                 Log.w(TAG, "Failed to vibrate.", e);
             }
         } else {
             throw new ArrayIndexOutOfBoundsException();
         }
+    }
+
+    private static int usageForAttributes(AudioAttributes attributes) {
+        return attributes != null ? attributes.getUsage() : AudioAttributes.USAGE_UNKNOWN;
     }
 
     @Override

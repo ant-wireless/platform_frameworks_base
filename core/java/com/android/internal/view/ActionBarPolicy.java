@@ -22,7 +22,6 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.os.Build;
-import android.view.ViewConfiguration;
 
 /**
  * Allows components to query for various configuration policy decisions
@@ -44,7 +43,7 @@ public class ActionBarPolicy {
     }
 
     public boolean showsOverflowMenuButton() {
-        return !ViewConfiguration.get(mContext).hasPermanentMenuKey();
+        return true;
     }
 
     public int getEmbeddedMenuWidthLimit() {

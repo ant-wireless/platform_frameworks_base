@@ -18,7 +18,6 @@ package android.widget;
 
 import android.content.Context;
 import android.hardware.SensorManager;
-import android.util.FloatMath;
 import android.util.Log;
 import android.view.ViewConfiguration;
 import android.view.animation.AnimationUtils;
@@ -70,12 +69,14 @@ public class OverScroller {
      * @hide
      */
     public OverScroller(Context context, Interpolator interpolator, boolean flywheel) {
-        mInterpolator = interpolator;
+        if (interpolator == null) {
+            mInterpolator = new Scroller.ViscousFluidInterpolator();
+        } else {
+            mInterpolator = interpolator;
+        }
         mFlywheel = flywheel;
-        mScrollerX = new SplineOverScroller();
-        mScrollerY = new SplineOverScroller();
-
-        SplineOverScroller.initFromContext(context);
+        mScrollerX = new SplineOverScroller(context);
+        mScrollerY = new SplineOverScroller(context);
     }
 
     /**
@@ -114,7 +115,11 @@ public class OverScroller {
     }
 
     void setInterpolator(Interpolator interpolator) {
-        mInterpolator = interpolator;
+        if (interpolator == null) {
+            mInterpolator = new Scroller.ViscousFluidInterpolator();
+        } else {
+            mInterpolator = interpolator;
+        }
     }
 
     /**
@@ -175,9 +180,7 @@ public class OverScroller {
      * @return The original velocity less the deceleration, norm of the X and Y velocity vector.
      */
     public float getCurrVelocity() {
-        float squaredNorm = mScrollerX.mCurrVelocity * mScrollerX.mCurrVelocity;
-        squaredNorm += mScrollerY.mCurrVelocity * mScrollerY.mCurrVelocity;
-        return FloatMath.sqrt(squaredNorm);
+        return (float) Math.hypot(mScrollerX.mCurrVelocity, mScrollerY.mCurrVelocity);
     }
 
     /**
@@ -304,14 +307,7 @@ public class OverScroller {
 
                 final int duration = mScrollerX.mDuration;
                 if (elapsedTime < duration) {
-                    float q = (float) (elapsedTime) / duration;
-
-                    if (mInterpolator == null) {
-                        q = Scroller.viscousFluid(q);
-                    } else {
-                        q = mInterpolator.getInterpolation(q);
-                    }
-
+                    final float q = mInterpolator.getInterpolation(elapsedTime / (float) duration);
                     mScrollerX.updateScroll(q);
                     mScrollerY.updateScroll(q);
                 } else {
@@ -585,8 +581,8 @@ public class OverScroller {
         // Constant gravity value, used in the deceleration phase.
         private static final float GRAVITY = 2000.0f;
 
-        // A device specific coefficient adjusted to physical values.
-        private static float PHYSICAL_COEF;
+        // A context-specific coefficient adjusted to physical values.
+        private float mPhysicalCoeff;
 
         private static float DECELERATION_RATE = (float) (Math.log(0.78) / Math.log(0.9));
         private static final float INFLEXION = 0.35f; // Tension lines cross at (INFLEXION, 1)
@@ -636,20 +632,17 @@ public class OverScroller {
             SPLINE_POSITION[NB_SAMPLES] = SPLINE_TIME[NB_SAMPLES] = 1.0f;
         }
 
-        static void initFromContext(Context context) {
-            final float ppi = context.getResources().getDisplayMetrics().density * 160.0f;
-            PHYSICAL_COEF = SensorManager.GRAVITY_EARTH // g (m/s^2)
-                    * 39.37f // inch/meter
-                    * ppi
-                    * 0.84f; // look and feel tuning
-        }
-
         void setFriction(float friction) {
             mFlingFriction = friction;
         }
 
-        SplineOverScroller() {
+        SplineOverScroller(Context context) {
             mFinished = true;
+            final float ppi = context.getResources().getDisplayMetrics().density * 160.0f;
+            mPhysicalCoeff = SensorManager.GRAVITY_EARTH // g (m/s^2)
+                    * 39.37f // inch/meter
+                    * ppi
+                    * 0.84f; // look and feel tuning
         }
 
         void updateScroll(float q) {
@@ -785,13 +778,13 @@ public class OverScroller {
         }
 
         private double getSplineDeceleration(int velocity) {
-            return Math.log(INFLEXION * Math.abs(velocity) / (mFlingFriction * PHYSICAL_COEF));
+            return Math.log(INFLEXION * Math.abs(velocity) / (mFlingFriction * mPhysicalCoeff));
         }
 
         private double getSplineFlingDistance(int velocity) {
             final double l = getSplineDeceleration(velocity);
             final double decelMinusOne = DECELERATION_RATE - 1.0;
-            return mFlingFriction * PHYSICAL_COEF * Math.exp(DECELERATION_RATE / decelMinusOne * l);
+            return mFlingFriction * mPhysicalCoeff * Math.exp(DECELERATION_RATE / decelMinusOne * l);
         }
 
         /* Returns the duration, expressed in milliseconds */
@@ -908,6 +901,10 @@ public class OverScroller {
             final long time = AnimationUtils.currentAnimationTimeMillis();
             final long currentTime = time - mStartTime;
 
+            if (currentTime == 0) {
+                // Skip work but report that we're still going if we have a nonzero duration.
+                return mDuration > 0;
+            }
             if (currentTime > mDuration) {
                 return false;
             }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,87 +16,48 @@
 
 package com.android.systemui.statusbar.policy;
 
-import java.util.ArrayList;
+import java.util.Set;
 
-import android.bluetooth.BluetoothAdapter;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.view.View;
-import android.widget.ImageView;
+public interface BluetoothController {
+    void addStateChangedCallback(Callback callback);
+    void removeStateChangedCallback(Callback callback);
 
-import com.android.systemui.R;
+    boolean isBluetoothSupported();
+    boolean isBluetoothEnabled();
+    boolean isBluetoothConnected();
+    boolean isBluetoothConnecting();
+    String getLastDeviceName();
+    void setBluetoothEnabled(boolean enabled);
+    Set<PairedDevice> getPairedDevices();
+    void connect(PairedDevice device);
+    void disconnect(PairedDevice device);
 
-public class BluetoothController extends BroadcastReceiver {
-    private static final String TAG = "StatusBar.BluetoothController";
+    public interface Callback {
+        void onBluetoothStateChange(boolean enabled, boolean connecting);
+        void onBluetoothPairedDevicesChanged();
+    }
 
-    private Context mContext;
-    private ArrayList<ImageView> mIconViews = new ArrayList<ImageView>();
+    public static final class PairedDevice implements Comparable<PairedDevice> {
+        public static int STATE_DISCONNECTED = 0;
+        public static int STATE_CONNECTING = 1;
+        public static int STATE_CONNECTED = 2;
+        public static int STATE_DISCONNECTING = 3;
 
-    private int mIconId = R.drawable.stat_sys_data_bluetooth;
-    private int mContentDescriptionId = 0;
-    private boolean mEnabled = false;
+        public String id;
+        public String name;
+        public int state = STATE_DISCONNECTED;
+        public Object tag;
 
-    public BluetoothController(Context context) {
-        mContext = context;
-
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
-        filter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
-        context.registerReceiver(this, filter);
-
-        final BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-        if (adapter != null) {
-            handleAdapterStateChange(adapter.getState());
-            handleConnectionStateChange(adapter.getConnectionState());
+        public static String stateToString(int state) {
+            if (state == STATE_DISCONNECTED) return "STATE_DISCONNECTED";
+            if (state == STATE_CONNECTING) return "STATE_CONNECTING";
+            if (state == STATE_CONNECTED) return "STATE_CONNECTED";
+            if (state == STATE_DISCONNECTING) return "STATE_DISCONNECTING";
+            return "UNKNOWN";
         }
-        refreshViews();
-    }
 
-    public void addIconView(ImageView v) {
-        mIconViews.add(v);
-    }
-
-    @Override
-    public void onReceive(Context context, Intent intent) {
-        final String action = intent.getAction();
-
-        if (action.equals(BluetoothAdapter.ACTION_STATE_CHANGED)) {
-            handleAdapterStateChange(
-                    intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR));
-        } else if (action.equals(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)) {
-            handleConnectionStateChange(
-                    intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE,
-                        BluetoothAdapter.STATE_DISCONNECTED));
-        }
-        refreshViews();
-    }
-
-    public void handleAdapterStateChange(int adapterState) {
-        mEnabled = (adapterState == BluetoothAdapter.STATE_ON);
-    }
-
-    public void handleConnectionStateChange(int connectionState) {
-        final boolean connected = (connectionState == BluetoothAdapter.STATE_CONNECTED);
-        if (connected) {
-            mIconId = R.drawable.stat_sys_data_bluetooth_connected;
-            mContentDescriptionId = R.string.accessibility_bluetooth_connected;
-        } else {
-            mIconId = R.drawable.stat_sys_data_bluetooth;
-            mContentDescriptionId = R.string.accessibility_bluetooth_disconnected;
-        }
-    }
-
-    public void refreshViews() {
-        int N = mIconViews.size();
-        for (int i=0; i<N; i++) {
-            ImageView v = mIconViews.get(i);
-            v.setImageResource(mIconId);
-            v.setVisibility(mEnabled ? View.VISIBLE : View.GONE);
-            v.setContentDescription((mContentDescriptionId == 0)
-                    ? null
-                    : mContext.getString(mContentDescriptionId));
+        public int compareTo(PairedDevice another) {
+            return name.compareTo(another.name);
         }
     }
 }

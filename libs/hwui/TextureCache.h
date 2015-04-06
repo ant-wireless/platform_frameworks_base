@@ -19,12 +19,12 @@
 
 #include <SkBitmap.h>
 
+#include <utils/LruCache.h>
 #include <utils/Mutex.h>
 #include <utils/Vector.h>
 
 #include "Debug.h"
 #include "Texture.h"
-#include "utils/GenerationCache.h"
 
 namespace android {
 namespace uirenderer {
@@ -44,12 +44,14 @@ namespace uirenderer {
 // Classes
 ///////////////////////////////////////////////////////////////////////////////
 
+class AssetAtlas;
+
 /**
  * A simple LRU texture cache. The cache has a maximum size expressed in bytes.
  * Any texture added to the cache causing the cache to grow beyond the maximum
  * allowed size will also cause the oldest texture to be kicked out.
  */
-class TextureCache: public OnEntryRemoved<SkBitmap*, Texture*> {
+class TextureCache: public OnEntryRemoved<uint32_t, Texture*> {
 public:
     TextureCache();
     TextureCache(uint32_t maxByteSize);
@@ -59,28 +61,36 @@ public:
      * Used as a callback when an entry is removed from the cache.
      * Do not invoke directly.
      */
-    void operator()(SkBitmap*& bitmap, Texture*& texture);
+    void operator()(uint32_t&, Texture*& texture);
+
+    /**
+     * Resets all Textures to not be marked as in use
+     */
+    void resetMarkInUse();
+
+    /**
+     * Attempts to precache the SkBitmap. Returns true if a Texture was successfully
+     * acquired for the bitmap, false otherwise. If a Texture was acquired it is
+     * marked as in use.
+     */
+    bool prefetchAndMarkInUse(const SkBitmap* bitmap);
 
     /**
      * Returns the texture associated with the specified bitmap. If the texture
      * cannot be found in the cache, a new texture is generated.
      */
-    Texture* get(SkBitmap* bitmap);
+    Texture* get(const SkBitmap* bitmap);
     /**
      * Returns the texture associated with the specified bitmap. The generated
      * texture is not kept in the cache. The caller must destroy the texture.
      */
-    Texture* getTransient(SkBitmap* bitmap);
-    /**
-     * Removes the texture associated with the specified bitmap.
-     * Upon remove the texture is freed.
-     */
-    void remove(SkBitmap* bitmap);
+    Texture* getTransient(const SkBitmap* bitmap);
+
     /**
      * Removes the texture associated with the specified bitmap. This is meant
      * to be called from threads that are not the EGL context thread.
      */
-    void removeDeferred(SkBitmap* bitmap);
+    void releaseTexture(const SkBitmap* bitmap);
     /**
      * Process deferred removals.
      */
@@ -115,22 +125,29 @@ public:
      */
     void setFlushRate(float flushRate);
 
+    void setAssetAtlas(AssetAtlas* assetAtlas);
+
 private:
+
+    bool canMakeTextureFromBitmap(const SkBitmap* bitmap);
+
+    Texture* getCachedTexture(const SkBitmap* bitmap);
+
     /**
      * Generates the texture from a bitmap into the specified texture structure.
      *
      * @param regenerate If true, the bitmap data is reuploaded into the texture, but
      *        no new texture is generated.
      */
-    void generateTexture(SkBitmap* bitmap, Texture* texture, bool regenerate = false);
+    void generateTexture(const SkBitmap* bitmap, Texture* texture, bool regenerate = false);
 
-    void uploadLoFiTexture(bool resize, SkBitmap* bitmap, uint32_t width, uint32_t height);
-    void uploadToTexture(bool resize, GLenum format, GLsizei width, GLsizei height,
-            GLenum type, const GLvoid * data);
+    void uploadLoFiTexture(bool resize, const SkBitmap* bitmap, uint32_t width, uint32_t height);
+    void uploadToTexture(bool resize, GLenum format, GLsizei stride, GLsizei bpp,
+            GLsizei width, GLsizei height, GLenum type, const GLvoid * data);
 
     void init();
 
-    GenerationCache<SkBitmap*, Texture*> mCache;
+    LruCache<uint32_t, Texture*> mCache;
 
     uint32_t mSize;
     uint32_t mMaxSize;
@@ -140,8 +157,10 @@ private:
 
     bool mDebugEnabled;
 
-    Vector<SkBitmap*> mGarbage;
+    Vector<uint32_t> mGarbage;
     mutable Mutex mLock;
+
+    AssetAtlas* mAssetAtlas;
 }; // class TextureCache
 
 }; // namespace uirenderer

@@ -16,7 +16,6 @@
 
 package android.content;
 
-import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.CancellationSignal;
@@ -65,9 +64,14 @@ public class CursorLoader extends AsyncTaskLoader<Cursor> {
             Cursor cursor = getContext().getContentResolver().query(mUri, mProjection, mSelection,
                     mSelectionArgs, mSortOrder, mCancellationSignal);
             if (cursor != null) {
-                // Ensure the cursor window is filled
-                cursor.getCount();
-                registerContentObserver(cursor, mObserver);
+                try {
+                    // Ensure the cursor window is filled.
+                    cursor.getCount();
+                    cursor.registerContentObserver(mObserver);
+                } catch (RuntimeException ex) {
+                    cursor.close();
+                    throw ex;
+                }
             }
             return cursor;
         } finally {
@@ -86,14 +90,6 @@ public class CursorLoader extends AsyncTaskLoader<Cursor> {
                 mCancellationSignal.cancel();
             }
         }
-    }
-
-    /**
-     * Registers an observer to get notifications from the content provider
-     * when the cursor needs to be refreshed.
-     */
-    void registerContentObserver(Cursor cursor, ContentObserver observer) {
-        cursor.registerContentObserver(mObserver);
     }
 
     /* Runs on the UI thread */

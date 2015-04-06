@@ -17,6 +17,8 @@
 package com.android.systemui.media;
 
 import android.content.Context;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.media.AudioAttributes;
 import android.media.IAudioService;
 import android.media.IRingtonePlayer;
 import android.media.Ringtone;
@@ -26,10 +28,10 @@ import android.os.IBinder;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
-import android.util.Slog;
+import android.os.UserHandle;
+import android.util.Log;
 
 import com.android.systemui.SystemUI;
-import com.google.android.collect.Maps;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -48,7 +50,7 @@ public class RingtonePlayer extends SystemUI {
     private IAudioService mAudioService;
 
     private final NotificationPlayer mAsyncPlayer = new NotificationPlayer(TAG);
-    private final HashMap<IBinder, Client> mClients = Maps.newHashMap();
+    private final HashMap<IBinder, Client> mClients = new HashMap<IBinder, Client>();
 
     @Override
     public void start() {
@@ -59,7 +61,7 @@ public class RingtonePlayer extends SystemUI {
         try {
             mAudioService.setRingtonePlayer(mCallback);
         } catch (RemoteException e) {
-            Slog.e(TAG, "Problem registering RingtonePlayer: " + e);
+            Log.e(TAG, "Problem registering RingtonePlayer: " + e);
         }
     }
 
@@ -70,16 +72,17 @@ public class RingtonePlayer extends SystemUI {
         private final IBinder mToken;
         private final Ringtone mRingtone;
 
-        public Client(IBinder token, Uri uri, int streamType) {
+        public Client(IBinder token, Uri uri, UserHandle user, AudioAttributes aa) {
             mToken = token;
-            mRingtone = new Ringtone(mContext, false);
-            mRingtone.setStreamType(streamType);
+
+            mRingtone = new Ringtone(getContextForUser(user), false);
+            mRingtone.setAudioAttributes(aa);
             mRingtone.setUri(uri);
         }
 
         @Override
         public void binderDied() {
-            if (LOGD) Slog.d(TAG, "binderDied() token=" + mToken);
+            if (LOGD) Log.d(TAG, "binderDied() token=" + mToken);
             synchronized (mClients) {
                 mClients.remove(mToken);
             }
@@ -89,13 +92,17 @@ public class RingtonePlayer extends SystemUI {
 
     private IRingtonePlayer mCallback = new IRingtonePlayer.Stub() {
         @Override
-        public void play(IBinder token, Uri uri, int streamType) throws RemoteException {
-            if (LOGD) Slog.d(TAG, "play(token=" + token + ", uri=" + uri + ")");
+        public void play(IBinder token, Uri uri, AudioAttributes aa) throws RemoteException {
+            if (LOGD) {
+                Log.d(TAG, "play(token=" + token + ", uri=" + uri + ", uid="
+                        + Binder.getCallingUid() + ")");
+            }
             Client client;
             synchronized (mClients) {
                 client = mClients.get(token);
                 if (client == null) {
-                    client = new Client(token, uri, streamType);
+                    final UserHandle user = Binder.getCallingUserHandle();
+                    client = new Client(token, uri, user, aa);
                     token.linkToDeath(client, 0);
                     mClients.put(token, client);
                 }
@@ -105,7 +112,7 @@ public class RingtonePlayer extends SystemUI {
 
         @Override
         public void stop(IBinder token) {
-            if (LOGD) Slog.d(TAG, "stop(token=" + token + ")");
+            if (LOGD) Log.d(TAG, "stop(token=" + token + ")");
             Client client;
             synchronized (mClients) {
                 client = mClients.remove(token);
@@ -118,7 +125,7 @@ public class RingtonePlayer extends SystemUI {
 
         @Override
         public boolean isPlaying(IBinder token) {
-            if (LOGD) Slog.d(TAG, "isPlaying(token=" + token + ")");
+            if (LOGD) Log.d(TAG, "isPlaying(token=" + token + ")");
             Client client;
             synchronized (mClients) {
                 client = mClients.get(token);
@@ -131,23 +138,32 @@ public class RingtonePlayer extends SystemUI {
         }
 
         @Override
-        public void playAsync(Uri uri, boolean looping, int streamType) {
-            if (LOGD) Slog.d(TAG, "playAsync(uri=" + uri + ")");
+        public void playAsync(Uri uri, UserHandle user, boolean looping, AudioAttributes aa) {
+            if (LOGD) Log.d(TAG, "playAsync(uri=" + uri + ", user=" + user + ")");
             if (Binder.getCallingUid() != Process.SYSTEM_UID) {
                 throw new SecurityException("Async playback only available from system UID.");
             }
-            mAsyncPlayer.play(mContext, uri, looping, streamType);
+
+            mAsyncPlayer.play(getContextForUser(user), uri, looping, aa);
         }
 
         @Override
         public void stopAsync() {
-            if (LOGD) Slog.d(TAG, "stopAsync()");
+            if (LOGD) Log.d(TAG, "stopAsync()");
             if (Binder.getCallingUid() != Process.SYSTEM_UID) {
                 throw new SecurityException("Async playback only available from system UID.");
             }
             mAsyncPlayer.stop();
         }
     };
+
+    private Context getContextForUser(UserHandle user) {
+        try {
+            return mContext.createPackageContextAsUser(mContext.getPackageName(), 0, user);
+        } catch (NameNotFoundException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     @Override
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {

@@ -6,12 +6,6 @@ parent.link=services.html
 
 <div id="qv-wrapper">
 <ol id="qv">
-<h2>Quickview</h2>
-<ul>
-  <li>A bound service allows other components to bind to it, in order to interact with it and
-perform interprocess communication</li>
-  <li>A bound service is destroyed once all clients unbind, unless the service was also started</li>
-</ul>
 <h2>In this document</h2>
 <ol>
   <li><a href="#Basics">The Basics</a></li>
@@ -578,7 +572,7 @@ private ServiceConnection mConnection = new ServiceConnection() {
 </pre>
 
 <p>With this {@link android.content.ServiceConnection}, the client can bind to a service by passing
-this it to {@link android.content.Context#bindService bindService()}. For example:</p>
+it to {@link android.content.Context#bindService bindService()}. For example:</p>
 
 <pre>
 Intent intent = new Intent(this, LocalService.class);
@@ -667,7 +661,7 @@ Below, figure 1 illustrates the logic for this kind of lifecycle.</p>
 and also allows binding.</p>
 
 
-<p>For more information about the lifecycle of an started service, see the <a
+<p>For more information about the lifecycle of a started service, see the <a
 href="{@docRoot}guide/components/services.html#Lifecycle">Services</a> document.</p>
 
 

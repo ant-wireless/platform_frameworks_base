@@ -22,7 +22,6 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.RemoteException;
 import android.os.IBinder;
-import android.os.ServiceManager;
 import android.util.Log;
 
 /**
@@ -51,7 +50,8 @@ import android.util.Log;
 public class BluetoothPbap {
 
     private static final String TAG = "BluetoothPbap";
-    private static final boolean DBG = false;
+    private static final boolean DBG = true;
+    private static final boolean VDBG = false;
 
     /** int extra for PBAP_STATE_CHANGED_ACTION */
     public static final String PBAP_STATE =
@@ -70,6 +70,7 @@ public class BluetoothPbap {
     private IBluetoothPbap mService;
     private final Context mContext;
     private ServiceListener mServiceListener;
+    private BluetoothAdapter mAdapter;
 
     /** There was an error trying to obtain the state */
     public static final int STATE_ERROR        = -1;
@@ -96,7 +97,7 @@ public class BluetoothPbap {
          * this callback before making IPC calls on the BluetoothPbap
          * service.
          */
-        public void onServiceConnected();
+        public void onServiceConnected(BluetoothPbap proxy);
 
         /**
          * Called to notify the client that this proxy object has been
@@ -108,15 +109,63 @@ public class BluetoothPbap {
         public void onServiceDisconnected();
     }
 
+    final private IBluetoothStateChangeCallback mBluetoothStateChangeCallback =
+            new IBluetoothStateChangeCallback.Stub() {
+                public void onBluetoothStateChange(boolean up) {
+                    if (DBG) Log.d(TAG, "onBluetoothStateChange: up=" + up);
+                    if (!up) {
+                        if (VDBG) Log.d(TAG,"Unbinding service...");
+                        synchronized (mConnection) {
+                            try {
+                                mService = null;
+                                mContext.unbindService(mConnection);
+                            } catch (Exception re) {
+                                Log.e(TAG,"",re);
+                            }
+                        }
+                    } else {
+                        synchronized (mConnection) {
+                            try {
+                                if (mService == null) {
+                                    if (VDBG) Log.d(TAG,"Binding service...");
+                                    doBind();
+                                }
+                            } catch (Exception re) {
+                                Log.e(TAG,"",re);
+                            }
+                        }
+                    }
+                }
+        };
+
     /**
      * Create a BluetoothPbap proxy object.
      */
     public BluetoothPbap(Context context, ServiceListener l) {
         mContext = context;
         mServiceListener = l;
-        if (!context.bindService(new Intent(IBluetoothPbap.class.getName()), mConnection, 0)) {
-            Log.e(TAG, "Could not bind to Bluetooth Pbap Service");
+        mAdapter = BluetoothAdapter.getDefaultAdapter();
+        IBluetoothManager mgr = mAdapter.getBluetoothManager();
+        if (mgr != null) {
+            try {
+                mgr.registerStateChangeCallback(mBluetoothStateChangeCallback);
+            } catch (RemoteException e) {
+                Log.e(TAG,"",e);
+            }
         }
+        doBind();
+    }
+
+    boolean doBind() {
+        Intent intent = new Intent(IBluetoothPbap.class.getName());
+        ComponentName comp = intent.resolveSystemService(mContext.getPackageManager(), 0);
+        intent.setComponent(comp);
+        if (comp == null || !mContext.bindServiceAsUser(intent, mConnection, 0,
+                android.os.Process.myUserHandle())) {
+            Log.e(TAG, "Could not bind to Bluetooth Pbap Service with " + intent);
+            return false;
+        }
+        return true;
     }
 
     protected void finalize() throws Throwable {
@@ -134,9 +183,24 @@ public class BluetoothPbap {
      * are ok.
      */
     public synchronized void close() {
-        if (mConnection != null) {
-            mContext.unbindService(mConnection);
-            mConnection = null;
+        IBluetoothManager mgr = mAdapter.getBluetoothManager();
+        if (mgr != null) {
+            try {
+                mgr.unregisterStateChangeCallback(mBluetoothStateChangeCallback);
+            } catch (Exception e) {
+                Log.e(TAG,"",e);
+            }
+        }
+
+        synchronized (mConnection) {
+            if (mService != null) {
+                try {
+                    mService = null;
+                    mContext.unbindService(mConnection);
+                } catch (Exception re) {
+                    Log.e(TAG,"",re);
+                }
+            }
         }
         mServiceListener = null;
     }
@@ -147,7 +211,7 @@ public class BluetoothPbap {
      *         object is currently not connected to the Pbap service.
      */
     public int getState() {
-        if (DBG) log("getState()");
+        if (VDBG) log("getState()");
         if (mService != null) {
             try {
                 return mService.getState();
@@ -166,7 +230,7 @@ public class BluetoothPbap {
      *         the Pbap service.
      */
     public BluetoothDevice getClient() {
-        if (DBG) log("getClient()");
+        if (VDBG) log("getClient()");
         if (mService != null) {
             try {
                 return mService.getClient();
@@ -184,7 +248,7 @@ public class BluetoothPbap {
      * object is not currently connected to the Pbap service.
      */
     public boolean isConnected(BluetoothDevice device) {
-        if (DBG) log("isConnected(" + device + ")");
+        if (VDBG) log("isConnected(" + device + ")");
         if (mService != null) {
             try {
                 return mService.isConnected(device);
@@ -235,12 +299,12 @@ public class BluetoothPbap {
         }
     }
 
-    private ServiceConnection mConnection = new ServiceConnection() {
+    private final ServiceConnection mConnection = new ServiceConnection() {
         public void onServiceConnected(ComponentName className, IBinder service) {
             if (DBG) log("Proxy object connected");
             mService = IBluetoothPbap.Stub.asInterface(service);
             if (mServiceListener != null) {
-                mServiceListener.onServiceConnected();
+                mServiceListener.onServiceConnected(BluetoothPbap.this);
             }
         }
         public void onServiceDisconnected(ComponentName className) {

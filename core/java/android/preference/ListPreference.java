@@ -16,13 +16,13 @@
 
 package android.preference;
 
-
 import android.app.AlertDialog.Builder;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.res.TypedArray;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 
 /**
@@ -41,12 +41,13 @@ public class ListPreference extends DialogPreference {
     private String mValue;
     private String mSummary;
     private int mClickedDialogEntryIndex;
-    
-    public ListPreference(Context context, AttributeSet attrs) {
-        super(context, attrs);
-        
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.ListPreference, 0, 0);
+    private boolean mValueSet;
+
+    public ListPreference(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.ListPreference, defStyleAttr, defStyleRes);
         mEntries = a.getTextArray(com.android.internal.R.styleable.ListPreference_entries);
         mEntryValues = a.getTextArray(com.android.internal.R.styleable.ListPreference_entryValues);
         a.recycle();
@@ -55,9 +56,17 @@ public class ListPreference extends DialogPreference {
          * in the Preference class.
          */
         a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.Preference, 0, 0);
+                com.android.internal.R.styleable.Preference, defStyleAttr, defStyleRes);
         mSummary = a.getString(com.android.internal.R.styleable.Preference_summary);
         a.recycle();
+    }
+
+    public ListPreference(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public ListPreference(Context context, AttributeSet attrs) {
+        this(context, attrs, com.android.internal.R.attr.dialogPreferenceStyle);
     }
 
     public ListPreference(Context context) {
@@ -130,9 +139,16 @@ public class ListPreference extends DialogPreference {
      * @param value The value to set for the key.
      */
     public void setValue(String value) {
-        mValue = value;
-        
-        persistString(value);
+        // Always persist/notify the first time.
+        final boolean changed = !TextUtils.equals(mValue, value);
+        if (changed || !mValueSet) {
+            mValue = value;
+            mValueSet = true;
+            persistString(value);
+            if (changed) {
+                notifyChanged();
+            }
+        }
     }
 
     /**
@@ -146,10 +162,10 @@ public class ListPreference extends DialogPreference {
     @Override
     public CharSequence getSummary() {
         final CharSequence entry = getEntry();
-        if (mSummary == null || entry == null) {
+        if (mSummary == null) {
             return super.getSummary();
         } else {
-            return String.format(mSummary, entry);
+            return String.format(mSummary, entry == null ? "" : entry);
         }
     }
 

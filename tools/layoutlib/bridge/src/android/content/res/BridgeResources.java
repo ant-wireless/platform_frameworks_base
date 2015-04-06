@@ -51,6 +51,7 @@ public final class BridgeResources extends Resources {
     private BridgeContext mContext;
     private IProjectCallback mProjectCallback;
     private boolean[] mPlatformResourceFlag = new boolean[1];
+    private TypedValue mTmpValue = new TypedValue();
 
     /**
      * Simpler wrapper around FileInputStream. This is used when the input stream represent
@@ -154,10 +155,15 @@ public final class BridgeResources extends Resources {
 
     @Override
     public Drawable getDrawable(int id) throws NotFoundException {
+        return getDrawable(id, null);
+    }
+
+    @Override
+    public Drawable getDrawable(int id, Theme theme) {
         Pair<String, ResourceValue> value = getResourceValue(id, mPlatformResourceFlag);
 
         if (value != null) {
-            return ResourceHelper.getDrawable(value.getSecond(), mContext);
+            return ResourceHelper.getDrawable(value.getSecond(), mContext, theme);
         }
 
         // id was not found or not resolved. Throw a NotFoundException.

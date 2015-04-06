@@ -12,6 +12,9 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #include "Images.h"
+#ifdef HAVE_MS_C_RUNTIME
+#include <direct.h>
+#endif
 
 using namespace android;
 
@@ -27,6 +30,8 @@ using namespace android;
  */
 class CacheUpdater {
 public:
+    virtual ~CacheUpdater() {}
+
     // Make sure all the directories along this path exist
     virtual void ensureDirectoriesExist(String8 path) = 0;
 

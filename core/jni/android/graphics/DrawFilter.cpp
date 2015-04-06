@@ -24,27 +24,73 @@
 #include "GraphicsJNI.h"
 #include <android_runtime/AndroidRuntime.h>
 
+#include "core_jni_helpers.h"
+
 #include "SkDrawFilter.h"
 #include "SkPaintFlagsDrawFilter.h"
 #include "SkPaint.h"
 
 namespace android {
 
+// Custom version of SkPaintFlagsDrawFilter that also calls setFilterLevel.
+class CompatFlagsDrawFilter : public SkPaintFlagsDrawFilter {
+public:
+    CompatFlagsDrawFilter(uint32_t clearFlags, uint32_t setFlags,
+            SkPaint::FilterLevel desiredLevel)
+    : SkPaintFlagsDrawFilter(clearFlags, setFlags)
+    , fDesiredLevel(desiredLevel) {
+    }
+
+    virtual bool filter(SkPaint* paint, Type type) {
+        SkPaintFlagsDrawFilter::filter(paint, type);
+        paint->setFilterLevel(fDesiredLevel);
+        return true;
+    }
+
+private:
+    const SkPaint::FilterLevel fDesiredLevel;
+};
+
+// Returns whether flags contains FILTER_BITMAP_FLAG. If flags does, remove it.
+static inline bool hadFiltering(jint& flags) {
+    // Equivalent to the Java Paint's FILTER_BITMAP_FLAG.
+    static const uint32_t sFilterBitmapFlag = 0x02;
+
+    const bool result = (flags & sFilterBitmapFlag) != 0;
+    flags &= ~sFilterBitmapFlag;
+    return result;
+}
+
 class SkDrawFilterGlue {
 public:
 
-    static void finalizer(JNIEnv* env, jobject clazz, SkDrawFilter* obj) {
+    static void finalizer(JNIEnv* env, jobject clazz, jlong objHandle) {
+        SkDrawFilter* obj = reinterpret_cast<SkDrawFilter*>(objHandle);
         SkSafeUnref(obj);
     }
 
-    static SkDrawFilter* CreatePaintFlagsDF(JNIEnv* env, jobject clazz,
-                                           int clearFlags, int setFlags) {
-        // trim off any out-of-range bits
-        clearFlags &= SkPaint::kAllFlags;
-        setFlags &= SkPaint::kAllFlags;
-
+    static jlong CreatePaintFlagsDF(JNIEnv* env, jobject clazz,
+                                    jint clearFlags, jint setFlags) {
         if (clearFlags | setFlags) {
-            return new SkPaintFlagsDrawFilter(clearFlags, setFlags);
+            // Mask both groups of flags to remove FILTER_BITMAP_FLAG, which no
+            // longer has a Skia equivalent flag (instead it corresponds to
+            // calling setFilterLevel), and keep track of which group(s), if
+            // any, had the flag set.
+            const bool turnFilteringOn = hadFiltering(setFlags);
+            const bool turnFilteringOff = hadFiltering(clearFlags);
+
+            SkDrawFilter* filter;
+            if (turnFilteringOn) {
+                // Turning filtering on overrides turning it off.
+                filter = new CompatFlagsDrawFilter(clearFlags, setFlags,
+                        SkPaint::kLow_FilterLevel);
+            } else if (turnFilteringOff) {
+                filter = new CompatFlagsDrawFilter(clearFlags, setFlags,
+                        SkPaint::kNone_FilterLevel);
+            } else {
+                filter = new SkPaintFlagsDrawFilter(clearFlags, setFlags);
+            }
+            return reinterpret_cast<jlong>(filter);
         } else {
             return NULL;
         }
@@ -52,23 +98,18 @@ public:
 };
 
 static JNINativeMethod drawfilter_methods[] = {
-    {"nativeDestructor", "(I)V", (void*) SkDrawFilterGlue::finalizer}
+    {"nativeDestructor", "(J)V", (void*) SkDrawFilterGlue::finalizer}
 };
 
 static JNINativeMethod paintflags_methods[] = {
-    {"nativeConstructor","(II)I", (void*) SkDrawFilterGlue::CreatePaintFlagsDF}
+    {"nativeConstructor","(II)J", (void*) SkDrawFilterGlue::CreatePaintFlagsDF}
 };
 
-#define REG(env, name, array)                                                                       \
-    result = android::AndroidRuntime::registerNativeMethods(env, name, array, SK_ARRAY_COUNT(array));  \
-    if (result < 0) return result
-
-
 int register_android_graphics_DrawFilter(JNIEnv* env) {
-    int result;
-    
-    REG(env, "android/graphics/DrawFilter", drawfilter_methods);
-    REG(env, "android/graphics/PaintFlagsDrawFilter", paintflags_methods);
+    int result = RegisterMethodsOrDie(env, "android/graphics/DrawFilter", drawfilter_methods,
+                                      NELEM(drawfilter_methods));
+    result |= RegisterMethodsOrDie(env, "android/graphics/PaintFlagsDrawFilter", paintflags_methods,
+                                   NELEM(paintflags_methods));
     
     return 0;
 }

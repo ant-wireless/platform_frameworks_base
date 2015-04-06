@@ -16,11 +16,28 @@
 */
 -->
 <resources>
-    <!-- Layout parameters for the notification panel -->
-	<dimen name="notification_panel_margin_bottom">0dp</dimen>
-    <dimen name="notification_panel_margin_left">32dp</dimen>
+    <!-- Recent Applications parameters -->
+    <dimen name="status_bar_recents_app_label_width">190dip</dimen>
 
-    <!-- Gravity for the notification panel -->
-    <!-- 0x33 = left|top -->
-    <integer name="notification_panel_layout_gravity">0x33</integer>
+    <!-- The side padding for the task stack as a percentage of the width. -->
+    <item name="recents_stack_width_padding_percentage" format="float" type="dimen">0.25</item>
+
+    <fraction name="keyguard_clock_y_fraction_max">37%</fraction>
+    <fraction name="keyguard_clock_y_fraction_min">20%</fraction>
+
+    <dimen name="keyguard_clock_notifications_margin_min">36dp</dimen>
+    <dimen name="keyguard_clock_notifications_margin_max">36dp</dimen>
+
+    <dimen name="keyguard_indication_margin_bottom">80dp</dimen>
+
+    <!-- Screen pinning request width (just a little bit bigger than the three buttons here -->
+    <dimen name="screen_pinning_request_width">490dp</dimen>
+    <!-- Screen pinning request bottom button circle widths -->
+    <dimen name="screen_pinning_request_button_width">162dp</dimen>
+    <!-- Screen pinning request, controls padding on bigger screens, bigger nav bar -->
+    <dimen name="screen_pinning_request_frame_padding">39dp</dimen>
+    <!-- Screen pinning request side views to match nav bar
+         In sw600dp we want the buttons centered so this fills the space,
+         (screen_pinning_request_width - 3 * screen_pinning_request_button_width) / 2 -->
+    <dimen name="screen_pinning_request_side_width">2dp</dimen>
 </resources>

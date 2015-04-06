@@ -113,7 +113,7 @@ public final class InputEventConsistencyVerifier {
      * @param flags Flags to the verifier, or 0 if none.
      */
     public InputEventConsistencyVerifier(Object caller, int flags) {
-        this(caller, flags, InputEventConsistencyVerifier.class.getSimpleName());
+        this(caller, flags, null);
     }
 
     /**
@@ -322,7 +322,7 @@ public final class InputEventConsistencyVerifier {
 
         final int action = event.getAction();
         final boolean newStream = action == MotionEvent.ACTION_DOWN
-                || action == MotionEvent.ACTION_CANCEL;
+                || action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_OUTSIDE;
         if (newStream && (mTouchEventStreamIsTainted || mTouchEventStreamUnhandled)) {
             mTouchEventStreamIsTainted = false;
             mTouchEventStreamUnhandled = false;

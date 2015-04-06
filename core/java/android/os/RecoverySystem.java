@@ -19,6 +19,8 @@ package android.os;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.UserManager;
+import android.text.TextUtils;
 import android.util.Log;
 
 import java.io.ByteArrayInputStream;
@@ -32,14 +34,13 @@ import java.security.GeneralSecurityException;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.SignatureException;
-import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.Collection;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -47,7 +48,7 @@ import org.apache.harmony.security.asn1.BerInputStream;
 import org.apache.harmony.security.pkcs7.ContentInfo;
 import org.apache.harmony.security.pkcs7.SignedData;
 import org.apache.harmony.security.pkcs7.SignerInfo;
-import org.apache.harmony.security.provider.cert.X509CertImpl;
+import org.apache.harmony.security.x509.Certificate;
 
 /**
  * RecoverySystem contains methods for interacting with the Android
@@ -92,9 +93,9 @@ public class RecoverySystem {
     }
 
     /** @return the set of certs that can be used to sign an OTA package. */
-    private static HashSet<Certificate> getTrustedCerts(File keystore)
+    private static HashSet<X509Certificate> getTrustedCerts(File keystore)
         throws IOException, GeneralSecurityException {
-        HashSet<Certificate> trusted = new HashSet<Certificate>();
+        HashSet<X509Certificate> trusted = new HashSet<X509Certificate>();
         if (keystore == null) {
             keystore = DEFAULT_KEYSTORE;
         }
@@ -106,7 +107,7 @@ public class RecoverySystem {
                 ZipEntry entry = entries.nextElement();
                 InputStream is = zip.getInputStream(entry);
                 try {
-                    trusted.add(cf.generateCertificate(is));
+                    trusted.add((X509Certificate) cf.generateCertificate(is));
                 } finally {
                     is.close();
                 }
@@ -200,21 +201,23 @@ public class RecoverySystem {
             if (signedData == null) {
                 throw new IOException("signedData is null");
             }
-            Collection encCerts = signedData.getCertificates();
+            List<Certificate> encCerts = signedData.getCertificates();
             if (encCerts.isEmpty()) {
                 throw new IOException("encCerts is empty");
             }
             // Take the first certificate from the signature (packages
             // should contain only one).
-            Iterator it = encCerts.iterator();
+            Iterator<Certificate> it = encCerts.iterator();
             X509Certificate cert = null;
             if (it.hasNext()) {
-                cert = new X509CertImpl((org.apache.harmony.security.x509.Certificate)it.next());
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                InputStream is = new ByteArrayInputStream(it.next().getEncoded());
+                cert = (X509Certificate) cf.generateCertificate(is);
             } else {
                 throw new SignatureException("signature contains no certificates");
             }
 
-            List sigInfos = signedData.getSignerInfos();
+            List<SignerInfo> sigInfos = signedData.getSignerInfos();
             SignerInfo sigInfo;
             if (!sigInfos.isEmpty()) {
                 sigInfo = (SignerInfo)sigInfos.get(0);
@@ -225,12 +228,12 @@ public class RecoverySystem {
             // Check that the public key of the certificate contained
             // in the package equals one of our trusted public keys.
 
-            HashSet<Certificate> trusted = getTrustedCerts(
+            HashSet<X509Certificate> trusted = getTrustedCerts(
                 deviceCertsZipFile == null ? DEFAULT_KEYSTORE : deviceCertsZipFile);
 
             PublicKey signatureKey = cert.getPublicKey();
             boolean verified = false;
-            for (Certificate c : trusted) {
+            for (X509Certificate c : trusted) {
                 if (c.getPublicKey().equals(signatureKey)) {
                     verified = true;
                     break;
@@ -243,12 +246,17 @@ public class RecoverySystem {
             // The signature cert matches a trusted key.  Now verify that
             // the digest in the cert matches the actual file data.
 
-            // The verifier in recovery *only* handles SHA1withRSA
-            // signatures.  SignApk.java always uses SHA1withRSA, no
-            // matter what the cert says to use.  Ignore
-            // cert.getSigAlgName(), and instead use whatever
-            // algorithm is used by the signature (which should be
-            // SHA1withRSA).
+            // The verifier in recovery only handles SHA1withRSA and
+            // SHA256withRSA signatures.  SignApk chooses which to use
+            // based on the signature algorithm of the cert:
+            //
+            //    "SHA256withRSA" cert -> "SHA256withRSA" signature
+            //    "SHA1withRSA" cert   -> "SHA1withRSA" signature
+            //    "MD5withRSA" cert    -> "SHA1withRSA" signature (for backwards compatibility)
+            //    any other cert       -> SignApk fails
+            //
+            // Here we ignore whatever the cert says, and instead use
+            // whatever algorithm is used by the signature.
 
             String da = sigInfo.getDigestAlgorithm();
             String dea = sigInfo.getDigestEncryptionAlgorithm();
@@ -326,27 +334,70 @@ public class RecoverySystem {
         throws IOException {
         String filename = packageFile.getCanonicalPath();
         Log.w(TAG, "!!! REBOOTING TO INSTALL " + filename + " !!!");
-        String arg = "--update_package=" + filename;
-        bootCommand(context, arg);
+
+        final String filenameArg = "--update_package=" + filename;
+        final String localeArg = "--locale=" + Locale.getDefault().toString();
+        bootCommand(context, filenameArg, localeArg);
     }
 
     /**
-     * Reboots the device and wipes the user data partition.  This is
-     * sometimes called a "factory reset", which is something of a
-     * misnomer because the system partition is not restored to its
-     * factory state.
-     * Requires the {@link android.Manifest.permission#REBOOT} permission.
+     * Reboots the device and wipes the user data and cache
+     * partitions.  This is sometimes called a "factory reset", which
+     * is something of a misnomer because the system partition is not
+     * restored to its factory state.  Requires the
+     * {@link android.Manifest.permission#REBOOT} permission.
      *
      * @param context  the Context to use
      *
      * @throws IOException  if writing the recovery command file
      * fails, or if the reboot itself fails.
+     * @throws SecurityException if the current user is not allowed to wipe data.
      */
     public static void rebootWipeUserData(Context context) throws IOException {
+        rebootWipeUserData(context, false, context.getPackageName());
+    }
+
+    /** {@hide} */
+    public static void rebootWipeUserData(Context context, String reason) throws IOException {
+        rebootWipeUserData(context, false, reason);
+    }
+
+    /** {@hide} */
+    public static void rebootWipeUserData(Context context, boolean shutdown)
+            throws IOException {
+        rebootWipeUserData(context, shutdown, context.getPackageName());
+    }
+
+    /**
+     * Reboots the device and wipes the user data and cache
+     * partitions.  This is sometimes called a "factory reset", which
+     * is something of a misnomer because the system partition is not
+     * restored to its factory state.  Requires the
+     * {@link android.Manifest.permission#REBOOT} permission.
+     *
+     * @param context   the Context to use
+     * @param shutdown  if true, the device will be powered down after
+     *                  the wipe completes, rather than being rebooted
+     *                  back to the regular system.
+     *
+     * @throws IOException  if writing the recovery command file
+     * fails, or if the reboot itself fails.
+     * @throws SecurityException if the current user is not allowed to wipe data.
+     *
+     * @hide
+     */
+    public static void rebootWipeUserData(Context context, boolean shutdown, String reason)
+            throws IOException {
+        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+        if (um.hasUserRestriction(UserManager.DISALLOW_FACTORY_RESET)) {
+            throw new SecurityException("Wiping data is not allowed for this user.");
+        }
         final ConditionVariable condition = new ConditionVariable();
 
         Intent intent = new Intent("android.intent.action.MASTER_CLEAR_NOTIFICATION");
-        context.sendOrderedBroadcast(intent, android.Manifest.permission.MASTER_CLEAR,
+        intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+        context.sendOrderedBroadcastAsUser(intent, UserHandle.OWNER,
+                android.Manifest.permission.MASTER_CLEAR,
                 new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context context, Intent intent) {
@@ -357,7 +408,18 @@ public class RecoverySystem {
         // Block until the ordered broadcast has completed.
         condition.block();
 
-        bootCommand(context, "--wipe_data");
+        String shutdownArg = null;
+        if (shutdown) {
+            shutdownArg = "--shutdown_after";
+        }
+
+        String reasonArg = null;
+        if (!TextUtils.isEmpty(reason)) {
+            reasonArg = "--reason=" + sanitizeArg(reason);
+        }
+
+        final String localeArg = "--locale=" + Locale.getDefault().toString();
+        bootCommand(context, shutdownArg, "--wipe_data", reasonArg, localeArg);
     }
 
     /**
@@ -365,30 +427,45 @@ public class RecoverySystem {
      * @throws IOException if something goes wrong.
      */
     public static void rebootWipeCache(Context context) throws IOException {
-        bootCommand(context, "--wipe_cache");
+        rebootWipeCache(context, context.getPackageName());
+    }
+
+    /** {@hide} */
+    public static void rebootWipeCache(Context context, String reason) throws IOException {
+        String reasonArg = null;
+        if (!TextUtils.isEmpty(reason)) {
+            reasonArg = "--reason=" + sanitizeArg(reason);
+        }
+
+        final String localeArg = "--locale=" + Locale.getDefault().toString();
+        bootCommand(context, "--wipe_cache", reasonArg, localeArg);
     }
 
     /**
      * Reboot into the recovery system with the supplied argument.
-     * @param arg to pass to the recovery utility.
+     * @param args to pass to the recovery utility.
      * @throws IOException if something goes wrong.
      */
-    private static void bootCommand(Context context, String arg) throws IOException {
+    private static void bootCommand(Context context, String... args) throws IOException {
         RECOVERY_DIR.mkdirs();  // In case we need it
         COMMAND_FILE.delete();  // In case it's not writable
         LOG_FILE.delete();
 
         FileWriter command = new FileWriter(COMMAND_FILE);
         try {
-            command.write(arg);
-            command.write("\n");
+            for (String arg : args) {
+                if (!TextUtils.isEmpty(arg)) {
+                    command.write(arg);
+                    command.write("\n");
+                }
+            }
         } finally {
             command.close();
         }
 
         // Having written the command file, go ahead and reboot
         PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-        pm.reboot("recovery");
+        pm.reboot(PowerManager.REBOOT_RECOVERY);
 
         throw new IOException("Reboot failed (no permissions?)");
     }
@@ -424,6 +501,16 @@ public class RecoverySystem {
         }
 
         return log;
+    }
+
+    /**
+     * Internally, recovery treats each line of the command file as a separate
+     * argv, so we only need to protect against newlines and nulls.
+     */
+    private static String sanitizeArg(String arg) {
+        arg = arg.replace('\0', '?');
+        arg = arg.replace('\n', '?');
+        return arg;
     }
 
     private void RecoverySystem() { }  // Do not instantiate

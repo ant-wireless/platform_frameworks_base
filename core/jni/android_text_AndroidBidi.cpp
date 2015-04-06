@@ -18,7 +18,7 @@
 #define LOG_TAG "AndroidUnicode"
 
 #include "JNIHelp.h"
-#include <android_runtime/AndroidRuntime.h>
+#include "core_jni_helpers.h"
 #include "utils/misc.h"
 #include "utils/Log.h"
 #include "unicode/ubidi.h"
@@ -26,7 +26,7 @@
 namespace android {
 
 static jint runBidi(JNIEnv* env, jobject obj, jint dir, jcharArray chsArray,
-                    jbyteArray infoArray, int n, jboolean haveInfo)
+                    jbyteArray infoArray, jint n, jboolean haveInfo)
 {
     // Parameters are checked on java side
     // Failures from GetXXXArrayElements indicate a serious out-of-memory condition
@@ -57,14 +57,12 @@ static jint runBidi(JNIEnv* env, jobject obj, jint dir, jcharArray chsArray,
 }
 
 static JNINativeMethod gMethods[] = {
-        { "runBidi", "(I[C[BIZ)I",
-        (void*) runBidi }
+        { "runBidi", "(I[C[BIZ)I", (void*) runBidi }
 };
 
 int register_android_text_AndroidBidi(JNIEnv* env)
 {
-    return AndroidRuntime::registerNativeMethods(env, "android/text/AndroidBidi",
-            gMethods, NELEM(gMethods));
+    return RegisterMethodsOrDie(env, "android/text/AndroidBidi", gMethods, NELEM(gMethods));
 }
 
 }

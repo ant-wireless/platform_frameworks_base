@@ -23,6 +23,7 @@ import android.util.AttributeSet;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.ImageView;
@@ -54,13 +55,13 @@ public class ListMenuItemView extends LinearLayout implements MenuView.ItemView 
 
     private boolean mForceShowIcon;
 
-    public ListMenuItemView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs);
-    
-        TypedArray a =
-            context.obtainStyledAttributes(
-                attrs, com.android.internal.R.styleable.MenuView, defStyle, 0);
-        
+    public ListMenuItemView(
+            Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.MenuView, defStyleAttr, defStyleRes);
+
         mBackground = a.getDrawable(com.android.internal.R.styleable.MenuView_itemBackground);
         mTextAppearance = a.getResourceId(com.android.internal.R.styleable.
                                           MenuView_itemTextAppearance, -1);
@@ -69,6 +70,10 @@ public class ListMenuItemView extends LinearLayout implements MenuView.ItemView 
         mTextAppearanceContext = context;
         
         a.recycle();
+    }
+
+    public ListMenuItemView(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
     }
 
     public ListMenuItemView(Context context, AttributeSet attrs) {
@@ -268,5 +273,14 @@ public class ListMenuItemView extends LinearLayout implements MenuView.ItemView 
             mInflater = LayoutInflater.from(mContext);
         }
         return mInflater;
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(info);
+
+        if (mItemData != null && mItemData.hasSubMenu()) {
+            info.setCanOpenPopup(true);
+        }
     }
 }

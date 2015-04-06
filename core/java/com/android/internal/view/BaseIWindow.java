@@ -28,13 +28,14 @@ import android.view.IWindowSession;
 public class BaseIWindow extends IWindow.Stub {
     private IWindowSession mSession;
     public int mSeq;
-    
+
     public void setSession(IWindowSession session) {
         mSession = session;
     }
-    
-    public void resized(int w, int h, Rect contentInsets,
-            Rect visibleInsets, boolean reportDraw, Configuration newConfig) {
+
+    @Override
+    public void resized(Rect frame, Rect overscanInsets, Rect contentInsets,
+            Rect visibleInsets, Rect stableInsets, boolean reportDraw, Configuration newConfig) {
         if (reportDraw) {
             try {
                 mSession.finishDrawing(this);
@@ -43,24 +44,31 @@ public class BaseIWindow extends IWindow.Stub {
         }
     }
 
+    @Override
+    public void moved(int newX, int newY) {
+    }
+
+    @Override
     public void dispatchAppVisibility(boolean visible) {
     }
 
+    @Override
     public void dispatchGetNewSurface() {
     }
 
-    public void dispatchScreenState(boolean on) {
-    }
-
+    @Override
     public void windowFocusChanged(boolean hasFocus, boolean touchEnabled) {
     }
 
+    @Override
     public void executeCommand(String command, String parameters, ParcelFileDescriptor out) {
     }
-    
+
+    @Override
     public void closeSystemDialogs(String reason) {
     }
-    
+
+    @Override
     public void dispatchWallpaperOffsets(float x, float y, float xStep, float yStep, boolean sync) {
         if (sync) {
             try {
@@ -70,14 +78,17 @@ public class BaseIWindow extends IWindow.Stub {
         }
     }
 
+    @Override
     public void dispatchDragEvent(DragEvent event) {
     }
 
+    @Override
     public void dispatchSystemUiVisibilityChanged(int seq, int globalUi,
             int localValue, int localChanges) {
         mSeq = seq;
     }
 
+    @Override
     public void dispatchWallpaperCommand(String action, int x, int y,
             int z, Bundle extras, boolean sync) {
         if (sync) {
@@ -88,6 +99,11 @@ public class BaseIWindow extends IWindow.Stub {
         }
     }
 
+    @Override
     public void doneAnimating() {
+    }
+
+    @Override
+    public void dispatchWindowShown() {
     }
 }

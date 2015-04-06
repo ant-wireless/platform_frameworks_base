@@ -182,6 +182,12 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
      */
     private boolean mIsRtl = true;
     
+    /**
+     * Offset between the center of the selected child view and the center of the Gallery.
+     * Used to reset position correctly during layout.
+     */
+    private int mSelectedCenterOffset;
+
     public Gallery(Context context) {
         this(context, null);
     }
@@ -190,14 +196,18 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
         this(context, attrs, R.attr.galleryStyle);
     }
 
-    public Gallery(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public Gallery(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public Gallery(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         
         mGestureDetector = new GestureDetector(context, this);
         mGestureDetector.setIsLongpressEnabled(true);
-        
-        TypedArray a = context.obtainStyledAttributes(
-                attrs, com.android.internal.R.styleable.Gallery, defStyle, 0);
+
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.Gallery, defStyleAttr, defStyleRes);
 
         int index = a.getInt(com.android.internal.R.styleable.Gallery_gravity, -1);
         if (index >= 0) {
@@ -395,6 +405,14 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
         
         setSelectionToCenterChild();
 
+        final View selChild = mSelectedChild;
+        if (selChild != null) {
+            final int childLeft = selChild.getLeft();
+            final int childCenter = selChild.getWidth() / 2;
+            final int galleryCenter = getWidth() / 2;
+            mSelectedCenterOffset = childLeft + childCenter - galleryCenter;
+        }
+
         onScrollChanged(0, 0, 0, 0); // dummy values, View's implementation does not use these.
 
         invalidate();
@@ -537,6 +555,7 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
             // We haven't been callbacking during the fling, so do it now
             super.selectionChanged();
         }
+        mSelectedCenterOffset = 0;
         invalidate();
     }
     
@@ -650,7 +669,8 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
         View sel = makeAndAddView(mSelectedPosition, 0, 0, true);
         
         // Put the selected child in the center
-        int selectedOffset = childrenLeft + (childrenWidth / 2) - (sel.getWidth() / 2);
+        int selectedOffset = childrenLeft + (childrenWidth / 2) - (sel.getWidth() / 2) +
+                mSelectedCenterOffset;
         sel.offsetLeftAndRight(selectedOffset);
 
         fillToGalleryRight();
@@ -875,7 +895,7 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
             lp = (Gallery.LayoutParams) generateDefaultLayoutParams();
         }
 
-        addViewInLayout(child, fromLeft != mIsRtl ? -1 : 0, lp);
+        addViewInLayout(child, fromLeft != mIsRtl ? -1 : 0, lp, true);
 
         child.setSelected(offset == 0);
 
@@ -1190,13 +1210,13 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
         switch (keyCode) {
             
         case KeyEvent.KEYCODE_DPAD_LEFT:
-            if (movePrevious()) {
+            if (moveDirection(-1)) {
                 playSoundEffect(SoundEffectConstants.NAVIGATION_LEFT);
                 return true;
             }
             break;
         case KeyEvent.KEYCODE_DPAD_RIGHT:
-            if (moveNext()) {
+            if (moveDirection(1)) {
                 playSoundEffect(SoundEffectConstants.NAVIGATION_RIGHT);
                 return true;
             }
@@ -1212,13 +1232,9 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        switch (keyCode) {
-        case KeyEvent.KEYCODE_DPAD_CENTER:
-        case KeyEvent.KEYCODE_ENTER: {
-            
+        if (KeyEvent.isConfirmKey(keyCode)) {
             if (mReceivedInvokeKeyDown) {
                 if (mItemCount > 0) {
-    
                     dispatchPress(mSelectedChild);
                     postDelayed(new Runnable() {
                         @Override
@@ -1226,35 +1242,26 @@ public class Gallery extends AbsSpinner implements GestureDetector.OnGestureList
                             dispatchUnpress();
                         }
                     }, ViewConfiguration.getPressedStateDuration());
-    
+
                     int selectedIndex = mSelectedPosition - mFirstPosition;
                     performItemClick(getChildAt(selectedIndex), mSelectedPosition, mAdapter
                             .getItemId(mSelectedPosition));
                 }
             }
-            
+
             // Clear the flag
             mReceivedInvokeKeyDown = false;
-            
             return true;
         }
-        }
-
         return super.onKeyUp(keyCode, event);
     }
     
-    boolean movePrevious() {
-        if (mItemCount > 0 && mSelectedPosition > 0) {
-            scrollToChild(mSelectedPosition - mFirstPosition - 1);
-            return true;
-        } else {
-            return false;
-        }
-    }
+    boolean moveDirection(int direction) {
+        direction = isLayoutRtl() ? -direction : direction;
+        int targetPosition = mSelectedPosition + direction;
 
-    boolean moveNext() {
-        if (mItemCount > 0 && mSelectedPosition < mItemCount - 1) {
-            scrollToChild(mSelectedPosition - mFirstPosition + 1);
+        if (mItemCount > 0 && targetPosition >= 0 && targetPosition < mItemCount) {
+            scrollToChild(targetPosition - mFirstPosition);
             return true;
         } else {
             return false;

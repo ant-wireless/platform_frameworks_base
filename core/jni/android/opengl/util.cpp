@@ -27,9 +27,9 @@
 #include <GLES/gl.h>
 #include <ETC1/etc1.h>
 
-#include <core/SkBitmap.h>
+#include <SkBitmap.h>
 
-#include "android_runtime/AndroidRuntime.h"
+#include "core_jni_helpers.h"
 
 #undef LOG_TAG
 #define LOG_TAG "OpenGLUtil"
@@ -389,7 +389,7 @@ static void computeFrustum(const float* m, float* f) {
 }
 
 static
-int util_frustumCullSpheres(JNIEnv *env, jclass clazz,
+jint util_frustumCullSpheres(JNIEnv *env, jclass clazz,
         jfloatArray mvp_ref, jint mvpOffset,
         jfloatArray spheres_ref, jint spheresOffset, jint spheresCount,
         jintArray results_ref, jint resultsOffset, jint resultsCapacity) {
@@ -436,7 +436,7 @@ int util_frustumCullSpheres(JNIEnv *env, jclass clazz,
  */
 
 static
-int util_visibilityTest(JNIEnv *env, jclass clazz,
+jint util_visibilityTest(JNIEnv *env, jclass clazz,
         jfloatArray ws_ref, jint wsOffset,
         jfloatArray positions_ref, jint positionsOffset,
         jcharArray indices_ref, jint indicesOffset, jint indexCount) {
@@ -471,13 +471,13 @@ static
 void multiplyMM(float* r, const float* lhs, const float* rhs)
 {
     for (int i=0 ; i<4 ; i++) {
-        register const float rhs_i0 = rhs[ I(i,0) ];
-        register float ri0 = lhs[ I(0,0) ] * rhs_i0;
-        register float ri1 = lhs[ I(0,1) ] * rhs_i0;
-        register float ri2 = lhs[ I(0,2) ] * rhs_i0;
-        register float ri3 = lhs[ I(0,3) ] * rhs_i0;
+        const float rhs_i0 = rhs[ I(i,0) ];
+        float ri0 = lhs[ I(0,0) ] * rhs_i0;
+        float ri1 = lhs[ I(0,1) ] * rhs_i0;
+        float ri2 = lhs[ I(0,2) ] * rhs_i0;
+        float ri3 = lhs[ I(0,3) ] * rhs_i0;
         for (int j=1 ; j<4 ; j++) {
-            register const float rhs_ij = rhs[ I(i,j) ];
+            const float rhs_ij = rhs[ I(i,j) ];
             ri0 += lhs[ I(j,0) ] * rhs_ij;
             ri1 += lhs[ I(j,1) ] * rhs_ij;
             ri2 += lhs[ I(j,2) ] * rhs_ij;
@@ -553,27 +553,27 @@ static jfieldID nativeBitmapID = 0;
 void nativeUtilsClassInit(JNIEnv *env, jclass clazz)
 {
     jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
-    nativeBitmapID = env->GetFieldID(bitmapClass, "mNativeBitmap", "I");
+    nativeBitmapID = env->GetFieldID(bitmapClass, "mNativeBitmap", "J");
 }
 
 extern void setGLDebugLevel(int level);
-void nativeEnableTracing(JNIEnv *env, jclass clazz)
+void setTracingLevel(JNIEnv *env, jclass clazz, jint level)
 {
-    setGLDebugLevel(1);
+    setGLDebugLevel(level);
 }
 
-static int checkFormat(SkBitmap::Config config, int format, int type)
+static int checkFormat(SkColorType colorType, int format, int type)
 {
-    switch(config) {
-        case SkBitmap::kIndex8_Config:
+    switch(colorType) {
+        case kIndex_8_SkColorType:
             if (format == GL_PALETTE8_RGBA8_OES)
                 return 0;
-        case SkBitmap::kARGB_8888_Config:
-        case SkBitmap::kA8_Config:
+        case kN32_SkColorType:
+        case kAlpha_8_SkColorType:
             if (type == GL_UNSIGNED_BYTE)
                 return 0;
-        case SkBitmap::kARGB_4444_Config:
-        case SkBitmap::kRGB_565_Config:
+        case kARGB_4444_SkColorType:
+        case kRGB_565_SkColorType:
             switch (type) {
                 case GL_UNSIGNED_SHORT_4_4_4_4:
                 case GL_UNSIGNED_SHORT_5_6_5:
@@ -590,36 +590,36 @@ static int checkFormat(SkBitmap::Config config, int format, int type)
     return -1;
 }
 
-static int getInternalFormat(SkBitmap::Config config)
+static int getInternalFormat(SkColorType colorType)
 {
-    switch(config) {
-        case SkBitmap::kA8_Config:
+    switch(colorType) {
+        case kAlpha_8_SkColorType:
             return GL_ALPHA;
-        case SkBitmap::kARGB_4444_Config:
+        case kARGB_4444_SkColorType:
             return GL_RGBA;
-        case SkBitmap::kARGB_8888_Config:
+        case kN32_SkColorType:
             return GL_RGBA;
-        case SkBitmap::kIndex8_Config:
+        case kIndex_8_SkColorType:
             return GL_PALETTE8_RGBA8_OES;
-        case SkBitmap::kRGB_565_Config:
+        case kRGB_565_SkColorType:
             return GL_RGB;
         default:
             return -1;
     }
 }
 
-static int getType(SkBitmap::Config config)
+static int getType(SkColorType colorType)
 {
-    switch(config) {
-        case SkBitmap::kA8_Config:
+    switch(colorType) {
+        case kAlpha_8_SkColorType:
             return GL_UNSIGNED_BYTE;
-        case SkBitmap::kARGB_4444_Config:
+        case kARGB_4444_SkColorType:
             return GL_UNSIGNED_SHORT_4_4_4_4;
-        case SkBitmap::kARGB_8888_Config:
+        case kN32_SkColorType:
             return GL_UNSIGNED_BYTE;
-        case SkBitmap::kIndex8_Config:
+        case kIndex_8_SkColorType:
             return -1; // No type for compressed data.
-        case SkBitmap::kRGB_565_Config:
+        case kRGB_565_SkColorType:
             return GL_UNSIGNED_SHORT_5_6_5;
         default:
             return -1;
@@ -630,20 +630,16 @@ static jint util_getInternalFormat(JNIEnv *env, jclass clazz,
         jobject jbitmap)
 {
     SkBitmap const * nativeBitmap =
-            (SkBitmap const *)env->GetIntField(jbitmap, nativeBitmapID);
-    const SkBitmap& bitmap(*nativeBitmap);
-    SkBitmap::Config config = bitmap.getConfig();
-    return getInternalFormat(config);
+            (SkBitmap const *)env->GetLongField(jbitmap, nativeBitmapID);
+    return getInternalFormat(nativeBitmap->colorType());
 }
 
 static jint util_getType(JNIEnv *env, jclass clazz,
         jobject jbitmap)
 {
     SkBitmap const * nativeBitmap =
-            (SkBitmap const *)env->GetIntField(jbitmap, nativeBitmapID);
-    const SkBitmap& bitmap(*nativeBitmap);
-    SkBitmap::Config config = bitmap.getConfig();
-    return getType(config);
+            (SkBitmap const *)env->GetLongField(jbitmap, nativeBitmapID);
+    return getType(nativeBitmap->colorType());
 }
 
 static jint util_texImage2D(JNIEnv *env, jclass clazz,
@@ -651,16 +647,16 @@ static jint util_texImage2D(JNIEnv *env, jclass clazz,
         jobject jbitmap, jint type, jint border)
 {
     SkBitmap const * nativeBitmap =
-            (SkBitmap const *)env->GetIntField(jbitmap, nativeBitmapID);
+            (SkBitmap const *)env->GetLongField(jbitmap, nativeBitmapID);
     const SkBitmap& bitmap(*nativeBitmap);
-    SkBitmap::Config config = bitmap.getConfig();
+    SkColorType colorType = bitmap.colorType();
     if (internalformat < 0) {
-        internalformat = getInternalFormat(config);
+        internalformat = getInternalFormat(colorType);
     }
     if (type < 0) {
-        type = getType(config);
+        type = getType(colorType);
     }
-    int err = checkFormat(config, internalformat, type);
+    int err = checkFormat(colorType, internalformat, type);
     if (err)
         return err;
     bitmap.lockPixels();
@@ -681,7 +677,7 @@ static jint util_texImage2D(JNIEnv *env, jclass clazz,
             SkColorTable* ctable = bitmap.getColorTable();
             memcpy(data, ctable->lockColors(), ctable->count() * sizeof(SkPMColor));
             memcpy(pixels, p, size);
-            ctable->unlockColors(false);
+            ctable->unlockColors();
             glCompressedTexImage2D(target, level, internalformat, w, h, border, imageSize, data);
             free(data);
         } else {
@@ -700,15 +696,15 @@ static jint util_texSubImage2D(JNIEnv *env, jclass clazz,
         jobject jbitmap, jint format, jint type)
 {
     SkBitmap const * nativeBitmap =
-            (SkBitmap const *)env->GetIntField(jbitmap, nativeBitmapID);
+            (SkBitmap const *)env->GetLongField(jbitmap, nativeBitmapID);
     const SkBitmap& bitmap(*nativeBitmap);
-    SkBitmap::Config config = bitmap.getConfig();
+    SkColorType colorType = bitmap.colorType();
     if (format < 0) {
-        format = getInternalFormat(config);
+        format = getInternalFormat(colorType);
         if (format == GL_PALETTE8_RGBA8_OES)
             return -1; // glCompressedTexSubImage2D() not supported
     }
-    int err = checkFormat(config, format, type);
+    int err = checkFormat(colorType, format, type);
     if (err)
         return err;
     bitmap.lockPixels();
@@ -736,24 +732,22 @@ static jfieldID elementSizeShiftID;
 /* Cache method IDs each time the class is loaded. */
 
 static void
-nativeClassInitBuffer(JNIEnv *_env)
+nativeClassInitBuffer(JNIEnv *env)
 {
-    jclass nioAccessClassLocal = _env->FindClass("java/nio/NIOAccess");
-    nioAccessClass = (jclass) _env->NewGlobalRef(nioAccessClassLocal);
-
-    jclass bufferClassLocal = _env->FindClass("java/nio/Buffer");
-    bufferClass = (jclass) _env->NewGlobalRef(bufferClassLocal);
-
-    getBasePointerID = _env->GetStaticMethodID(nioAccessClass,
+    jclass nioAccessClassLocal = FindClassOrDie(env, "java/nio/NIOAccess");
+    nioAccessClass = MakeGlobalRefOrDie(env, nioAccessClassLocal);
+    getBasePointerID = GetStaticMethodIDOrDie(env, nioAccessClass,
             "getBasePointer", "(Ljava/nio/Buffer;)J");
-    getBaseArrayID = _env->GetStaticMethodID(nioAccessClass,
+    getBaseArrayID = GetStaticMethodIDOrDie(env, nioAccessClass,
             "getBaseArray", "(Ljava/nio/Buffer;)Ljava/lang/Object;");
-    getBaseArrayOffsetID = _env->GetStaticMethodID(nioAccessClass,
+    getBaseArrayOffsetID = GetStaticMethodIDOrDie(env, nioAccessClass,
             "getBaseArrayOffset", "(Ljava/nio/Buffer;)I");
-    positionID = _env->GetFieldID(bufferClass, "position", "I");
-    limitID = _env->GetFieldID(bufferClass, "limit", "I");
-    elementSizeShiftID =
-        _env->GetFieldID(bufferClass, "_elementSizeShift", "I");
+
+    jclass bufferClassLocal = FindClassOrDie(env, "java/nio/Buffer");
+    bufferClass = MakeGlobalRefOrDie(env, bufferClassLocal);
+    positionID = GetFieldIDOrDie(env, bufferClass, "position", "I");
+    limitID = GetFieldIDOrDie(env, bufferClass, "limit", "I");
+    elementSizeShiftID = GetFieldIDOrDie(env, bufferClass, "_elementSizeShift", "I");
 }
 
 static void *
@@ -763,8 +757,6 @@ getPointer(JNIEnv *_env, jobject buffer, jint *remaining)
     jint limit;
     jint elementSizeShift;
     jlong pointer;
-    jint offset;
-    void *data;
 
     position = _env->GetIntField(buffer, positionID);
     limit = _env->GetIntField(buffer, limitID);
@@ -773,7 +765,7 @@ getPointer(JNIEnv *_env, jobject buffer, jint *remaining)
     pointer = _env->CallStaticLongMethod(nioAccessClass,
             getBasePointerID, buffer);
     if (pointer != 0L) {
-        return (void *) (jint) pointer;
+        return reinterpret_cast<void *>(pointer);
     }
     return NULL;
 }
@@ -904,10 +896,8 @@ static void etc1_encodeImage(JNIEnv *env, jclass clazz,
         } else if (outB.remaining() < encodedImageSize) {
             doThrowIAE(env, "out's remaining data < encoded image size");
         } else {
-            int result = etc1_encode_image((etc1_byte*) inB.getData(),
-                    width, height, pixelSize,
-                    stride,
-                    (etc1_byte*) outB.getData());
+            etc1_encode_image((etc1_byte*) inB.getData(), width, height, pixelSize, stride,
+                              (etc1_byte*) outB.getData());
         }
     }
 }
@@ -937,10 +927,8 @@ static void etc1_decodeImage(JNIEnv *env, jclass clazz,
         } else if (outB.remaining() < imageSize) {
             doThrowIAE(env, "out's remaining data < image size");
         } else {
-            int result = etc1_decode_image((etc1_byte*) inB.getData(),
-                    (etc1_byte*) outB.getData(),
-                    width, height, pixelSize,
-                    stride);
+            etc1_decode_image((etc1_byte*) inB.getData(), (etc1_byte*) outB.getData(),
+                              width, height, pixelSize, stride);
         }
     }
 }
@@ -974,7 +962,7 @@ static jboolean etc1_isValid(JNIEnv *env, jclass clazz,
             result = etc1_pkm_is_valid((etc1_byte*) headerB.getData());
         }
     }
-    return result;
+    return result ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -997,7 +985,7 @@ static jint etc1_getWidth(JNIEnv *env, jclass clazz,
 /**
  * Read the image height from a PKM header
  */
-static int etc1_getHeight(JNIEnv *env, jclass clazz,
+static jint etc1_getHeight(JNIEnv *env, jclass clazz,
         jobject header) {
     jint result = 0;
     BufferHelper headerB(env, header);
@@ -1032,7 +1020,7 @@ static JNINativeMethod gUtilsMethods[] = {
     { "native_getType", "(Landroid/graphics/Bitmap;)I", (void*) util_getType },
     { "native_texImage2D", "(IIILandroid/graphics/Bitmap;II)I", (void*)util_texImage2D },
     { "native_texSubImage2D", "(IIIILandroid/graphics/Bitmap;II)I", (void*)util_texSubImage2D },
-    { "native_enableTracing", "()V",                    (void*)nativeEnableTracing },
+    { "setTracingLevel", "(I)V",                        (void*)setTracingLevel },
 };
 
 static JNINativeMethod gEtc1Methods[] = {
@@ -1066,12 +1054,7 @@ int register_android_opengl_classes(JNIEnv* env)
     int result = 0;
     for (int i = 0; i < NELEM(gClasses); i++) {
         ClassRegistrationInfo* cri = &gClasses[i];
-        result = AndroidRuntime::registerNativeMethods(env,
-                cri->classPath, cri->methods, cri->methodCount);
-        if (result < 0) {
-            ALOGE("Failed to register %s: %d", cri->classPath, result);
-            break;
-        }
+        result = RegisterMethodsOrDie(env, cri->classPath, cri->methods, cri->methodCount);
     }
     return result;
 }

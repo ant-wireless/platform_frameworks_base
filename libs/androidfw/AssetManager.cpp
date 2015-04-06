@@ -19,27 +19,30 @@
 //
 
 #define LOG_TAG "asset"
+#define ATRACE_TAG ATRACE_TAG_RESOURCES
 //#define LOG_NDEBUG 0
 
 #include <androidfw/Asset.h>
 #include <androidfw/AssetDir.h>
 #include <androidfw/AssetManager.h>
+#include <androidfw/misc.h>
 #include <androidfw/ResourceTypes.h>
+#include <androidfw/ZipFileRO.h>
 #include <utils/Atomic.h>
 #include <utils/Log.h>
 #include <utils/String8.h>
 #include <utils/String8.h>
 #include <utils/threads.h>
 #include <utils/Timers.h>
-#include <utils/ZipFileRO.h>
+#ifdef HAVE_ANDROID_OS
+#include <cutils/trace.h>
+#endif
 
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <string.h> // strerror
 #include <strings.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #ifndef TEMP_FAILURE_RETRY
 /* Used to retry syscalls that can return EINTR. */
@@ -51,7 +54,17 @@
     _rc; })
 #endif
 
+#ifdef HAVE_ANDROID_OS
+#define MY_TRACE_BEGIN(x) ATRACE_BEGIN(x)
+#define MY_TRACE_END() ATRACE_END()
+#else
+#define MY_TRACE_BEGIN(x)
+#define MY_TRACE_END()
+#endif
+
 using namespace android;
+
+static const bool kIsDebug = false;
 
 /*
  * Names for default app, locale, and vendor.  We might want to change
@@ -62,7 +75,8 @@ static const char* kDefaultVendor = "default";
 static const char* kAssetsRoot = "assets";
 static const char* kAppZipName = NULL; //"classes.jar";
 static const char* kSystemAssets = "framework/framework-res.apk";
-static const char* kIdmapCacheDir = "resource-cache";
+static const char* kResourceCache = "resource-cache";
+static const char* kAndroidManifest = "AndroidManifest.xml";
 
 static const char* kExcludeExtension = ".EXCLUDE";
 
@@ -70,14 +84,20 @@ static Asset* const kExcludedAsset = (Asset*) 0xd000000d;
 
 static volatile int32_t gCount = 0;
 
+const char* AssetManager::RESOURCES_FILENAME = "resources.arsc";
+const char* AssetManager::IDMAP_BIN = "/system/bin/idmap";
+const char* AssetManager::OVERLAY_DIR = "/vendor/overlay";
+const char* AssetManager::TARGET_PACKAGE_NAME = "android";
+const char* AssetManager::TARGET_APK_PATH = "/system/framework/framework-res.apk";
+const char* AssetManager::IDMAP_DIR = "/data/resource-cache";
+
 namespace {
-    // Transform string /a/b/c.apk to /data/resource-cache/a@b@c.apk@idmap
     String8 idmapPathForPackagePath(const String8& pkgPath)
     {
         const char* root = getenv("ANDROID_DATA");
         LOG_ALWAYS_FATAL_IF(root == NULL, "ANDROID_DATA not set");
         String8 path(root);
-        path.appendPath(kIdmapCacheDir);
+        path.appendPath(kResourceCache);
 
         char buf[256]; // 256 chars should be enough for anyone...
         strncpy(buf, pkgPath.string(), 255);
@@ -98,6 +118,24 @@ namespace {
 
         return path;
     }
+
+    /*
+     * Like strdup(), but uses C++ "new" operator instead of malloc.
+     */
+    static char* strdupNew(const char* str)
+    {
+        char* newStr;
+        int len;
+
+        if (str == NULL)
+            return NULL;
+
+        len = strlen(str);
+        newStr = new char[len+1];
+        memcpy(newStr, str, len+1);
+
+        return newStr;
+    }
 }
 
 /*
@@ -116,15 +154,19 @@ AssetManager::AssetManager(CacheMode cacheMode)
       mResources(NULL), mConfig(new ResTable_config),
       mCacheMode(cacheMode), mCacheValid(false)
 {
-    int count = android_atomic_inc(&gCount)+1;
-    //ALOGI("Creating AssetManager %p #%d\n", this, count);
+    int count = android_atomic_inc(&gCount) + 1;
+    if (kIsDebug) {
+        ALOGI("Creating AssetManager %p #%d\n", this, count);
+    }
     memset(mConfig, 0, sizeof(ResTable_config));
 }
 
 AssetManager::~AssetManager(void)
 {
     int count = android_atomic_dec(&gCount);
-    //ALOGI("Destroying AssetManager in %p #%d\n", this, count);
+    if (kIsDebug) {
+        ALOGI("Destroying AssetManager in %p #%d\n", this, count);
+    }
 
     delete mConfig;
     delete mResources;
@@ -134,7 +176,7 @@ AssetManager::~AssetManager(void)
     delete[] mVendor;
 }
 
-bool AssetManager::addAssetPath(const String8& path, void** cookie)
+bool AssetManager::addAssetPath(const String8& path, int32_t* cookie)
 {
     AutoMutex _l(mLock);
 
@@ -161,7 +203,7 @@ bool AssetManager::addAssetPath(const String8& path, void** cookie)
     for (size_t i=0; i<mAssetPaths.size(); i++) {
         if (mAssetPaths[i].path == ap.path) {
             if (cookie) {
-                *cookie = (void*)(i+1);
+                *cookie = static_cast<int32_t>(i+1);
             }
             return true;
         }
@@ -170,186 +212,124 @@ bool AssetManager::addAssetPath(const String8& path, void** cookie)
     ALOGV("In %p Asset %s path: %s", this,
          ap.type == kFileTypeDirectory ? "dir" : "zip", ap.path.string());
 
+    // Check that the path has an AndroidManifest.xml
+    Asset* manifestAsset = const_cast<AssetManager*>(this)->openNonAssetInPathLocked(
+            kAndroidManifest, Asset::ACCESS_BUFFER, ap);
+    if (manifestAsset == NULL) {
+        // This asset path does not contain any resources.
+        delete manifestAsset;
+        return false;
+    }
+    delete manifestAsset;
+
     mAssetPaths.add(ap);
 
     // new paths are always added at the end
     if (cookie) {
-        *cookie = (void*)mAssetPaths.size();
+        *cookie = static_cast<int32_t>(mAssetPaths.size());
     }
 
-    // add overlay packages for /system/framework; apps are handled by the
-    // (Java) package manager
-    if (strncmp(path.string(), "/system/framework/", 18) == 0) {
-        // When there is an environment variable for /vendor, this
-        // should be changed to something similar to how ANDROID_ROOT
-        // and ANDROID_DATA are used in this file.
-        String8 overlayPath("/vendor/overlay/framework/");
-        overlayPath.append(path.getPathLeaf());
-        if (TEMP_FAILURE_RETRY(access(overlayPath.string(), R_OK)) == 0) {
-            asset_path oap;
-            oap.path = overlayPath;
-            oap.type = ::getFileType(overlayPath.string());
-            bool addOverlay = (oap.type == kFileTypeRegular); // only .apks supported as overlay
-            if (addOverlay) {
-                oap.idmap = idmapPathForPackagePath(overlayPath);
+#ifdef HAVE_ANDROID_OS
+    // Load overlays, if any
+    asset_path oap;
+    for (size_t idx = 0; mZipSet.getOverlay(ap.path, idx, &oap); idx++) {
+        mAssetPaths.add(oap);
+    }
+#endif
 
-                if (isIdmapStaleLocked(ap.path, oap.path, oap.idmap)) {
-                    addOverlay = createIdmapFileLocked(ap.path, oap.path, oap.idmap);
-                }
-            }
-            if (addOverlay) {
-                mAssetPaths.add(oap);
-            } else {
-                ALOGW("failed to add overlay package %s\n", overlayPath.string());
-            }
-        }
+    if (mResources != NULL) {
+        appendPathToResTable(ap);
     }
 
     return true;
 }
 
-bool AssetManager::isIdmapStaleLocked(const String8& originalPath, const String8& overlayPath,
-                                      const String8& idmapPath)
+bool AssetManager::addOverlayPath(const String8& packagePath, int32_t* cookie)
 {
-    struct stat st;
-    if (TEMP_FAILURE_RETRY(stat(idmapPath.string(), &st)) == -1) {
-        if (errno == ENOENT) {
-            return true; // non-existing idmap is always stale
-        } else {
-            ALOGW("failed to stat file %s: %s\n", idmapPath.string(), strerror(errno));
-            return false;
-        }
-    }
-    if (st.st_size < ResTable::IDMAP_HEADER_SIZE_BYTES) {
-        ALOGW("file %s has unexpectedly small size=%zd\n", idmapPath.string(), (size_t)st.st_size);
-        return false;
-    }
-    int fd = TEMP_FAILURE_RETRY(::open(idmapPath.string(), O_RDONLY));
-    if (fd == -1) {
-        ALOGW("failed to open file %s: %s\n", idmapPath.string(), strerror(errno));
-        return false;
-    }
-    char buf[ResTable::IDMAP_HEADER_SIZE_BYTES];
-    ssize_t bytesLeft = ResTable::IDMAP_HEADER_SIZE_BYTES;
-    for (;;) {
-        ssize_t r = TEMP_FAILURE_RETRY(read(fd, buf + ResTable::IDMAP_HEADER_SIZE_BYTES - bytesLeft,
-                                            bytesLeft));
-        if (r < 0) {
-            TEMP_FAILURE_RETRY(close(fd));
-            return false;
-        }
-        bytesLeft -= r;
-        if (bytesLeft == 0) {
-            break;
-        }
-    }
-    TEMP_FAILURE_RETRY(close(fd));
+    const String8 idmapPath = idmapPathForPackagePath(packagePath);
 
-    uint32_t cachedOriginalCrc, cachedOverlayCrc;
-    if (!ResTable::getIdmapInfo(buf, ResTable::IDMAP_HEADER_SIZE_BYTES,
-                                &cachedOriginalCrc, &cachedOverlayCrc)) {
+    AutoMutex _l(mLock);
+
+    for (size_t i = 0; i < mAssetPaths.size(); ++i) {
+        if (mAssetPaths[i].idmap == idmapPath) {
+           *cookie = static_cast<int32_t>(i + 1);
+            return true;
+         }
+     }
+
+    Asset* idmap = NULL;
+    if ((idmap = openAssetFromFileLocked(idmapPath, Asset::ACCESS_BUFFER)) == NULL) {
+        ALOGW("failed to open idmap file %s\n", idmapPath.string());
         return false;
     }
 
-    uint32_t actualOriginalCrc, actualOverlayCrc;
-    if (!getZipEntryCrcLocked(originalPath, "resources.arsc", &actualOriginalCrc)) {
+    String8 targetPath;
+    String8 overlayPath;
+    if (!ResTable::getIdmapInfo(idmap->getBuffer(false), idmap->getLength(),
+                NULL, NULL, NULL, &targetPath, &overlayPath)) {
+        ALOGW("failed to read idmap file %s\n", idmapPath.string());
+        delete idmap;
         return false;
     }
-    if (!getZipEntryCrcLocked(overlayPath, "resources.arsc", &actualOverlayCrc)) {
-        return false;
-    }
-    return cachedOriginalCrc != actualOriginalCrc || cachedOverlayCrc != actualOverlayCrc;
-}
+    delete idmap;
 
-bool AssetManager::getZipEntryCrcLocked(const String8& zipPath, const char* entryFilename,
-                                        uint32_t* pCrc)
-{
-    asset_path ap;
-    ap.path = zipPath;
-    const ZipFileRO* zip = getZipFileLocked(ap);
-    if (zip == NULL) {
+    if (overlayPath != packagePath) {
+        ALOGW("idmap file %s inconcistent: expected path %s does not match actual path %s\n",
+                idmapPath.string(), packagePath.string(), overlayPath.string());
         return false;
     }
-    const ZipEntryRO entry = zip->findEntryByName(entryFilename);
-    if (entry == NULL) {
+    if (access(targetPath.string(), R_OK) != 0) {
+        ALOGW("failed to access file %s: %s\n", targetPath.string(), strerror(errno));
         return false;
     }
-    if (!zip->getEntryInfo(entry, NULL, NULL, NULL, NULL, NULL, (long*)pCrc)) {
+    if (access(idmapPath.string(), R_OK) != 0) {
+        ALOGW("failed to access file %s: %s\n", idmapPath.string(), strerror(errno));
         return false;
     }
+    if (access(overlayPath.string(), R_OK) != 0) {
+        ALOGW("failed to access file %s: %s\n", overlayPath.string(), strerror(errno));
+        return false;
+    }
+
+    asset_path oap;
+    oap.path = overlayPath;
+    oap.type = ::getFileType(overlayPath.string());
+    oap.idmap = idmapPath;
+#if 0
+    ALOGD("Overlay added: targetPath=%s overlayPath=%s idmapPath=%s\n",
+            targetPath.string(), overlayPath.string(), idmapPath.string());
+#endif
+    mAssetPaths.add(oap);
+    *cookie = static_cast<int32_t>(mAssetPaths.size());
+
+    if (mResources != NULL) {
+        appendPathToResTable(oap);
+    }
+
     return true;
-}
+ }
 
-bool AssetManager::createIdmapFileLocked(const String8& originalPath, const String8& overlayPath,
-                                         const String8& idmapPath)
+bool AssetManager::createIdmap(const char* targetApkPath, const char* overlayApkPath,
+        uint32_t targetCrc, uint32_t overlayCrc, uint32_t** outData, size_t* outSize)
 {
-    ALOGD("%s: originalPath=%s overlayPath=%s idmapPath=%s\n",
-         __FUNCTION__, originalPath.string(), overlayPath.string(), idmapPath.string());
+    AutoMutex _l(mLock);
+    const String8 paths[2] = { String8(targetApkPath), String8(overlayApkPath) };
     ResTable tables[2];
-    const String8* paths[2] = { &originalPath, &overlayPath };
-    uint32_t originalCrc, overlayCrc;
-    bool retval = false;
-    ssize_t offset = 0;
-    int fd = 0;
-    uint32_t* data = NULL;
-    size_t size;
 
     for (int i = 0; i < 2; ++i) {
         asset_path ap;
         ap.type = kFileTypeRegular;
-        ap.path = *paths[i];
+        ap.path = paths[i];
         Asset* ass = openNonAssetInPathLocked("resources.arsc", Asset::ACCESS_BUFFER, ap);
         if (ass == NULL) {
             ALOGW("failed to find resources.arsc in %s\n", ap.path.string());
-            goto error;
+            return false;
         }
-        tables[i].add(ass, (void*)1, false);
+        tables[i].add(ass);
     }
 
-    if (!getZipEntryCrcLocked(originalPath, "resources.arsc", &originalCrc)) {
-        ALOGW("failed to retrieve crc for resources.arsc in %s\n", originalPath.string());
-        goto error;
-    }
-    if (!getZipEntryCrcLocked(overlayPath, "resources.arsc", &overlayCrc)) {
-        ALOGW("failed to retrieve crc for resources.arsc in %s\n", overlayPath.string());
-        goto error;
-    }
-
-    if (tables[0].createIdmap(tables[1], originalCrc, overlayCrc,
-                              (void**)&data, &size) != NO_ERROR) {
-        ALOGW("failed to generate idmap data for file %s\n", idmapPath.string());
-        goto error;
-    }
-
-    // This should be abstracted (eg replaced by a stand-alone
-    // application like dexopt, triggered by something equivalent to
-    // installd).
-    fd = TEMP_FAILURE_RETRY(::open(idmapPath.string(), O_WRONLY | O_CREAT | O_TRUNC, 0644));
-    if (fd == -1) {
-        ALOGW("failed to write idmap file %s (open: %s)\n", idmapPath.string(), strerror(errno));
-        goto error_free;
-    }
-    for (;;) {
-        ssize_t written = TEMP_FAILURE_RETRY(write(fd, data + offset, size));
-        if (written < 0) {
-            ALOGW("failed to write idmap file %s (write: %s)\n", idmapPath.string(),
-                 strerror(errno));
-            goto error_close;
-        }
-        size -= (size_t)written;
-        offset += written;
-        if (size == 0) {
-            break;
-        }
-    }
-
-    retval = true;
-error_close:
-    TEMP_FAILURE_RETRY(close(fd));
-error_free:
-    free(data);
-error:
-    return retval;
+    return tables[0].createIdmap(tables[1], targetCrc, overlayCrc,
+            targetApkPath, overlayApkPath, (void**)outData, outSize) == NO_ERROR;
 }
 
 bool AssetManager::addDefaultAssets()
@@ -363,17 +343,17 @@ bool AssetManager::addDefaultAssets()
     return addAssetPath(path, NULL);
 }
 
-void* AssetManager::nextAssetPath(void* cookie) const
+int32_t AssetManager::nextAssetPath(const int32_t cookie) const
 {
     AutoMutex _l(mLock);
-    size_t next = ((size_t)cookie)+1;
-    return next > mAssetPaths.size() ? NULL : (void*)next;
+    const size_t next = static_cast<size_t>(cookie) + 1;
+    return next > mAssetPaths.size() ? -1 : next;
 }
 
-String8 AssetManager::getAssetPath(void* cookie) const
+String8 AssetManager::getAssetPath(const int32_t cookie) const
 {
     AutoMutex _l(mLock);
-    const size_t which = ((size_t)cookie)-1;
+    const size_t which = static_cast<size_t>(cookie) - 1;
     if (which < mAssetPaths.size()) {
         return mAssetPaths[which].path;
     }
@@ -392,6 +372,15 @@ void AssetManager::setLocale(const char* locale)
     setLocaleLocked(locale);
 }
 
+
+static const char kFilPrefix[] = "fil";
+static const char kTlPrefix[] = "tl";
+
+// The sizes of the prefixes, excluding the 0 suffix.
+// char.
+static const int kFilPrefixLen = sizeof(kFilPrefix) - 1;
+static const int kTlPrefixLen = sizeof(kTlPrefix) - 1;
+
 void AssetManager::setLocaleLocked(const char* locale)
 {
     if (mLocale != NULL) {
@@ -400,8 +389,46 @@ void AssetManager::setLocaleLocked(const char* locale)
         //mZipSet.purgeLocale();
         delete[] mLocale;
     }
+
+    // If we're attempting to set a locale that starts with "fil",
+    // we should convert it to "tl" for backwards compatibility since
+    // we've been using "tl" instead of "fil" prior to L.
+    //
+    // If the resource table already has entries for "fil", we use that
+    // instead of attempting a fallback.
+    if (strncmp(locale, kFilPrefix, kFilPrefixLen) == 0) {
+        Vector<String8> locales;
+        ResTable* res = mResources;
+        if (res != NULL) {
+            res->getLocales(&locales);
+        }
+        const size_t localesSize = locales.size();
+        bool hasFil = false;
+        for (size_t i = 0; i < localesSize; ++i) {
+            if (locales[i].find(kFilPrefix) == 0) {
+                hasFil = true;
+                break;
+            }
+        }
+
+
+        if (!hasFil) {
+            const size_t newLocaleLen = strlen(locale);
+            // This isn't a bug. We really do want mLocale to be 1 byte
+            // shorter than locale, because we're replacing "fil-" with
+            // "tl-".
+            mLocale = new char[newLocaleLen];
+            // Copy over "tl".
+            memcpy(mLocale, kTlPrefix, kTlPrefixLen);
+            // Copy the rest of |locale|, including the terminating '\0'.
+            memcpy(mLocale + kTlPrefixLen, locale + kFilPrefixLen,
+                   newLocaleLen - kFilPrefixLen + 1);
+            updateResourceParamsLocked();
+            return;
+        }
+    }
+
     mLocale = strdupNew(locale);
-    
     updateResourceParamsLocked();
 }
 
@@ -431,17 +458,8 @@ void AssetManager::setConfiguration(const ResTable_config& config, const char* l
     if (locale) {
         setLocaleLocked(locale);
     } else if (config.language[0] != 0) {
-        char spec[9];
-        spec[0] = config.language[0];
-        spec[1] = config.language[1];
-        if (config.country[0] != 0) {
-            spec[2] = '_';
-            spec[3] = config.country[0];
-            spec[4] = config.country[1];
-            spec[5] = 0;
-        } else {
-            spec[3] = 0;
-        }
+        char spec[RESTABLE_MAX_LOCALE_LEN];
+        config.getBcp47Locale(spec);
         setLocaleLocked(spec);
     } else {
         updateResourceParamsLocked();
@@ -515,7 +533,7 @@ Asset* AssetManager::open(const char* fileName, AccessMode mode)
  * The "fileName" is the partial path starting from the application
  * name.
  */
-Asset* AssetManager::openNonAsset(const char* fileName, AccessMode mode)
+Asset* AssetManager::openNonAsset(const char* fileName, AccessMode mode, int32_t* outCookie)
 {
     AutoMutex _l(mLock);
 
@@ -536,6 +554,7 @@ Asset* AssetManager::openNonAsset(const char* fileName, AccessMode mode)
         Asset* pAsset = openNonAssetInPathLocked(
             fileName, mode, mAssetPaths.itemAt(i));
         if (pAsset != NULL) {
+            if (outCookie != NULL) *outCookie = static_cast<int32_t>(i + 1);
             return pAsset != kExcludedAsset ? pAsset : NULL;
         }
     }
@@ -543,14 +562,13 @@ Asset* AssetManager::openNonAsset(const char* fileName, AccessMode mode)
     return NULL;
 }
 
-Asset* AssetManager::openNonAsset(void* cookie, const char* fileName, AccessMode mode)
+Asset* AssetManager::openNonAsset(const int32_t cookie, const char* fileName, AccessMode mode)
 {
-    const size_t which = ((size_t)cookie)-1;
+    const size_t which = static_cast<size_t>(cookie) - 1;
 
     AutoMutex _l(mLock);
 
     LOG_FATAL_IF(mAssetPaths.size() == 0, "No assets added to AssetManager");
-
 
     if (mCacheMode != CACHE_OFF && !mCacheValid)
         loadFileNameCacheLocked();
@@ -592,6 +610,101 @@ FileType AssetManager::getFileType(const char* fileName)
         return kFileTypeRegular;
 }
 
+bool AssetManager::appendPathToResTable(const asset_path& ap) const {
+    // skip those ap's that correspond to system overlays
+    if (ap.isSystemOverlay) {
+        return true;
+    }
+
+    Asset* ass = NULL;
+    ResTable* sharedRes = NULL;
+    bool shared = true;
+    bool onlyEmptyResources = true;
+    MY_TRACE_BEGIN(ap.path.string());
+    Asset* idmap = openIdmapLocked(ap);
+    size_t nextEntryIdx = mResources->getTableCount();
+    ALOGV("Looking for resource asset in '%s'\n", ap.path.string());
+    if (ap.type != kFileTypeDirectory) {
+        if (nextEntryIdx == 0) {
+            // The first item is typically the framework resources,
+            // which we want to avoid parsing every time.
+            sharedRes = const_cast<AssetManager*>(this)->
+                mZipSet.getZipResourceTable(ap.path);
+            if (sharedRes != NULL) {
+                // skip ahead the number of system overlay packages preloaded
+                nextEntryIdx = sharedRes->getTableCount();
+            }
+        }
+        if (sharedRes == NULL) {
+            ass = const_cast<AssetManager*>(this)->
+                mZipSet.getZipResourceTableAsset(ap.path);
+            if (ass == NULL) {
+                ALOGV("loading resource table %s\n", ap.path.string());
+                ass = const_cast<AssetManager*>(this)->
+                    openNonAssetInPathLocked("resources.arsc",
+                                             Asset::ACCESS_BUFFER,
+                                             ap);
+                if (ass != NULL && ass != kExcludedAsset) {
+                    ass = const_cast<AssetManager*>(this)->
+                        mZipSet.setZipResourceTableAsset(ap.path, ass);
+                }
+            }
+            
+            if (nextEntryIdx == 0 && ass != NULL) {
+                // If this is the first resource table in the asset
+                // manager, then we are going to cache it so that we
+                // can quickly copy it out for others.
+                ALOGV("Creating shared resources for %s", ap.path.string());
+                sharedRes = new ResTable();
+                sharedRes->add(ass, idmap, nextEntryIdx + 1, false);
+#ifdef HAVE_ANDROID_OS
+                const char* data = getenv("ANDROID_DATA");
+                LOG_ALWAYS_FATAL_IF(data == NULL, "ANDROID_DATA not set");
+                String8 overlaysListPath(data);
+                overlaysListPath.appendPath(kResourceCache);
+                overlaysListPath.appendPath("overlays.list");
+                addSystemOverlays(overlaysListPath.string(), ap.path, sharedRes, nextEntryIdx);
+#endif
+                sharedRes = const_cast<AssetManager*>(this)->
+                    mZipSet.setZipResourceTable(ap.path, sharedRes);
+            }
+        }
+    } else {
+        ALOGV("loading resource table %s\n", ap.path.string());
+        ass = const_cast<AssetManager*>(this)->
+            openNonAssetInPathLocked("resources.arsc",
+                                     Asset::ACCESS_BUFFER,
+                                     ap);
+        shared = false;
+    }
+
+    if ((ass != NULL || sharedRes != NULL) && ass != kExcludedAsset) {
+        ALOGV("Installing resource asset %p in to table %p\n", ass, mResources);
+        if (sharedRes != NULL) {
+            ALOGV("Copying existing resources for %s", ap.path.string());
+            mResources->add(sharedRes);
+        } else {
+            ALOGV("Parsing resources for %s", ap.path.string());
+            mResources->add(ass, idmap, nextEntryIdx + 1, !shared);
+        }
+        onlyEmptyResources = false;
+
+        if (!shared) {
+            delete ass;
+        }
+    } else {
+        ALOGV("Installing empty resources in to table %p\n", mResources);
+        mResources->addEmpty(nextEntryIdx + 1);
+    }
+
+    if (idmap != NULL) {
+        delete idmap;
+    }
+    MY_TRACE_END();
+
+    return onlyEmptyResources;
+}
+
 const ResTable* AssetManager::getResTable(bool required) const
 {
     ResTable* rt = mResources;
@@ -611,86 +724,27 @@ const ResTable* AssetManager::getResTable(bool required) const
         LOG_FATAL_IF(mAssetPaths.size() == 0, "No assets added to AssetManager");
     }
 
-    if (mCacheMode != CACHE_OFF && !mCacheValid)
+    if (mCacheMode != CACHE_OFF && !mCacheValid) {
         const_cast<AssetManager*>(this)->loadFileNameCacheLocked();
+    }
 
+    mResources = new ResTable();
+    updateResourceParamsLocked();
+
+    bool onlyEmptyResources = true;
     const size_t N = mAssetPaths.size();
     for (size_t i=0; i<N; i++) {
-        Asset* ass = NULL;
-        ResTable* sharedRes = NULL;
-        bool shared = true;
-        const asset_path& ap = mAssetPaths.itemAt(i);
-        Asset* idmap = openIdmapLocked(ap);
-        ALOGV("Looking for resource asset in '%s'\n", ap.path.string());
-        if (ap.type != kFileTypeDirectory) {
-            if (i == 0) {
-                // The first item is typically the framework resources,
-                // which we want to avoid parsing every time.
-                sharedRes = const_cast<AssetManager*>(this)->
-                    mZipSet.getZipResourceTable(ap.path);
-            }
-            if (sharedRes == NULL) {
-                ass = const_cast<AssetManager*>(this)->
-                    mZipSet.getZipResourceTableAsset(ap.path);
-                if (ass == NULL) {
-                    ALOGV("loading resource table %s\n", ap.path.string());
-                    ass = const_cast<AssetManager*>(this)->
-                        openNonAssetInPathLocked("resources.arsc",
-                                                 Asset::ACCESS_BUFFER,
-                                                 ap);
-                    if (ass != NULL && ass != kExcludedAsset) {
-                        ass = const_cast<AssetManager*>(this)->
-                            mZipSet.setZipResourceTableAsset(ap.path, ass);
-                    }
-                }
-                
-                if (i == 0 && ass != NULL) {
-                    // If this is the first resource table in the asset
-                    // manager, then we are going to cache it so that we
-                    // can quickly copy it out for others.
-                    ALOGV("Creating shared resources for %s", ap.path.string());
-                    sharedRes = new ResTable();
-                    sharedRes->add(ass, (void*)(i+1), false, idmap);
-                    sharedRes = const_cast<AssetManager*>(this)->
-                        mZipSet.setZipResourceTable(ap.path, sharedRes);
-                }
-            }
-        } else {
-            ALOGV("loading resource table %s\n", ap.path.string());
-            Asset* ass = const_cast<AssetManager*>(this)->
-                openNonAssetInPathLocked("resources.arsc",
-                                         Asset::ACCESS_BUFFER,
-                                         ap);
-            shared = false;
-        }
-        if ((ass != NULL || sharedRes != NULL) && ass != kExcludedAsset) {
-            if (rt == NULL) {
-                mResources = rt = new ResTable();
-                updateResourceParamsLocked();
-            }
-            ALOGV("Installing resource asset %p in to table %p\n", ass, mResources);
-            if (sharedRes != NULL) {
-                ALOGV("Copying existing resources for %s", ap.path.string());
-                rt->add(sharedRes);
-            } else {
-                ALOGV("Parsing resources for %s", ap.path.string());
-                rt->add(ass, (void*)(i+1), !shared, idmap);
-            }
-
-            if (!shared) {
-                delete ass;
-            }
-        }
-        if (idmap != NULL) {
-            delete idmap;
-        }
+        bool empty = appendPathToResTable(mAssetPaths.itemAt(i));
+        onlyEmptyResources = onlyEmptyResources && empty;
     }
 
-    if (required && !rt) ALOGW("Unable to find resources file resources.arsc");
-    if (!rt) {
-        mResources = rt = new ResTable();
+    if (required && onlyEmptyResources) {
+        ALOGW("Unable to find resources file resources.arsc");
+        delete mResources;
+        mResources = NULL;
     }
-    return rt;
+
+    return mResources;
 }
 
 void AssetManager::updateResourceParamsLocked() const
@@ -700,20 +754,11 @@ void AssetManager::updateResourceParamsLocked() const
         return;
     }
 
-    size_t llen = mLocale ? strlen(mLocale) : 0;
-    mConfig->language[0] = 0;
-    mConfig->language[1] = 0;
-    mConfig->country[0] = 0;
-    mConfig->country[1] = 0;
-    if (llen >= 2) {
-        mConfig->language[0] = mLocale[0];
-        mConfig->language[1] = mLocale[1];
+    if (mLocale) {
+        mConfig->setBcp47Locale(mLocale);
+    } else {
+        mConfig->clearLocale();
     }
-    if (llen >= 5) {
-        mConfig->country[0] = mLocale[3];
-        mConfig->country[1] = mLocale[4];
-    }
-    mConfig->size = sizeof(*mConfig);
 
     res->setParameters(mConfig);
 }
@@ -733,6 +778,47 @@ Asset* AssetManager::openIdmapLocked(const struct asset_path& ap) const
     return ass;
 }
 
+void AssetManager::addSystemOverlays(const char* pathOverlaysList,
+        const String8& targetPackagePath, ResTable* sharedRes, size_t offset) const
+{
+    FILE* fin = fopen(pathOverlaysList, "r");
+    if (fin == NULL) {
+        return;
+    }
+
+    char buf[1024];
+    while (fgets(buf, sizeof(buf), fin)) {
+        // format of each line:
+        //   <path to apk><space><path to idmap><newline>
+        char* space = strchr(buf, ' ');
+        char* newline = strchr(buf, '\n');
+        asset_path oap;
+
+        if (space == NULL || newline == NULL || newline < space) {
+            continue;
+        }
+
+        oap.path = String8(buf, space - buf);
+        oap.type = kFileTypeRegular;
+        oap.idmap = String8(space + 1, newline - space - 1);
+        oap.isSystemOverlay = true;
+
+        Asset* oass = const_cast<AssetManager*>(this)->
+            openNonAssetInPathLocked("resources.arsc",
+                    Asset::ACCESS_BUFFER,
+                    oap);
+
+        if (oass != NULL) {
+            Asset* oidmap = openIdmapLocked(oap);
+            offset++;
+            sharedRes->add(oass, oidmap, offset + 1, false);
+            const_cast<AssetManager*>(this)->mAssetPaths.add(oap);
+            const_cast<AssetManager*>(this)->mZipSet.addOverlay(targetPackagePath, oap);
+        }
+    }
+    fclose(fin);
+}
+
 const ResTable& AssetManager::getResources(bool required) const
 {
     const ResTable* rt = getResTable(required);
@@ -750,6 +836,16 @@ void AssetManager::getLocales(Vector<String8>* locales) const
     ResTable* res = mResources;
     if (res != NULL) {
         res->getLocales(locales);
+    }
+
+    const size_t numLocales = locales->size();
+    for (size_t i = 0; i < numLocales; ++i) {
+        const String8& localeStr = locales->itemAt(i);
+        if (localeStr.find(kTlPrefix) == 0) {
+            String8 replaced("fil");
+            replaced += (localeStr.string() + kTlPrefixLen);
+            locales->editItemAt(i) = replaced;
+        }
     }
 }
 
@@ -788,16 +884,14 @@ Asset* AssetManager::openNonAssetInPathLocked(const char* fileName, AccessMode m
         String8 path(fileName);
 
         /* check the appropriate Zip file */
-        ZipFileRO* pZip;
-        ZipEntryRO entry;
-
-        pZip = getZipFileLocked(ap);
+        ZipFileRO* pZip = getZipFileLocked(ap);
         if (pZip != NULL) {
             //printf("GOT zip, checking NA '%s'\n", (const char*) path);
-            entry = pZip->findEntryByName(path.string());
+            ZipEntryRO entry = pZip->findEntryByName(path.string());
             if (entry != NULL) {
                 //printf("FOUND NA in Zip file for %s\n", appName ? appName : kAppCommon);
                 pAsset = openAssetFromZipLocked(pZip, entry, mode, path);
+                pZip->releaseEntry(entry);
             }
         }
 
@@ -942,17 +1036,15 @@ Asset* AssetManager::openInLocaleVendorLocked(const char* fileName, AccessMode m
         path.appendPath(fileName);
 
         /* check the appropriate Zip file */
-        ZipFileRO* pZip;
-        ZipEntryRO entry;
-
-        pZip = getZipFileLocked(ap);
+        ZipFileRO* pZip = getZipFileLocked(ap);
         if (pZip != NULL) {
             //printf("GOT zip, checking '%s'\n", (const char*) path);
-            entry = pZip->findEntryByName(path.string());
+            ZipEntryRO entry = pZip->findEntryByName(path.string());
             if (entry != NULL) {
                 //printf("FOUND in Zip file for %s/%s-%s\n",
                 //    appName, locale, vendor);
                 pAsset = openAssetFromZipLocked(pZip, entry, mode, path);
+                pZip->releaseEntry(entry);
             }
         }
 
@@ -1176,7 +1268,7 @@ AssetDir* AssetManager::openDir(const char* dirName)
  *
  * Pass in "" for the root dir.
  */
-AssetDir* AssetManager::openNonAssetDir(void* cookie, const char* dirName)
+AssetDir* AssetManager::openNonAssetDir(const int32_t cookie, const char* dirName)
 {
     AutoMutex _l(mLock);
 
@@ -1195,7 +1287,7 @@ AssetDir* AssetManager::openNonAssetDir(void* cookie, const char* dirName)
 
     pMergedInfo = new SortedVector<AssetDir::FileInfo>;
 
-    const size_t which = ((size_t)cookie)-1;
+    const size_t which = static_cast<size_t>(cookie) - 1;
 
     if (which < mAssetPaths.size()) {
         const asset_path& ap = mAssetPaths.itemAt(which);
@@ -1454,11 +1546,16 @@ bool AssetManager::scanAndMergeZipLocked(SortedVector<AssetDir::FileInfo>* pMerg
      * semantics.
      */
     int dirNameLen = dirName.length();
-    for (int i = 0; i < pZip->getNumEntries(); i++) {
-        ZipEntryRO entry;
+    void *iterationCookie;
+    if (!pZip->startIteration(&iterationCookie)) {
+        ALOGW("ZipFileRO::startIteration returned false");
+        return false;
+    }
+
+    ZipEntryRO entry;
+    while ((entry = pZip->nextEntry(iterationCookie)) != NULL) {
         char nameBuf[256];
 
-        entry = pZip->findEntryByIndex(i);
         if (pZip->getEntryFileName(entry, nameBuf, sizeof(nameBuf)) != 0) {
             // TODO: fix this if we expect to have long names
             ALOGE("ARGH: name too long?\n");
@@ -1507,6 +1604,8 @@ bool AssetManager::scanAndMergeZipLocked(SortedVector<AssetDir::FileInfo>* pMerg
             }
         }
     }
+
+    pZip->endIteration(iterationCookie);
 
     /*
      * Add the set of unique directories.
@@ -1754,6 +1853,7 @@ bool AssetManager::fncScanAndMergeDirLocked(
     }
 
     mergeInfoLocked(pMergedInfo, pContents);
+    delete pContents;
     return true;
 }
 
@@ -1780,23 +1880,27 @@ AssetManager::SharedZip::SharedZip(const String8& path, time_t modWhen)
     : mPath(path), mZipFile(NULL), mModWhen(modWhen),
       mResourceTableAsset(NULL), mResourceTable(NULL)
 {
-    //ALOGI("Creating SharedZip %p %s\n", this, (const char*)mPath);
-    mZipFile = new ZipFileRO;
+    if (kIsDebug) {
+        ALOGI("Creating SharedZip %p %s\n", this, (const char*)mPath);
+    }
     ALOGV("+++ opening zip '%s'\n", mPath.string());
-    if (mZipFile->open(mPath.string()) != NO_ERROR) {
+    mZipFile = ZipFileRO::open(mPath.string());
+    if (mZipFile == NULL) {
         ALOGD("failed to open Zip archive '%s'\n", mPath.string());
-        delete mZipFile;
-        mZipFile = NULL;
     }
 }
 
-sp<AssetManager::SharedZip> AssetManager::SharedZip::get(const String8& path)
+sp<AssetManager::SharedZip> AssetManager::SharedZip::get(const String8& path,
+        bool createIfNotPresent)
 {
     AutoMutex _l(gLock);
     time_t modWhen = getFileModDate(path);
     sp<SharedZip> zip = gOpen.valueFor(path).promote();
     if (zip != NULL && zip->mModWhen == modWhen) {
         return zip;
+    }
+    if (zip == NULL && !createIfNotPresent) {
+        return NULL;
     }
     zip = new SharedZip(path, modWhen);
     gOpen.add(path, zip);
@@ -1856,9 +1960,25 @@ bool AssetManager::SharedZip::isUpToDate()
     return mModWhen == modWhen;
 }
 
+void AssetManager::SharedZip::addOverlay(const asset_path& ap)
+{
+    mOverlays.add(ap);
+}
+
+bool AssetManager::SharedZip::getOverlay(size_t idx, asset_path* out) const
+{
+    if (idx >= mOverlays.size()) {
+        return false;
+    }
+    *out = mOverlays[idx];
+    return true;
+}
+
 AssetManager::SharedZip::~SharedZip()
 {
-    //ALOGI("Destroying SharedZip %p %s\n", this, (const char*)mPath);
+    if (kIsDebug) {
+        ALOGI("Destroying SharedZip %p %s\n", this, (const char*)mPath);
+    }
     if (mResourceTable != NULL) {
         delete mResourceTable;
     }
@@ -1977,6 +2097,22 @@ bool AssetManager::ZipSet::isUpToDate()
         }
     }
     return true;
+}
+
+void AssetManager::ZipSet::addOverlay(const String8& path, const asset_path& overlay)
+{
+    int idx = getIndex(path);
+    sp<SharedZip> zip = mZipFile[idx];
+    zip->addOverlay(overlay);
+}
+
+bool AssetManager::ZipSet::getOverlay(const String8& path, size_t idx, asset_path* out) const
+{
+    sp<SharedZip> zip = SharedZip::get(path, false);
+    if (zip == NULL) {
+        return false;
+    }
+    return zip->getOverlay(idx, out);
 }
 
 /*

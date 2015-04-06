@@ -1,10 +1,8 @@
 page.title=Communicating with Other Fragments
-parent.title=Building a Dynamic UI with Fragments
-parent.link=index.html
+page.tags=fragments
+helpoutsWidget=true
 
 trainingnavtop=true
-previous.title=Building a Flexible UI
-previous.link=fragment-ui.html
 
 @jd:body
 

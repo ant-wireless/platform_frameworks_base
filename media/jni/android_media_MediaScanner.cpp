@@ -19,13 +19,14 @@
 #define LOG_TAG "MediaScannerJNI"
 #include <utils/Log.h>
 #include <utils/threads.h>
-#include <utils/Unicode.h>
 #include <media/mediascanner.h>
 #include <media/stagefright/StagefrightMediaScanner.h>
+#include <private/media/VideoFrame.h>
 
 #include "jni.h"
 #include "JNIHelp.h"
 #include "android_runtime/AndroidRuntime.h"
+#include "android_runtime/Log.h"
 
 using namespace android;
 
@@ -55,6 +56,53 @@ static status_t checkAndClearExceptionFromCallback(JNIEnv* env, const char* meth
         return UNKNOWN_ERROR;
     }
     return OK;
+}
+
+// stolen from dalvik/vm/checkJni.cpp
+static bool isValidUtf8(const char* bytes) {
+    while (*bytes != '\0') {
+        unsigned char utf8 = *(bytes++);
+        // Switch on the high four bits.
+        switch (utf8 >> 4) {
+        case 0x00:
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05:
+        case 0x06:
+        case 0x07:
+            // Bit pattern 0xxx. No need for any extra bytes.
+            break;
+        case 0x08:
+        case 0x09:
+        case 0x0a:
+        case 0x0b:
+        case 0x0f:
+            /*
+             * Bit pattern 10xx or 1111, which are illegal start bytes.
+             * Note: 1111 is valid for normal UTF-8, but not the
+             * modified UTF-8 used here.
+             */
+            return false;
+        case 0x0e:
+            // Bit pattern 1110, so there are two additional bytes.
+            utf8 = *(bytes++);
+            if ((utf8 & 0xc0) != 0x80) {
+                return false;
+            }
+            // Fall through to take care of the final byte.
+        case 0x0c:
+        case 0x0d:
+            // Bit pattern 110x, so there is one additional byte.
+            utf8 = *(bytes++);
+            if ((utf8 & 0xc0) != 0x80) {
+                return false;
+            }
+            break;
+        }
+    }
+    return true;
 }
 
 class MyMediaScannerClient : public MediaScannerClient
@@ -124,11 +172,8 @@ public:
             mEnv->ExceptionClear();
             return NO_MEMORY;
         }
-
-        // Check if the value is valid UTF-8 string and replace
-        // any un-printable characters with '?' when it's not.
         char *cleaned = NULL;
-        if (utf8_length(value) == -1) {
+        if (!isValidUtf8(value)) {
             cleaned = strdup(value);
             char *chp = cleaned;
             char ch;
@@ -182,12 +227,12 @@ private:
 
 static MediaScanner *getNativeScanner_l(JNIEnv* env, jobject thiz)
 {
-    return (MediaScanner *) env->GetIntField(thiz, fields.context);
+    return (MediaScanner *) env->GetLongField(thiz, fields.context);
 }
 
 static void setNativeScanner_l(JNIEnv* env, jobject thiz, MediaScanner *s)
 {
-    env->SetIntField(thiz, fields.context, (int)s);
+    env->SetLongField(thiz, fields.context, (jlong)s);
 }
 
 static void
@@ -303,21 +348,19 @@ android_media_MediaScanner_extractAlbumArt(
     }
 
     int fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
-    char* data = mp->extractAlbumArt(fd);
-    if (!data) {
+    MediaAlbumArt* mediaAlbumArt = mp->extractAlbumArt(fd);
+    if (mediaAlbumArt == NULL) {
         return NULL;
     }
-    long len = *((long*)data);
 
-    jbyteArray array = env->NewByteArray(len);
+    jbyteArray array = env->NewByteArray(mediaAlbumArt->size());
     if (array != NULL) {
-        jbyte* bytes = env->GetByteArrayElements(array, NULL);
-        memcpy(bytes, data + 4, len);
-        env->ReleaseByteArrayElements(array, bytes, 0);
+        const jbyte* data =
+                reinterpret_cast<const jbyte*>(mediaAlbumArt->data());
+        env->SetByteArrayRegion(array, 0, mediaAlbumArt->size(), data);
     }
 
-done:
-    free(data);
+    free(mediaAlbumArt);
     // if NewByteArray() returned NULL, an out-of-memory
     // exception will have been raised. I just want to
     // return null in that case.
@@ -337,7 +380,7 @@ android_media_MediaScanner_native_init(JNIEnv *env)
         return;
     }
 
-    fields.context = env->GetFieldID(clazz, "mNativeContext", "I");
+    fields.context = env->GetFieldID(clazz, "mNativeContext", "J");
     if (fields.context == NULL) {
         return;
     }
@@ -354,7 +397,7 @@ android_media_MediaScanner_native_setup(JNIEnv *env, jobject thiz)
         return;
     }
 
-    env->SetIntField(thiz, fields.context, (int)mp);
+    env->SetLongField(thiz, fields.context, (jlong)mp);
 }
 
 static void

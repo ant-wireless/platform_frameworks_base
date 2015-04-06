@@ -18,9 +18,6 @@ package com.android.vpndialogs;
 
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageManager;
 import android.net.IConnectivityManager;
 import android.os.Handler;
 import android.os.Message;
@@ -28,9 +25,6 @@ import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
-import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.ImageView;
 import android.widget.TextView;
 
 import com.android.internal.app.AlertActivity;
@@ -65,10 +59,17 @@ public class ManageDialog extends AlertActivity implements
         }
 
         try {
-            mConfig = getIntent().getParcelableExtra("config");
 
             mService = IConnectivityManager.Stub.asInterface(
                     ServiceManager.getService(Context.CONNECTIVITY_SERVICE));
+
+            mConfig = mService.getVpnConfig();
+
+            // mConfig can be null if we are a restricted user, in that case don't show this dialog
+            if (mConfig == null) {
+                finish();
+                return;
+            }
 
             View view = View.inflate(this, R.layout.manage, null);
             if (mConfig.session != null) {
@@ -79,14 +80,10 @@ public class ManageDialog extends AlertActivity implements
             mDataReceived = (TextView) view.findViewById(R.id.data_received);
             mDataRowsHidden = true;
 
-            if (mConfig.user.equals(VpnConfig.LEGACY_VPN)) {
-                mAlertParams.mIconId = android.R.drawable.ic_dialog_info;
+            if (mConfig.legacy) {
                 mAlertParams.mTitle = getText(R.string.legacy_title);
             } else {
-                PackageManager pm = getPackageManager();
-                ApplicationInfo app = pm.getApplicationInfo(mConfig.user, 0);
-                mAlertParams.mIcon = app.loadIcon(pm);
-                mAlertParams.mTitle = app.loadLabel(pm);
+                mAlertParams.mTitle = VpnConfig.getVpnLabel(this, mConfig.user);
             }
             if (mConfig.configureIntent != null) {
                 mAlertParams.mPositiveButtonText = getText(R.string.configure);
@@ -123,7 +120,11 @@ public class ManageDialog extends AlertActivity implements
             if (which == DialogInterface.BUTTON_POSITIVE) {
                 mConfig.configureIntent.send();
             } else if (which == DialogInterface.BUTTON_NEUTRAL) {
-                mService.prepareVpn(mConfig.user, VpnConfig.LEGACY_VPN);
+                if (mConfig.legacy) {
+                    mService.prepareVpn(VpnConfig.LEGACY_VPN, VpnConfig.LEGACY_VPN);
+                } else {
+                    mService.prepareVpn(mConfig.user, VpnConfig.LEGACY_VPN);
+                }
             }
         } catch (Exception e) {
             Log.e(TAG, "onClick", e);
@@ -136,7 +137,7 @@ public class ManageDialog extends AlertActivity implements
         mHandler.removeMessages(0);
 
         if (!isFinishing()) {
-            if (mConfig.startTime != 0) {
+            if (mConfig.startTime != -1) {
                 long seconds = (SystemClock.elapsedRealtime() - mConfig.startTime) / 1000;
                 mDuration.setText(String.format("%02d:%02d:%02d",
                         seconds / 3600, seconds / 60 % 60, seconds % 60));

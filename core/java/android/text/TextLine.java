@@ -100,6 +100,9 @@ class TextLine {
         tl.mText = null;
         tl.mPaint = null;
         tl.mDirections = null;
+        tl.mSpanned = null;
+        tl.mTabs = null;
+        tl.mChars = null;
 
         tl.mMetricAffectingSpanSpanSet.recycle();
         tl.mCharacterStyleSpanSet.recycle();
@@ -153,7 +156,7 @@ class TextLine {
 
         if (mCharsValid) {
             if (mChars == null || mChars.length < mLen) {
-                mChars = new char[ArrayUtils.idealCharArraySize(mLen)];
+                mChars = ArrayUtils.newUnpaddedCharArray(mLen);
             }
             TextUtils.getChars(text, start, limit, mChars, 0);
             if (hasReplacement) {
@@ -664,14 +667,14 @@ class TextLine {
             }
         }
 
-        int flags = runIsRtl ? Paint.DIRECTION_RTL : Paint.DIRECTION_LTR;
+        int dir = runIsRtl ? Paint.DIRECTION_RTL : Paint.DIRECTION_LTR;
         int cursorOpt = after ? Paint.CURSOR_AFTER : Paint.CURSOR_BEFORE;
         if (mCharsValid) {
             return wp.getTextRunCursor(mChars, spanStart, spanLimit - spanStart,
-                    flags, offset, cursorOpt);
+                    dir, offset, cursorOpt);
         } else {
             return wp.getTextRunCursor(mText, mStart + spanStart,
-                    mStart + spanLimit, flags, mStart + offset, cursorOpt) - mStart;
+                    mStart + spanLimit, dir, mStart + offset, cursorOpt) - mStart;
         }
     }
 
@@ -738,15 +741,14 @@ class TextLine {
 
         int contextLen = contextEnd - contextStart;
         if (needWidth || (c != null && (wp.bgColor != 0 || wp.underlineColor != 0 || runIsRtl))) {
-            int flags = runIsRtl ? Paint.DIRECTION_RTL : Paint.DIRECTION_LTR;
             if (mCharsValid) {
                 ret = wp.getTextRunAdvances(mChars, start, runLen,
-                        contextStart, contextLen, flags, null, 0);
+                        contextStart, contextLen, runIsRtl, null, 0);
             } else {
                 int delta = mStart;
                 ret = wp.getTextRunAdvances(mText, delta + start,
                         delta + end, delta + contextStart, delta + contextEnd,
-                        flags, null, 0);
+                        runIsRtl, null, 0);
             }
         }
 
@@ -939,27 +941,22 @@ class TextLine {
                 continue;
             }
 
-            if (c == null) {
-                x += handleText(wp, i, mlimit, i, inext, runIsRtl, c, x, top,
-                        y, bottom, fmi, needWidth || mlimit < measureLimit);
-            } else {
-                for (int j = i, jnext; j < mlimit; j = jnext) {
-                    jnext = mCharacterStyleSpanSet.getNextTransition(mStart + j, mStart + mlimit) -
-                            mStart;
+            for (int j = i, jnext; j < mlimit; j = jnext) {
+                jnext = mCharacterStyleSpanSet.getNextTransition(mStart + j, mStart + mlimit) -
+                        mStart;
 
-                    wp.set(mPaint);
-                    for (int k = 0; k < mCharacterStyleSpanSet.numberOfSpans; k++) {
-                        // Intentionally using >= and <= as explained above
-                        if ((mCharacterStyleSpanSet.spanStarts[k] >= mStart + jnext) ||
-                                (mCharacterStyleSpanSet.spanEnds[k] <= mStart + j)) continue;
+                wp.set(mPaint);
+                for (int k = 0; k < mCharacterStyleSpanSet.numberOfSpans; k++) {
+                    // Intentionally using >= and <= as explained above
+                    if ((mCharacterStyleSpanSet.spanStarts[k] >= mStart + jnext) ||
+                            (mCharacterStyleSpanSet.spanEnds[k] <= mStart + j)) continue;
 
-                        CharacterStyle span = mCharacterStyleSpanSet.spans[k];
-                        span.updateDrawState(wp);
-                    }
-
-                    x += handleText(wp, j, jnext, i, inext, runIsRtl, c, x,
-                            top, y, bottom, fmi, needWidth || jnext < measureLimit);
+                    CharacterStyle span = mCharacterStyleSpanSet.spans[k];
+                    span.updateDrawState(wp);
                 }
+
+                x += handleText(wp, j, jnext, i, inext, runIsRtl, c, x,
+                        top, y, bottom, fmi, needWidth || jnext < measureLimit);
             }
         }
 
@@ -982,16 +979,15 @@ class TextLine {
     private void drawTextRun(Canvas c, TextPaint wp, int start, int end,
             int contextStart, int contextEnd, boolean runIsRtl, float x, int y) {
 
-        int flags = runIsRtl ? Canvas.DIRECTION_RTL : Canvas.DIRECTION_LTR;
         if (mCharsValid) {
             int count = end - start;
             int contextCount = contextEnd - contextStart;
             c.drawTextRun(mChars, start, count, contextStart, contextCount,
-                    x, y, flags, wp);
+                    x, y, runIsRtl, wp);
         } else {
             int delta = mStart;
             c.drawTextRun(mText, delta + start, delta + end,
-                    delta + contextStart, delta + contextEnd, x, y, flags, wp);
+                    delta + contextStart, delta + contextEnd, x, y, runIsRtl, wp);
         }
     }
 

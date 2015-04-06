@@ -20,42 +20,30 @@
               android:background="@drawable/item_background_activated_holo_dark"
               android:gravity="center_vertical">
 
-    <ImageView android:layout_width="56dp"
-               android:layout_height="56dp"
-               android:scaleType="center"
-               android:id="@+id/icon"
-               android:visibility="gone" />
-
     <LinearLayout android:layout_width="0dp"
                   android:layout_height="match_parent"
                   android:layout_weight="1"
                   android:orientation="vertical"
-                  android:gravity="left|center_vertical"
-                  android:paddingLeft="?android:attr/listPreferredItemPaddingLeft"
-                  android:paddingRight="?android:attr/listPreferredItemPaddingRight">
+                  android:gravity="start|center_vertical"
+                  android:paddingStart="?android:attr/listPreferredItemPaddingStart"
+                  android:paddingEnd="?android:attr/listPreferredItemPaddingEnd"
+                  android:duplicateParentState="true">
 
         <TextView android:id="@android:id/text1"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
                   android:singleLine="true"
                   android:ellipsize="marquee"
-                  android:textAppearance="?android:attr/textAppearanceMedium" />
+                  android:textAppearance="?android:attr/textAppearanceMedium"
+                  android:duplicateParentState="true" />
 
         <TextView android:id="@android:id/text2"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
                   android:singleLine="true"
                   android:ellipsize="marquee"
-                  android:textAppearance="?android:attr/textAppearanceSmall" />
+                  android:textAppearance="?android:attr/textAppearanceSmall"
+                  android:duplicateParentState="true" />
     </LinearLayout>
-
-    <ImageButton
-        android:layout_width="56dp"
-        android:layout_height="56dp"
-        android:id="@+id/expand_button"
-        android:background="?android:attr/selectableItemBackground"
-        android:src="@drawable/ic_media_group_expand"
-        android:scaleType="center"
-        android:visibility="gone" />
 
 </LinearLayout>

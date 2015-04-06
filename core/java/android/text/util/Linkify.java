@@ -16,6 +16,7 @@
 
 package android.text.util;
 
+import android.telephony.PhoneNumberUtils;
 import android.text.method.LinkMovementMethod;
 import android.text.method.MovementMethod;
 import android.text.style.URLSpan;
@@ -32,8 +33,13 @@ import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import com.android.i18n.phonenumbers.PhoneNumberMatch;
+import com.android.i18n.phonenumbers.PhoneNumberUtil;
+import com.android.i18n.phonenumbers.PhoneNumberUtil.Leniency;
 
 /**
  *  Linkify take a piece of text and a regular expression and turns all of the
@@ -221,9 +227,7 @@ public class Linkify {
         }
 
         if ((mask & PHONE_NUMBERS) != 0) {
-            gatherLinks(links, text, Patterns.PHONE,
-                new String[] { "tel:" },
-                sPhoneNumberMatchFilter, sPhoneNumberTransformFilter);
+            gatherTelLinks(links, text);
         }
 
         if ((mask & MAP_ADDRESSES) != 0) {
@@ -361,7 +365,7 @@ public class Linkify {
             String scheme, MatchFilter matchFilter,
             TransformFilter transformFilter) {
         boolean hasMatches = false;
-        String prefix = (scheme == null) ? "" : scheme.toLowerCase();
+        String prefix = (scheme == null) ? "" : scheme.toLowerCase(Locale.ROOT);
         Matcher m = p.matcher(s);
 
         while (m.find()) {
@@ -443,37 +447,57 @@ public class Linkify {
         }
     }
 
+    private static final void gatherTelLinks(ArrayList<LinkSpec> links, Spannable s) {
+        PhoneNumberUtil phoneUtil = PhoneNumberUtil.getInstance();
+        Iterable<PhoneNumberMatch> matches = phoneUtil.findNumbers(s.toString(),
+                Locale.getDefault().getCountry(), Leniency.POSSIBLE, Long.MAX_VALUE);
+        for (PhoneNumberMatch match : matches) {
+            LinkSpec spec = new LinkSpec();
+            spec.url = "tel:" + PhoneNumberUtils.normalizeNumber(match.rawString());
+            spec.start = match.start();
+            spec.end = match.end();
+            links.add(spec);
+        }
+    }
+
     private static final void gatherMapLinks(ArrayList<LinkSpec> links, Spannable s) {
         String string = s.toString();
         String address;
         int base = 0;
 
-        while ((address = WebView.findAddress(string)) != null) {
-            int start = string.indexOf(address);
+        try {
+            while ((address = WebView.findAddress(string)) != null) {
+                int start = string.indexOf(address);
 
-            if (start < 0) {
-                break;
+                if (start < 0) {
+                    break;
+                }
+
+                LinkSpec spec = new LinkSpec();
+                int length = address.length();
+                int end = start + length;
+
+                spec.start = base + start;
+                spec.end = base + end;
+                string = string.substring(end);
+                base += end;
+
+                String encodedAddress = null;
+
+                try {
+                    encodedAddress = URLEncoder.encode(address,"UTF-8");
+                } catch (UnsupportedEncodingException e) {
+                    continue;
+                }
+
+                spec.url = "geo:0,0?q=" + encodedAddress;
+                links.add(spec);
             }
-
-            LinkSpec spec = new LinkSpec();
-            int length = address.length();
-            int end = start + length;
-            
-            spec.start = base + start;
-            spec.end = base + end;
-            string = string.substring(end);
-            base += end;
-
-            String encodedAddress = null;
-
-            try {
-                encodedAddress = URLEncoder.encode(address,"UTF-8");
-            } catch (UnsupportedEncodingException e) {
-                continue;
-            }
-
-            spec.url = "geo:0,0?q=" + encodedAddress;
-            links.add(spec);
+        } catch (UnsupportedOperationException e) {
+            // findAddress may fail with an unsupported exception on platforms without a WebView.
+            // In this case, we will not append anything to the links variable: it would have died
+            // in WebView.findAddress.
+            return;
         }
     }
 
@@ -497,10 +521,6 @@ public class Linkify {
                 }
 
                 return 0;
-            }
-
-            public final boolean equals(Object o) {
-                return false;
             }
         };
 

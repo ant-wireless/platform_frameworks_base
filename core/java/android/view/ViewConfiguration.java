@@ -20,6 +20,7 @@ import android.app.AppGlobals;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.graphics.Point;
 import android.os.RemoteException;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
@@ -29,24 +30,6 @@ import android.util.SparseArray;
  * Contains methods to standard constants used in the UI for timeouts, sizes, and distances.
  */
 public class ViewConfiguration {
-    /**
-     * Expected bit depth of the display panel.
-     *
-     * @hide
-     */
-    public static final float PANEL_BIT_DEPTH = 24;
-
-    /**
-     * Minimum alpha required for a view to draw.
-     *
-     * @hide
-     */
-    public static final float ALPHA_THRESHOLD = 0.5f / PANEL_BIT_DEPTH;
-    /**
-     * @hide
-     */
-    public static final float ALPHA_THRESHOLD_INT = 0x7f / PANEL_BIT_DEPTH;
-
     /**
      * Defines the width of the horizontal scrollbar and the height of the vertical scrollbar in
      * dips
@@ -97,7 +80,7 @@ public class ViewConfiguration {
      * is a tap or a scroll. If the user does not move within this interval, it is
      * considered to be a tap.
      */
-    private static final int TAP_TIMEOUT = 180;
+    private static final int TAP_TIMEOUT = 100;
 
     /**
      * Defines the duration in milliseconds we will wait to see if a touch event
@@ -112,6 +95,13 @@ public class ViewConfiguration {
      * double-tap.
      */
     private static final int DOUBLE_TAP_TIMEOUT = 300;
+
+    /**
+     * Defines the minimum duration in milliseconds between the first tap's up event and
+     * the second tap's down event for an interaction to be considered a
+     * double-tap.
+     */
+    private static final int DOUBLE_TAP_MIN_TIME = 40;
 
     /**
      * Defines the maximum duration in milliseconds between a touch pad
@@ -222,6 +212,14 @@ public class ViewConfiguration {
      */
     private static final int OVERFLING_DISTANCE = 6;
 
+    /**
+     * Configuration values for overriding {@link #hasPermanentMenuKey()} behavior.
+     * These constants must match the definition in res/values/config.xml.
+     */
+    private static final int HAS_PERMANENT_MENU_KEY_AUTODETECT = 0;
+    private static final int HAS_PERMANENT_MENU_KEY_TRUE = 1;
+    private static final int HAS_PERMANENT_MENU_KEY_FALSE = 2;
+
     private final int mEdgeSlop;
     private final int mFadingEdgeLength;
     private final int mMinimumFlingVelocity;
@@ -236,6 +234,7 @@ public class ViewConfiguration {
     private final int mOverscrollDistance;
     private final int mOverflingDistance;
     private final boolean mFadingMarqueeEnabled;
+    private final long mGlobalActionsKeyTimeout;
 
     private boolean sHasPermanentMenuKey;
     private boolean sHasPermanentMenuKeySet;
@@ -263,6 +262,7 @@ public class ViewConfiguration {
         mOverscrollDistance = OVERSCROLL_DISTANCE;
         mOverflingDistance = OVERFLING_DISTANCE;
         mFadingMarqueeEnabled = true;
+        mGlobalActionsKeyTimeout = GLOBAL_ACTIONS_KEY_TIMEOUT;
     }
 
     /**
@@ -289,26 +289,46 @@ public class ViewConfiguration {
 
         mEdgeSlop = (int) (sizeAndDensity * EDGE_SLOP + 0.5f);
         mFadingEdgeLength = (int) (sizeAndDensity * FADING_EDGE_LENGTH + 0.5f);
-        mMinimumFlingVelocity = (int) (density * MINIMUM_FLING_VELOCITY + 0.5f);
-        mMaximumFlingVelocity = (int) (density * MAXIMUM_FLING_VELOCITY + 0.5f);
         mScrollbarSize = (int) (density * SCROLL_BAR_SIZE + 0.5f);
         mDoubleTapSlop = (int) (sizeAndDensity * DOUBLE_TAP_SLOP + 0.5f);
         mWindowTouchSlop = (int) (sizeAndDensity * WINDOW_TOUCH_SLOP + 0.5f);
 
-        final Display display = WindowManagerImpl.getDefault().getDefaultDisplay();
         // Size of the screen in bytes, in ARGB_8888 format
-        mMaximumDrawingCacheSize = 4 * display.getRawWidth() * display.getRawHeight();
+        final WindowManager win = (WindowManager)context.getSystemService(Context.WINDOW_SERVICE);
+        final Display display = win.getDefaultDisplay();
+        final Point size = new Point();
+        display.getRealSize(size);
+        mMaximumDrawingCacheSize = 4 * size.x * size.y;
 
         mOverscrollDistance = (int) (sizeAndDensity * OVERSCROLL_DISTANCE + 0.5f);
         mOverflingDistance = (int) (sizeAndDensity * OVERFLING_DISTANCE + 0.5f);
 
         if (!sHasPermanentMenuKeySet) {
-            IWindowManager wm = Display.getWindowManager();
-            try {
-                sHasPermanentMenuKey = !wm.hasSystemNavBar() && !wm.hasNavigationBar();
-                sHasPermanentMenuKeySet = true;
-            } catch (RemoteException ex) {
-                sHasPermanentMenuKey = false;
+            final int configVal = res.getInteger(
+                    com.android.internal.R.integer.config_overrideHasPermanentMenuKey);
+
+            switch (configVal) {
+                default:
+                case HAS_PERMANENT_MENU_KEY_AUTODETECT: {
+                    IWindowManager wm = WindowManagerGlobal.getWindowManagerService();
+                    try {
+                        sHasPermanentMenuKey = !wm.hasNavigationBar();
+                        sHasPermanentMenuKeySet = true;
+                    } catch (RemoteException ex) {
+                        sHasPermanentMenuKey = false;
+                    }
+                }
+                break;
+
+                case HAS_PERMANENT_MENU_KEY_TRUE:
+                    sHasPermanentMenuKey = true;
+                    sHasPermanentMenuKeySet = true;
+                    break;
+
+                case HAS_PERMANENT_MENU_KEY_FALSE:
+                    sHasPermanentMenuKey = false;
+                    sHasPermanentMenuKeySet = true;
+                    break;
             }
         }
 
@@ -319,6 +339,13 @@ public class ViewConfiguration {
         mPagingTouchSlop = mTouchSlop * 2;
 
         mDoubleTapTouchSlop = mTouchSlop;
+
+        mMinimumFlingVelocity = res.getDimensionPixelSize(
+                com.android.internal.R.dimen.config_viewMinFlingVelocity);
+        mMaximumFlingVelocity = res.getDimensionPixelSize(
+                com.android.internal.R.dimen.config_viewMaxFlingVelocity);
+        mGlobalActionsKeyTimeout = res.getInteger(
+                com.android.internal.R.integer.config_globalActionsKeyTimeout);
     }
 
     /**
@@ -447,6 +474,17 @@ public class ViewConfiguration {
      */
     public static int getDoubleTapTimeout() {
         return DOUBLE_TAP_TIMEOUT;
+    }
+
+    /**
+     * @return the minimum duration in milliseconds between the first tap's
+     * up event and the second tap's down event for an interaction to be considered a
+     * double-tap.
+     *
+     * @hide
+     */
+    public static int getDoubleTapMinTime() {
+        return DOUBLE_TAP_MIN_TIME;
     }
 
     /**
@@ -664,9 +702,23 @@ public class ViewConfiguration {
      *
      * @return how long a user needs to press the relevant key to bring up
      *   the global actions dialog.
+     * @deprecated This timeout should not be used by applications
      */
+    @Deprecated
     public static long getGlobalActionKeyTimeout() {
         return GLOBAL_ACTIONS_KEY_TIMEOUT;
+    }
+
+    /**
+     * The amount of time a user needs to press the relevant key to bring up
+     * the global actions dialog.
+     *
+     * @return how long a user needs to press the relevant key to bring up
+     *   the global actions dialog.
+     * @hide
+     */
+    public long getDeviceGlobalActionKeyTimeout() {
+        return mGlobalActionsKeyTimeout;
     }
 
     /**

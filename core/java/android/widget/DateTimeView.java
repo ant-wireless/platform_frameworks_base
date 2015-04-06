@@ -27,14 +27,12 @@ import android.text.format.Time;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.provider.Settings;
-import android.provider.Settings.SettingNotFoundException;
 import android.widget.TextView;
 import android.widget.RemoteViews.RemoteView;
 
-import com.android.internal.R;
-
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 
 //
@@ -65,8 +63,8 @@ public class DateTimeView extends TextView {
     int mLastDisplay = -1;
     DateFormat mLastFormat;
 
-    private boolean mAttachedToWindow;
     private long mUpdateTimeMillis;
+    private static final ThreadLocal<ReceiverInfo> sReceiverInfo = new ThreadLocal<ReceiverInfo>();
 
     public DateTimeView(Context context) {
         super(context);
@@ -79,15 +77,21 @@ public class DateTimeView extends TextView {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        registerReceivers();
-        mAttachedToWindow = true;
+        ReceiverInfo ri = sReceiverInfo.get();
+        if (ri == null) {
+            ri = new ReceiverInfo();
+            sReceiverInfo.set(ri);
+        }
+        ri.addView(this);
     }
         
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        unregisterReceivers();
-        mAttachedToWindow = false;
+        final ReceiverInfo ri = sReceiverInfo.get();
+        if (ri != null) {
+            ri.removeView(this);
+        }
     }
 
     @android.view.RemotableViewMethod
@@ -152,7 +156,7 @@ public class DateTimeView extends TextView {
                     format = getTimeFormat();
                     break;
                 case SHOW_MONTH_DAY_YEAR:
-                    format = getDateFormat();
+                    format = DateFormat.getDateInstance(DateFormat.SHORT);
                     break;
                 default:
                     throw new RuntimeException("unknown display value: " + display);
@@ -189,75 +193,85 @@ public class DateTimeView extends TextView {
     }
 
     private DateFormat getTimeFormat() {
-        int res;
-        Context context = getContext();
-        if (android.text.format.DateFormat.is24HourFormat(context)) {
-            res = R.string.twenty_four_hour_time_format;
-        } else {
-            res = R.string.twelve_hour_time_format;
-        }
-        String format = context.getString(res);
-        return new SimpleDateFormat(format);
+        return android.text.format.DateFormat.getTimeFormat(getContext());
     }
 
-    private DateFormat getDateFormat() {
-        String format = Settings.System.getString(getContext().getContentResolver(),
-                Settings.System.DATE_FORMAT);
-        if (format == null || "".equals(format)) {
-            return DateFormat.getDateInstance(DateFormat.SHORT);
-        } else {
-            try {
-                return new SimpleDateFormat(format);
-            } catch (IllegalArgumentException e) {
-                // If we tried to use a bad format string, fall back to a default.
-                return DateFormat.getDateInstance(DateFormat.SHORT);
+    void clearFormatAndUpdate() {
+        mLastFormat = null;
+        update();
+    }
+
+    private static class ReceiverInfo {
+        private final ArrayList<DateTimeView> mAttachedViews = new ArrayList<DateTimeView>();
+        private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (Intent.ACTION_TIME_TICK.equals(action)) {
+                    if (System.currentTimeMillis() < getSoonestUpdateTime()) {
+                        // The update() function takes a few milliseconds to run because of
+                        // all of the time conversions it needs to do, so we can't do that
+                        // every minute.
+                        return;
+                    }
+                }
+                // ACTION_TIME_CHANGED can also signal a change of 12/24 hr. format.
+                updateAll();
+            }
+        };
+
+        private final ContentObserver mObserver = new ContentObserver(new Handler()) {
+            @Override
+            public void onChange(boolean selfChange) {
+                updateAll();
+            }
+        };
+
+        public void addView(DateTimeView v) {
+            final boolean register = mAttachedViews.isEmpty();
+            mAttachedViews.add(v);
+            if (register) {
+                register(v.getContext().getApplicationContext());
             }
         }
-    }
 
-    private void registerReceivers() {
-        Context context = getContext();
+        public void removeView(DateTimeView v) {
+            mAttachedViews.remove(v);
+            if (mAttachedViews.isEmpty()) {
+                unregister(v.getContext().getApplicationContext());
+            }
+        }
 
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(Intent.ACTION_TIME_TICK);
-        filter.addAction(Intent.ACTION_TIME_CHANGED);
-        filter.addAction(Intent.ACTION_CONFIGURATION_CHANGED);
-        filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
-        context.registerReceiver(mBroadcastReceiver, filter);
+        void updateAll() {
+            final int count = mAttachedViews.size();
+            for (int i = 0; i < count; i++) {
+                mAttachedViews.get(i).clearFormatAndUpdate();
+            }
+        }
 
-        Uri uri = Settings.System.getUriFor(Settings.System.DATE_FORMAT);
-        context.getContentResolver().registerContentObserver(uri, true, mContentObserver);
-    }
-
-    private void unregisterReceivers() {
-        Context context = getContext();
-        context.unregisterReceiver(mBroadcastReceiver);
-        context.getContentResolver().unregisterContentObserver(mContentObserver);
-    }
-
-    private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (Intent.ACTION_TIME_TICK.equals(action)) {
-                if (System.currentTimeMillis() < mUpdateTimeMillis) {
-                    // The update() function takes a few milliseconds to run because of
-                    // all of the time conversions it needs to do, so we can't do that
-                    // every minute.
-                    return;
+        long getSoonestUpdateTime() {
+            long result = Long.MAX_VALUE;
+            final int count = mAttachedViews.size();
+            for (int i = 0; i < count; i++) {
+                final long time = mAttachedViews.get(i).mUpdateTimeMillis;
+                if (time < result) {
+                    result = time;
                 }
             }
-            // ACTION_TIME_CHANGED can also signal a change of 12/24 hr. format.
-            mLastFormat = null;
-            update();
+            return result;
         }
-    };
 
-    private ContentObserver mContentObserver = new ContentObserver(new Handler()) {
-        @Override
-        public void onChange(boolean selfChange) {
-            mLastFormat = null;
-            update();
+        void register(Context context) {
+            final IntentFilter filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_TIME_TICK);
+            filter.addAction(Intent.ACTION_TIME_CHANGED);
+            filter.addAction(Intent.ACTION_CONFIGURATION_CHANGED);
+            filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+            context.registerReceiver(mReceiver, filter);
         }
-    };
+
+        void unregister(Context context) {
+            context.unregisterReceiver(mReceiver);
+        }
+    }
 }

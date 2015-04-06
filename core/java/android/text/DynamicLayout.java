@@ -21,6 +21,7 @@ import android.text.style.UpdateLayout;
 import android.text.style.WrapTogetherSpan;
 
 import com.android.internal.util.ArrayUtils;
+import com.android.internal.util.GrowingArrayUtils;
 
 import java.lang.ref.WeakReference;
 
@@ -401,7 +402,7 @@ public class DynamicLayout extends Layout
 
         if (mBlockEndLines == null) {
             // Initial creation of the array, no test on previous block ending line
-            mBlockEndLines = new int[ArrayUtils.idealIntArraySize(1)];
+            mBlockEndLines = ArrayUtils.newUnpaddedIntArray(1);
             mBlockEndLines[mNumberOfBlocks] = line;
             mNumberOfBlocks++;
             return;
@@ -409,13 +410,7 @@ public class DynamicLayout extends Layout
 
         final int previousBlockEndLine = mBlockEndLines[mNumberOfBlocks - 1];
         if (line > previousBlockEndLine) {
-            if (mNumberOfBlocks == mBlockEndLines.length) {
-                // Grow the array if needed
-                int[] blockEndLines = new int[ArrayUtils.idealIntArraySize(mNumberOfBlocks + 1)];
-                System.arraycopy(mBlockEndLines, 0, blockEndLines, 0, mNumberOfBlocks);
-                mBlockEndLines = blockEndLines;
-            }
-            mBlockEndLines[mNumberOfBlocks] = line;
+            mBlockEndLines = GrowingArrayUtils.append(mBlockEndLines, mNumberOfBlocks, line);
             mNumberOfBlocks++;
         }
     }
@@ -483,9 +478,9 @@ public class DynamicLayout extends Layout
         }
 
         if (newNumberOfBlocks > mBlockEndLines.length) {
-            final int newSize = ArrayUtils.idealIntArraySize(newNumberOfBlocks);
-            int[] blockEndLines = new int[newSize];
-            int[] blockIndices = new int[newSize];
+            int[] blockEndLines = ArrayUtils.newUnpaddedIntArray(
+                    Math.max(mBlockEndLines.length * 2, newNumberOfBlocks));
+            int[] blockIndices = new int[blockEndLines.length];
             System.arraycopy(mBlockEndLines, 0, blockEndLines, 0, firstBlock);
             System.arraycopy(mBlockIndices, 0, blockIndices, 0, firstBlock);
             System.arraycopy(mBlockEndLines, lastBlock + 1,
@@ -502,10 +497,19 @@ public class DynamicLayout extends Layout
         }
 
         mNumberOfBlocks = newNumberOfBlocks;
+        int newFirstChangedBlock;
         final int deltaLines = newLineCount - (endLine - startLine + 1);
-        for (int i = firstBlock + numAddedBlocks; i < mNumberOfBlocks; i++) {
-            mBlockEndLines[i] += deltaLines;
+        if (deltaLines != 0) {
+            // Display list whose index is >= mIndexFirstChangedBlock is valid
+            // but it needs to update its drawing location.
+            newFirstChangedBlock = firstBlock + numAddedBlocks;
+            for (int i = newFirstChangedBlock; i < mNumberOfBlocks; i++) {
+                mBlockEndLines[i] += deltaLines;
+            }
+        } else {
+            newFirstChangedBlock = mNumberOfBlocks;
         }
+        mIndexFirstChangedBlock = Math.min(mIndexFirstChangedBlock, newFirstChangedBlock);
 
         int blockIndex = firstBlock;
         if (createBlockBefore) {
@@ -557,6 +561,20 @@ public class DynamicLayout extends Layout
      */
     public int getNumberOfBlocks() {
         return mNumberOfBlocks;
+    }
+
+    /**
+     * @hide
+     */
+    public int getIndexFirstChangedBlock() {
+        return mIndexFirstChangedBlock;
+    }
+
+    /**
+     * @hide
+     */
+    public void setIndexFirstChangedBlock(int i) {
+        mIndexFirstChangedBlock = i;
     }
 
     @Override
@@ -697,6 +715,8 @@ public class DynamicLayout extends Layout
     private int[] mBlockIndices;
     // Number of items actually currently being used in the above 2 arrays
     private int mNumberOfBlocks;
+    // The first index of the blocks whose locations are changed
+    private int mIndexFirstChangedBlock;
 
     private int mTopPadding, mBottomPadding;
 

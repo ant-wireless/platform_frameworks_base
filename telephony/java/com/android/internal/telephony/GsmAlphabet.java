@@ -20,7 +20,7 @@ import android.content.res.Resources;
 import android.text.TextUtils;
 import android.util.SparseIntArray;
 
-import android.util.Log;
+import android.telephony.Rlog;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
@@ -477,11 +477,11 @@ public class GsmAlphabet {
         StringBuilder ret = new StringBuilder(lengthSeptets);
 
         if (languageTable < 0 || languageTable > sLanguageTables.length) {
-            Log.w(TAG, "unknown language table " + languageTable + ", using default");
+            Rlog.w(TAG, "unknown language table " + languageTable + ", using default");
             languageTable = 0;
         }
         if (shiftTable < 0 || shiftTable > sLanguageShiftTables.length) {
-            Log.w(TAG, "unknown single shift table " + shiftTable + ", using default");
+            Rlog.w(TAG, "unknown single shift table " + shiftTable + ", using default");
             shiftTable = 0;
         }
 
@@ -491,11 +491,11 @@ public class GsmAlphabet {
             String shiftTableToChar = sLanguageShiftTables[shiftTable];
 
             if (languageTableToChar.isEmpty()) {
-                Log.w(TAG, "no language table for code " + languageTable + ", using default");
+                Rlog.w(TAG, "no language table for code " + languageTable + ", using default");
                 languageTableToChar = sLanguageTables[0];
             }
             if (shiftTableToChar.isEmpty()) {
-                Log.w(TAG, "no single shift table for code " + shiftTable + ", using default");
+                Rlog.w(TAG, "no single shift table for code " + shiftTable + ", using default");
                 shiftTableToChar = sLanguageShiftTables[0];
             }
 
@@ -535,7 +535,7 @@ public class GsmAlphabet {
                 }
             }
         } catch (RuntimeException ex) {
-            Log.e(TAG, "Error GSM 7 bit packed: ", ex);
+            Rlog.e(TAG, "Error GSM 7 bit packed: ", ex);
             return null;
         }
 
@@ -609,16 +609,25 @@ public class GsmAlphabet {
                 }
             } else {
                 if (prevWasEscape) {
-                    char shiftChar = shiftTableToChar.charAt(c);
+                    char shiftChar =
+                            c < shiftTableToChar.length() ? shiftTableToChar.charAt(c) : ' ';
                     if (shiftChar == ' ') {
                         // display character from main table if not present in shift table
-                        ret.append(languageTableToChar.charAt(c));
+                        if (c < languageTableToChar.length()) {
+                            ret.append(languageTableToChar.charAt(c));
+                        } else {
+                            ret.append(' ');
+                        }
                     } else {
                         ret.append(shiftChar);
                     }
                 } else {
                     if (!isMbcs || c < 0x80 || i + 1 >= offset + length) {
-                        ret.append(languageTableToChar.charAt(c));
+                        if (c < languageTableToChar.length()) {
+                            ret.append(languageTableToChar.charAt(c));
+                        } else {
+                            ret.append(' ');
+                        }
                     } else {
                         // isMbcs must be true. So both mbcsBuffer and charset are initialized.
                         mbcsBuffer.clear();
@@ -745,6 +754,18 @@ public class GsmAlphabet {
         }
     }
 
+    public static boolean isGsmSeptets(char c) {
+        if (sCharsToGsmTables[0].get(c, -1) != -1) {
+            return true;
+        }
+
+        if (sCharsToShiftTables[0].get(c, -1) != -1) {
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Returns the count of 7-bit GSM alphabet characters needed
      * to represent this string, using the specified 7-bit language table
@@ -767,7 +788,7 @@ public class GsmAlphabet {
         for (int i = 0; i < sz; i++) {
             char c = s.charAt(i);
             if (c == GSM_EXTENDED_ESCAPE) {
-                Log.w(TAG, "countGsmSeptets() string contains Escape character, skipping.");
+                Rlog.w(TAG, "countGsmSeptets() string contains Escape character, skipping.");
                 continue;
             }
             if (charToLanguageTable.get(c, -1) != -1) {
@@ -803,6 +824,10 @@ public class GsmAlphabet {
      */
     public static TextEncodingDetails
     countGsmSeptets(CharSequence s, boolean use7bitOnly) {
+        // Load enabled language tables from config.xml, including any MCC overlays
+        if (!sDisableCountryEncodingCheck) {
+            enableCountrySpecificEncodings();
+        }
         // fast path for common case where no national language shift tables are enabled
         if (sEnabledSingleShiftTables.length + sEnabledLockingShiftTables.length == 0) {
             TextEncodingDetails ted = new TextEncodingDetails();
@@ -843,7 +868,7 @@ public class GsmAlphabet {
         for (int i = 0; i < sz && !lpcList.isEmpty(); i++) {
             char c = s.charAt(i);
             if (c == GSM_EXTENDED_ESCAPE) {
-                Log.w(TAG, "countGsmSeptets() string contains Escape character, ignoring!");
+                Rlog.w(TAG, "countGsmSeptets() string contains Escape character, ignoring!");
                 continue;
             }
             // iterate through enabled locking shift tables
@@ -989,6 +1014,7 @@ public class GsmAlphabet {
      */
     static synchronized void setEnabledSingleShiftTables(int[] tables) {
         sEnabledSingleShiftTables = tables;
+        sDisableCountryEncodingCheck = true;
 
         if (tables.length > 0) {
             sHighestEnabledSingleShiftCode = tables[tables.length - 1];
@@ -1006,6 +1032,7 @@ public class GsmAlphabet {
      */
     static synchronized void setEnabledLockingShiftTables(int[] tables) {
         sEnabledLockingShiftTables = tables;
+        sDisableCountryEncodingCheck = true;
     }
 
     /**
@@ -1030,6 +1057,24 @@ public class GsmAlphabet {
         return sEnabledLockingShiftTables;
     }
 
+    /**
+     * Enable country-specific language tables from MCC-specific overlays.
+     * @context the context to use to get the TelephonyManager
+     */
+    private static void enableCountrySpecificEncodings() {
+        Resources r = Resources.getSystem();
+        // See comments in frameworks/base/core/res/res/values/config.xml for allowed values
+        sEnabledSingleShiftTables = r.getIntArray(R.array.config_sms_enabled_single_shift_tables);
+        sEnabledLockingShiftTables = r.getIntArray(R.array.config_sms_enabled_locking_shift_tables);
+
+        if (sEnabledSingleShiftTables.length > 0) {
+            sHighestEnabledSingleShiftCode =
+                    sEnabledSingleShiftTables[sEnabledSingleShiftTables.length-1];
+        } else {
+            sHighestEnabledSingleShiftCode = 0;
+        }
+    }
+
     /** Reverse mapping from Unicode characters to indexes into language tables. */
     private static final SparseIntArray[] sCharsToGsmTables;
 
@@ -1044,6 +1089,9 @@ public class GsmAlphabet {
 
     /** Highest language code to include in array of single shift counters. */
     private static int sHighestEnabledSingleShiftCode;
+
+    /** Flag to bypass check for country-specific overlays (for test cases only). */
+    private static boolean sDisableCountryEncodingCheck = false;
 
     /**
      * Septet counter for a specific locking shift table and all of
@@ -1408,22 +1456,12 @@ public class GsmAlphabet {
     };
 
     static {
-        Resources r = Resources.getSystem();
-        // See comments in frameworks/base/core/res/res/values/config.xml for allowed values
-        sEnabledSingleShiftTables = r.getIntArray(R.array.config_sms_enabled_single_shift_tables);
-        sEnabledLockingShiftTables = r.getIntArray(R.array.config_sms_enabled_locking_shift_tables);
+        enableCountrySpecificEncodings();
         int numTables = sLanguageTables.length;
         int numShiftTables = sLanguageShiftTables.length;
         if (numTables != numShiftTables) {
-            Log.e(TAG, "Error: language tables array length " + numTables +
+            Rlog.e(TAG, "Error: language tables array length " + numTables +
                     " != shift tables array length " + numShiftTables);
-        }
-
-        if (sEnabledSingleShiftTables.length > 0) {
-            sHighestEnabledSingleShiftCode =
-                    sEnabledSingleShiftTables[sEnabledSingleShiftTables.length-1];
-        } else {
-            sHighestEnabledSingleShiftCode = 0;
         }
 
         sCharsToGsmTables = new SparseIntArray[numTables];
@@ -1432,7 +1470,7 @@ public class GsmAlphabet {
 
             int tableLen = table.length();
             if (tableLen != 0 && tableLen != 128) {
-                Log.e(TAG, "Error: language tables index " + i +
+                Rlog.e(TAG, "Error: language tables index " + i +
                         " length " + tableLen + " (expected 128 or 0)");
             }
 
@@ -1450,7 +1488,7 @@ public class GsmAlphabet {
 
             int shiftTableLen = shiftTable.length();
             if (shiftTableLen != 0 && shiftTableLen != 128) {
-                Log.e(TAG, "Error: language shift tables index " + i +
+                Rlog.e(TAG, "Error: language shift tables index " + i +
                         " length " + shiftTableLen + " (expected 128 or 0)");
             }
 

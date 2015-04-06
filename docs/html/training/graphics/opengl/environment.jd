@@ -68,8 +68,7 @@ declaration to your manifest:</p>
 </pre>
 
 <p>If your application uses texture compression, you must also declare which compression formats
-you support so that devices that do not support theses formats do not try to run your
-application:</p>
+your app supports, so that it is only installed on compatible devices.</p>
 
 <pre>
 &lt;supports-gl-texture android:name="GL_OES_compressed_ETC1_RGB8_texture" /&gt;
@@ -92,7 +91,7 @@ also add a {@link android.opengl.GLSurfaceView}.</p>
 {@link android.opengl.GLSurfaceView} as its primary view:</p>
 
 <pre>
-public class OpenGLES20 extends Activity {
+public class OpenGLES20Activity extends Activity {
 
     private GLSurfaceView mGLView;
 
@@ -130,27 +129,21 @@ just create an inner class in the activity that uses it:</p>
 <pre>
 class MyGLSurfaceView extends GLSurfaceView {
 
+    private final MyGLRenderer mRenderer;
+
     public MyGLSurfaceView(Context context){
         super(context);
 
+        // Create an OpenGL ES 2.0 context
+        setEGLContextClientVersion(2);
+
+        mRenderer = new MyGLRenderer();
+
         // Set the Renderer for drawing on the GLSurfaceView
-        setRenderer(new MyRenderer());
+        setRenderer(mRenderer);
     }
 }
 </pre>
-
-<p>When using OpenGL ES 2.0, you must add another call to your {@link android.opengl.GLSurfaceView}
-constructor, specifying that you want to use the 2.0 API:</p>
-
-<pre>
-// Create an OpenGL ES 2.0 context
-setEGLContextClientVersion(2);
-</pre>
-
-<p class="note"><strong>Note:</strong> If you are using the OpenGL ES 2.0 API, make sure you declare
-this in your application manifest. For more information, see <a href="#manifest">Declare OpenGL ES
-Use
-in the Manifest</a>.</p>
 
 <p>One other optional addition to your {@link android.opengl.GLSurfaceView} implementation is to set
 the render mode to only draw the view when there is a change to your drawing data using the
@@ -187,14 +180,14 @@ the geometry of the view changes, for example when the device's screen orientati
 </ul>
 
 <p>Here is a very basic implementation of an OpenGL ES renderer, that does nothing more than draw a
-gray background in the {@link android.opengl.GLSurfaceView}:</p>
+black background in the {@link android.opengl.GLSurfaceView}:</p>
 
 <pre>
-public class MyGL20Renderer implements GLSurfaceView.Renderer {
+public class MyGLRenderer implements GLSurfaceView.Renderer {
 
     public void onSurfaceCreated(GL10 unused, EGLConfig config) {
         // Set the background frame color
-        GLES20.glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
     public void onDrawFrame(GL10 unused) {
@@ -209,7 +202,7 @@ public class MyGL20Renderer implements GLSurfaceView.Renderer {
 </pre>
 
 <p>That’s all there is to it! The code examples above create a simple Android application that
-displays a gray screen using OpenGL. While this code does not do anything very interesting, by
+displays a black screen using OpenGL. While this code does not do anything very interesting, by
 creating these classes, you have laid the foundation you need to start drawing graphic elements with
 OpenGL.</p>
 

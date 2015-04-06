@@ -24,6 +24,8 @@
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/AMessage.h>
 
+#include <nativehelper/ScopedLocalRef.h>
+
 namespace android {
 
 bool ConvertKeyValueArraysToKeyedVector(
@@ -76,33 +78,35 @@ bool ConvertKeyValueArraysToKeyedVector(
 }
 
 static jobject makeIntegerObject(JNIEnv *env, int32_t value) {
-    jclass clazz = env->FindClass("java/lang/Integer");
-    CHECK(clazz != NULL);
+    ScopedLocalRef<jclass> clazz(env, env->FindClass("java/lang/Integer"));
+    CHECK(clazz.get() != NULL);
 
-    jmethodID integerConstructID = env->GetMethodID(clazz, "<init>", "(I)V");
+    jmethodID integerConstructID =
+        env->GetMethodID(clazz.get(), "<init>", "(I)V");
     CHECK(integerConstructID != NULL);
 
-    return env->NewObject(clazz, integerConstructID, value);
+    return env->NewObject(clazz.get(), integerConstructID, value);
 }
 
 static jobject makeLongObject(JNIEnv *env, int64_t value) {
-    jclass clazz = env->FindClass("java/lang/Long");
-    CHECK(clazz != NULL);
+    ScopedLocalRef<jclass> clazz(env, env->FindClass("java/lang/Long"));
+    CHECK(clazz.get() != NULL);
 
-    jmethodID longConstructID = env->GetMethodID(clazz, "<init>", "(J)V");
+    jmethodID longConstructID = env->GetMethodID(clazz.get(), "<init>", "(J)V");
     CHECK(longConstructID != NULL);
 
-    return env->NewObject(clazz, longConstructID, value);
+    return env->NewObject(clazz.get(), longConstructID, value);
 }
 
 static jobject makeFloatObject(JNIEnv *env, float value) {
-    jclass clazz = env->FindClass("java/lang/Float");
-    CHECK(clazz != NULL);
+    ScopedLocalRef<jclass> clazz(env, env->FindClass("java/lang/Float"));
+    CHECK(clazz.get() != NULL);
 
-    jmethodID floatConstructID = env->GetMethodID(clazz, "<init>", "(F)V");
+    jmethodID floatConstructID =
+        env->GetMethodID(clazz.get(), "<init>", "(F)V");
     CHECK(floatConstructID != NULL);
 
-    return env->NewObject(clazz, floatConstructID, value);
+    return env->NewObject(clazz.get(), floatConstructID, value);
 }
 
 static jobject makeByteBufferObject(
@@ -110,15 +114,16 @@ static jobject makeByteBufferObject(
     jbyteArray byteArrayObj = env->NewByteArray(size);
     env->SetByteArrayRegion(byteArrayObj, 0, size, (const jbyte *)data);
 
-    jclass clazz = env->FindClass("java/nio/ByteBuffer");
-    CHECK(clazz != NULL);
+    ScopedLocalRef<jclass> clazz(env, env->FindClass("java/nio/ByteBuffer"));
+    CHECK(clazz.get() != NULL);
 
     jmethodID byteBufWrapID =
-        env->GetStaticMethodID(clazz, "wrap", "([B)Ljava/nio/ByteBuffer;");
+        env->GetStaticMethodID(
+                clazz.get(), "wrap", "([B)Ljava/nio/ByteBuffer;");
     CHECK(byteBufWrapID != NULL);
 
     jobject byteBufObj = env->CallStaticObjectMethod(
-            clazz, byteBufWrapID, byteArrayObj);
+            clazz.get(), byteBufWrapID, byteArrayObj);
 
     env->DeleteLocalRef(byteArrayObj); byteArrayObj = NULL;
 
@@ -131,8 +136,7 @@ static void SetMapInt32(
     jstring keyObj = env->NewStringUTF(key);
     jobject valueObj = makeIntegerObject(env, value);
 
-    jobject res = env->CallObjectMethod(
-            hashMapObj, hashMapPutID, keyObj, valueObj);
+    env->CallObjectMethod(hashMapObj, hashMapPutID, keyObj, valueObj);
 
     env->DeleteLocalRef(valueObj); valueObj = NULL;
     env->DeleteLocalRef(keyObj); keyObj = NULL;
@@ -140,14 +144,15 @@ static void SetMapInt32(
 
 status_t ConvertMessageToMap(
         JNIEnv *env, const sp<AMessage> &msg, jobject *map) {
-    jclass hashMapClazz = env->FindClass("java/util/HashMap");
+    ScopedLocalRef<jclass> hashMapClazz(
+            env, env->FindClass("java/util/HashMap"));
 
-    if (hashMapClazz == NULL) {
+    if (hashMapClazz.get() == NULL) {
         return -EINVAL;
     }
 
     jmethodID hashMapConstructID =
-        env->GetMethodID(hashMapClazz, "<init>", "()V");
+        env->GetMethodID(hashMapClazz.get(), "<init>", "()V");
 
     if (hashMapConstructID == NULL) {
         return -EINVAL;
@@ -155,7 +160,7 @@ status_t ConvertMessageToMap(
 
     jmethodID hashMapPutID =
         env->GetMethodID(
-                hashMapClazz,
+                hashMapClazz.get(),
                 "put",
                 "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
 
@@ -163,7 +168,7 @@ status_t ConvertMessageToMap(
         return -EINVAL;
     }
 
-    jobject hashMap = env->NewObject(hashMapClazz, hashMapConstructID);
+    jobject hashMap = env->NewObject(hashMapClazz.get(), hashMapConstructID);
 
     for (size_t i = 0; i < msg->countEntries(); ++i) {
         AMessage::Type valueType;
@@ -227,28 +232,28 @@ status_t ConvertMessageToMap(
                         env,
                         hashMap,
                         hashMapPutID,
-                        StringPrintf("%s-left", key).c_str(),
+                        AStringPrintf("%s-left", key).c_str(),
                         left);
 
                 SetMapInt32(
                         env,
                         hashMap,
                         hashMapPutID,
-                        StringPrintf("%s-top", key).c_str(),
+                        AStringPrintf("%s-top", key).c_str(),
                         top);
 
                 SetMapInt32(
                         env,
                         hashMap,
                         hashMapPutID,
-                        StringPrintf("%s-right", key).c_str(),
+                        AStringPrintf("%s-right", key).c_str(),
                         right);
 
                 SetMapInt32(
                         env,
                         hashMap,
                         hashMapPutID,
-                        StringPrintf("%s-bottom", key).c_str(),
+                        AStringPrintf("%s-bottom", key).c_str(),
                         bottom);
                 break;
             }
@@ -260,8 +265,7 @@ status_t ConvertMessageToMap(
         if (valueObj != NULL) {
             jstring keyObj = env->NewStringUTF(key);
 
-            jobject res = env->CallObjectMethod(
-                    hashMap, hashMapPutID, keyObj, valueObj);
+            env->CallObjectMethod(hashMap, hashMapPutID, keyObj, valueObj);
 
             env->DeleteLocalRef(keyObj); keyObj = NULL;
             env->DeleteLocalRef(valueObj); valueObj = NULL;
@@ -276,17 +280,16 @@ status_t ConvertMessageToMap(
 status_t ConvertKeyValueArraysToMessage(
         JNIEnv *env, jobjectArray keys, jobjectArray values,
         sp<AMessage> *out) {
-    jclass stringClass = env->FindClass("java/lang/String");
-    CHECK(stringClass != NULL);
-
-    jclass integerClass = env->FindClass("java/lang/Integer");
-    CHECK(integerClass != NULL);
-
-    jclass floatClass = env->FindClass("java/lang/Float");
-    CHECK(floatClass != NULL);
-
-    jclass byteBufClass = env->FindClass("java/nio/ByteBuffer");
-    CHECK(byteBufClass != NULL);
+    ScopedLocalRef<jclass> stringClass(env, env->FindClass("java/lang/String"));
+    CHECK(stringClass.get() != NULL);
+    ScopedLocalRef<jclass> integerClass(env, env->FindClass("java/lang/Integer"));
+    CHECK(integerClass.get() != NULL);
+    ScopedLocalRef<jclass> longClass(env, env->FindClass("java/lang/Long"));
+    CHECK(longClass.get() != NULL);
+    ScopedLocalRef<jclass> floatClass(env, env->FindClass("java/lang/Float"));
+    CHECK(floatClass.get() != NULL);
+    ScopedLocalRef<jclass> byteBufClass(env, env->FindClass("java/nio/ByteBuffer"));
+    CHECK(byteBufClass.get() != NULL);
 
     sp<AMessage> msg = new AMessage;
 
@@ -309,7 +312,7 @@ status_t ConvertKeyValueArraysToMessage(
     for (jsize i = 0; i < numEntries; ++i) {
         jobject keyObj = env->GetObjectArrayElement(keys, i);
 
-        if (!env->IsInstanceOf(keyObj, stringClass)) {
+        if (!env->IsInstanceOf(keyObj, stringClass.get())) {
             return -EINVAL;
         }
 
@@ -326,7 +329,7 @@ status_t ConvertKeyValueArraysToMessage(
 
         jobject valueObj = env->GetObjectArrayElement(values, i);
 
-        if (env->IsInstanceOf(valueObj, stringClass)) {
+        if (env->IsInstanceOf(valueObj, stringClass.get())) {
             const char *value = env->GetStringUTFChars((jstring)valueObj, NULL);
 
             if (value == NULL) {
@@ -337,29 +340,37 @@ status_t ConvertKeyValueArraysToMessage(
 
             env->ReleaseStringUTFChars((jstring)valueObj, value);
             value = NULL;
-        } else if (env->IsInstanceOf(valueObj, integerClass)) {
+        } else if (env->IsInstanceOf(valueObj, integerClass.get())) {
             jmethodID intValueID =
-                env->GetMethodID(integerClass, "intValue", "()I");
+                env->GetMethodID(integerClass.get(), "intValue", "()I");
             CHECK(intValueID != NULL);
 
             jint value = env->CallIntMethod(valueObj, intValueID);
 
             msg->setInt32(key.c_str(), value);
-        } else if (env->IsInstanceOf(valueObj, floatClass)) {
+        } else if (env->IsInstanceOf(valueObj, longClass.get())) {
+            jmethodID longValueID =
+                env->GetMethodID(longClass.get(), "longValue", "()J");
+            CHECK(longValueID != NULL);
+
+            jlong value = env->CallLongMethod(valueObj, longValueID);
+
+            msg->setInt64(key.c_str(), value);
+        } else if (env->IsInstanceOf(valueObj, floatClass.get())) {
             jmethodID floatValueID =
-                env->GetMethodID(floatClass, "floatValue", "()F");
+                env->GetMethodID(floatClass.get(), "floatValue", "()F");
             CHECK(floatValueID != NULL);
 
             jfloat value = env->CallFloatMethod(valueObj, floatValueID);
 
             msg->setFloat(key.c_str(), value);
-        } else if (env->IsInstanceOf(valueObj, byteBufClass)) {
+        } else if (env->IsInstanceOf(valueObj, byteBufClass.get())) {
             jmethodID positionID =
-                env->GetMethodID(byteBufClass, "position", "()I");
+                env->GetMethodID(byteBufClass.get(), "position", "()I");
             CHECK(positionID != NULL);
 
             jmethodID limitID =
-                env->GetMethodID(byteBufClass, "limit", "()I");
+                env->GetMethodID(byteBufClass.get(), "limit", "()I");
             CHECK(limitID != NULL);
 
             jint position = env->CallIntMethod(valueObj, positionID);
@@ -375,7 +386,7 @@ status_t ConvertKeyValueArraysToMessage(
                        buffer->size());
             } else {
                 jmethodID arrayID =
-                    env->GetMethodID(byteBufClass, "array", "()[B");
+                    env->GetMethodID(byteBufClass.get(), "array", "()[B");
                 CHECK(arrayID != NULL);
 
                 jbyteArray byteArray =

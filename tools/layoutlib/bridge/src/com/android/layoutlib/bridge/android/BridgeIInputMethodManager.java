@@ -63,7 +63,7 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
     }
 
     @Override
-    public List<InputMethodSubtype> getEnabledInputMethodSubtypeList(InputMethodInfo arg0,
+    public List<InputMethodSubtype> getEnabledInputMethodSubtypeList(String arg0,
             boolean arg1) throws RemoteException {
         // TODO Auto-generated method stub
         return null;
@@ -135,7 +135,6 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
     @Override
     public void setImeWindowStatus(IBinder arg0, int arg1, int arg2) throws RemoteException {
         // TODO Auto-generated method stub
-
     }
 
     @Override
@@ -197,9 +196,26 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
     }
 
     @Override
-        public boolean switchToNextInputMethod(IBinder arg0, boolean arg1) throws RemoteException {
+    public boolean switchToNextInputMethod(IBinder arg0, boolean arg1) throws RemoteException {
         // TODO Auto-generated method stub
         return false;
+    }
+
+    @Override
+    public boolean shouldOfferSwitchingToNextInputMethod(IBinder arg0) throws RemoteException {
+        // TODO Auto-generated method stub
+        return false;
+    }
+
+    @Override
+     public int getInputMethodWindowVisibleHeight() throws RemoteException {
+        // TODO Auto-generated method stub
+        return 0;
+    }
+
+    @Override
+    public void notifyUserAction(int sequenceNumber) throws RemoteException {
+        // TODO Auto-generated method stub
     }
 
     @Override

@@ -1,56 +1,75 @@
-page.title=App Components
-page.landing=true
-page.landing.intro=Android's application framework lets you create extremely rich and innovative apps using a set of reusable components. This section explains how Android apps work and how you use components to build them. 
-page.landing.image=images/ui/ui_index.png
+page.title=Introduction to Android
 
 @jd:body
 
-<div class="landing-docs">
 
-  <div class="col-6">
-    <h3>Blog Articles</h3>
-    
-    <a href="http://android-developers.blogspot.com/2012/05/using-dialogfragments.html">
-      <h4>Using DialogFragments</h4>
-      <p>In this post, I’ll show how to use DialogFragments with the v4 support library (for backward compatibility on pre-Honeycomb devices) to show a simple edit dialog and return a result to the calling Activity using an interface.</p>
-    </a>
+<div class="sidebox" style="width:220px"><!-- width to match col-4 below -->
+<p>To learn how apps work, start with
+<a href="{@docRoot}guide/components/fundamentals.html">App Fundamentals</a>.</p>
+<p>To begin coding right away, read <a
+href="{@docRoot}training/basics/firstapp/index.html">Building Your First App</a>.</p>
+</div>
 
-    <a href="http://android-developers.blogspot.com/2011/03/fragments-for-all.html">
-      <h4>Fragments For All</h4>
-      <p>Today we’ve released a static library that exposes the same Fragments API (as well as the new LoaderManager and a few other classes) so that applications compatible with Android 1.6 or later can use fragments to create tablet-compatible user interfaces. </p>
-    </a>
-    
-    <a
-href="http://android-developers.blogspot.com/2010/07/multithreading-for-performance.html">
-      <h4>Multithreading for Performance</h4>
-      <p>A good practice in creating responsive applications is to make sure your main UI thread
-does the minimum amount of work. Any potentially long task that may hang your application should be
-handled in a different thread.</p>
-    </a>
-  </div>
+<p>Android provides a rich application framework that allows you to build innovative apps and games
+for mobile devices in a Java language environment. The documents listed in the left
+navigation provide details about how to build apps using Android's various APIs.</p>
 
-  <div class="col-6">
-    <h3>Training</h3>
-    
-    <a href="http://developer.android.com/training/basics/activity-lifecycle/index.html">
-      <h4>Managing the Activity Lifecycle</h4>
-      <p>This class explains important lifecycle callback methods that each Activity
-      instance receives and how you can use them so your activity does what the user expects and does not consume system
-      resources when your activity doesn't need them.</p>
-    </a>
+<p>If you're new to Android development, it's important that you understand
+the following fundamental concepts about the Android app framework:</p>
 
-    <a href="http://developer.android.com/training/basics/fragments/index.html">
-      <h4>Building a Dynamic UI with Fragments</h4>
-      <p>This class shows you how to create a dynamic user experience with fragments and optimize
-your app's user experience for devices with different screen sizes, all while continuing to support
-devices running versions as old as Android 1.6.</p>
-    </a>
 
-    <a href="http://developer.android.com/training/sharing/index.html">
-      <h4>Sharing Content</h4>
-      <p>This class covers some common ways you can send and receive content between
-      applications using Intent APIs and the ActionProvider object.</p>
-    </a>
-  </div>
+<div class="landing-banner">
+
+<div class="col-6">
+
+<h4>Apps provide multiple entry points</h4>
+
+<p>Android apps are built as a combination of distinct components that can be invoked
+individually. For instance, an individual <em>activity</em> provides a single
+screen for a user interface, and a <em>service</em> independently performs
+work in the background.</p>
+
+<p>From one component you can start another component using an <em>intent</em>. You can even start
+a component in a different app, such an activity in a maps app to show an address. This model
+provides multiple entry points for a single app and allows any app to behave as a user's "default"
+for an action that other apps may invoke.</p>
+
+
+<p><b>Learn more:</b></p>
+<ul class="nolist">
+<li><a href="{@docRoot}guide/components/fundamentals.html">App Fundamentals</a>
+<li><a href="{@docRoot}guide/components/intents-filters.html">Intents and Intent Filters</a>
+<li><a href="{@docRoot}guide/components/activities.html">Activities</a>
+</ul>
 
 </div>
+
+
+<div class="col-6">
+
+<h4>Apps adapt to different devices</h4>
+
+<p>Android provides an adaptive app framework that allows you to provide unique resources
+for different device configurations. For example, you can create different XML
+layout files for different screen sizes and the system
+determines which layout to apply based on the current device's screen size.</p>
+
+<p>You can query the availability of device features at runtime if any app features require
+specific hardware such as a camera. If necessary, you can also declare features your app requires
+so app markets such as Google Play Store do not allow installation on devices that do not support
+that feature.</p>
+
+
+<p><b>Learn more:</b></p>
+<ul class="nolist">
+<li><a href="{@docRoot}guide/practices/compatibility.html">Device Compatibility</a>
+<li><a href="{@docRoot}guide/topics/resources/overview.html">Resources Overview</a>
+<li><a href="{@docRoot}guide/topics/ui/overview.html">User Interface Overview</a>
+</ul>
+
+</div>
+
+</div><!-- end landing-banner -->
+
+
+

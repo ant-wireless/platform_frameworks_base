@@ -18,11 +18,20 @@
 #define ANDROID_HWUI_RECT_H
 
 #include <cmath>
+#include <SkRect.h>
 
 #include <utils/Log.h>
 
+#include "Vertex.h"
+
 namespace android {
 namespace uirenderer {
+
+#define RECT_STRING "%5.2f %5.2f %5.2f %5.2f"
+#define RECT_ARGS(r) \
+    (r).left, (r).top, (r).right, (r).bottom
+#define SK_RECT_ARGS(r) \
+    (r).left(), (r).top(), (r).right(), (r).bottom()
 
 ///////////////////////////////////////////////////////////////////////////////
 // Structs
@@ -60,6 +69,13 @@ public:
             top(0.0f),
             right(width),
             bottom(height) {
+    }
+
+    inline Rect(const SkRect& rect):
+            left(rect.fLeft),
+            top(rect.fTop),
+            right(rect.fRight),
+            bottom(rect.fBottom) {
     }
 
     friend int operator==(const Rect& a, const Rect& b) {
@@ -125,11 +141,11 @@ public:
         return intersect(r.left, r.top, r.right, r.bottom);
     }
 
-    bool contains(float l, float t, float r, float b) {
+    inline bool contains(float l, float t, float r, float b) const {
         return l >= left && t >= top && r <= right && b <= bottom;
     }
 
-    bool contains(const Rect& r) {
+    inline bool contains(const Rect& r) const {
         return contains(r.left, r.top, r.right, r.bottom);
     }
 
@@ -159,6 +175,58 @@ public:
         bottom += dy;
     }
 
+    void inset(float delta) {
+        outset(-delta);
+    }
+
+    void outset(float delta) {
+        left -= delta;
+        top -= delta;
+        right += delta;
+        bottom += delta;
+    }
+
+    void outset(float xdelta, float ydelta) {
+        left -= xdelta;
+        top -= ydelta;
+        right += xdelta;
+        bottom += ydelta;
+    }
+
+    /**
+     * Similar to snapToPixelBoundaries, but estimates bounds conservatively to handle GL rounding
+     * errors.
+     *
+     * This function should be used whenever estimating the damage rect of geometry already mapped
+     * into layer space.
+     */
+    void snapGeometryToPixelBoundaries(bool snapOut) {
+        if (snapOut) {
+            /* For AA geometry with a ramp perimeter, don't snap by rounding - AA geometry will have
+             * a 0.5 pixel perimeter not accounted for in its bounds. Instead, snap by
+             * conservatively rounding out the bounds with floor/ceil.
+             *
+             * In order to avoid changing integer bounds with floor/ceil due to rounding errors
+             * inset the bounds first by the fudge factor. Very small fraction-of-a-pixel errors
+             * from this inset will only incur similarly small errors in output, due to transparency
+             * in extreme outside of the geometry.
+             */
+            left = floorf(left + Vertex::GeometryFudgeFactor());
+            top = floorf(top + Vertex::GeometryFudgeFactor());
+            right = ceilf(right - Vertex::GeometryFudgeFactor());
+            bottom = ceilf(bottom - Vertex::GeometryFudgeFactor());
+        } else {
+            /* For other geometry, we do the regular rounding in order to snap, but also outset the
+             * bounds by a fudge factor. This ensures that ambiguous geometry (e.g. a non-AA Rect
+             * with top left at (0.5, 0.5)) will err on the side of a larger damage rect.
+             */
+            left = floorf(left + 0.5f - Vertex::GeometryFudgeFactor());
+            top = floorf(top + 0.5f - Vertex::GeometryFudgeFactor());
+            right = floorf(right + 0.5f + Vertex::GeometryFudgeFactor());
+            bottom = floorf(bottom + 0.5f + Vertex::GeometryFudgeFactor());
+        }
+    }
+
     void snapToPixelBoundaries() {
         left = floorf(left + 0.5f);
         top = floorf(top + 0.5f);
@@ -166,27 +234,38 @@ public:
         bottom = floorf(bottom + 0.5f);
     }
 
-    void dump() const {
-        ALOGD("Rect[l=%f t=%f r=%f b=%f]", left, top, right, bottom);
+    void roundOut() {
+        left = floorf(left);
+        top = floorf(top);
+        right = ceilf(right);
+        bottom = ceilf(bottom);
+    }
+
+    void expandToCoverVertex(float x, float y) {
+        left = fminf(left, x);
+        top = fminf(top, y);
+        right = fmaxf(right, x);
+        bottom = fmaxf(bottom, y);
+    }
+
+    void dump(const char* label = NULL) const {
+        ALOGD("%s[l=%f t=%f r=%f b=%f]", label ? label : "Rect", left, top, right, bottom);
     }
 
 private:
-    static inline float min(float a, float b) { return (a < b) ? a : b; }
-    static inline float max(float a, float b) { return (a > b) ? a : b; }
-
     void intersectWith(Rect& tmp) const {
-        tmp.left = max(left, tmp.left);
-        tmp.top = max(top, tmp.top);
-        tmp.right = min(right, tmp.right);
-        tmp.bottom = min(bottom, tmp.bottom);
+        tmp.left = fmaxf(left, tmp.left);
+        tmp.top = fmaxf(top, tmp.top);
+        tmp.right = fminf(right, tmp.right);
+        tmp.bottom = fminf(bottom, tmp.bottom);
     }
 
     Rect intersectWith(float l, float t, float r, float b) const {
         Rect tmp;
-        tmp.left = max(left, l);
-        tmp.top = max(top, t);
-        tmp.right = min(right, r);
-        tmp.bottom = min(bottom, b);
+        tmp.left = fmaxf(left, l);
+        tmp.top = fmaxf(top, t);
+        tmp.right = fminf(right, r);
+        tmp.bottom = fminf(bottom, b);
         return tmp;
     }
 

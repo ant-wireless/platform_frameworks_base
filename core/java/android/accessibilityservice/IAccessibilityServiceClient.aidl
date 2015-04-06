@@ -18,6 +18,8 @@ package android.accessibilityservice;
 
 import android.accessibilityservice.IAccessibilityServiceConnection;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityWindowInfo;
+import android.view.KeyEvent;
 
 /**
  * Top-level interface to an accessibility service component.
@@ -26,11 +28,15 @@ import android.view.accessibility.AccessibilityEvent;
  */
  oneway interface IAccessibilityServiceClient {
 
-    void setConnection(in IAccessibilityServiceConnection connection, int connectionId);
+    void init(in IAccessibilityServiceConnection connection, int connectionId, IBinder windowToken);
 
     void onAccessibilityEvent(in AccessibilityEvent event);
 
     void onInterrupt();
 
     void onGesture(int gesture);
+
+    void clearAccessibilityCache();
+
+    void onKeyEvent(in KeyEvent event, int sequence);
 }

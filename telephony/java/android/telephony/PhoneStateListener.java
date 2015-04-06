@@ -18,14 +18,23 @@ package android.telephony;
 
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
-import android.telephony.ServiceState;
-import android.telephony.SignalStrength;
+import android.telephony.SubscriptionManager;
 import android.telephony.CellLocation;
 import android.telephony.CellInfo;
-import android.util.Log;
+import android.telephony.VoLteServiceState;
+import android.telephony.Rlog;
+import android.telephony.ServiceState;
+import android.telephony.SignalStrength;
+import android.telephony.SubscriptionManager;
+import android.telephony.PreciseCallState;
+import android.telephony.PreciseDataConnectionState;
 
 import com.android.internal.telephony.IPhoneStateListener;
+import com.android.internal.telephony.PhoneConstants;
+
+import java.util.List;
 
 /**
  * A listener class for monitoring changes in specific telephony states
@@ -43,6 +52,8 @@ import com.android.internal.telephony.IPhoneStateListener;
  * appropriate LISTEN_ flags.
  */
 public class PhoneStateListener {
+    private static final String LOG_TAG = "PhoneStateListener";
+    private static final boolean DBG = false; // STOPSHIP if true
 
     /**
      * Stop listening for updates.
@@ -160,11 +171,163 @@ public class PhoneStateListener {
      * Listen for changes to observed cell info.
      *
      * @see #onCellInfoChanged
-     * @hide pending API review
      */
     public static final int LISTEN_CELL_INFO = 0x00000400;
 
+    /**
+     * Listen for precise changes and fails to the device calls (cellular).
+     * {@more}
+     * Requires Permission: {@link android.Manifest.permission#READ_PRECISE_PHONE_STATE
+     * READ_PRECISE_PHONE_STATE}
+     *
+     * @hide
+     */
+    public static final int LISTEN_PRECISE_CALL_STATE                       = 0x00000800;
+
+    /**
+     * Listen for precise changes and fails on the data connection (cellular).
+     * {@more}
+     * Requires Permission: {@link android.Manifest.permission#READ_PRECISE_PHONE_STATE
+     * READ_PRECISE_PHONE_STATE}
+     *
+     * @see #onPreciseDataConnectionStateChanged
+     * @hide
+     */
+    public static final int LISTEN_PRECISE_DATA_CONNECTION_STATE            = 0x00001000;
+
+    /**
+     * Listen for real time info for all data connections (cellular)).
+     * {@more}
+     * Requires Permission: {@link android.Manifest.permission#READ_PRECISE_PHONE_STATE
+     * READ_PRECISE_PHONE_STATE}
+     *
+     * @see #onDataConnectionRealTimeInfoChanged(DataConnectionRealTimeInfo)
+     * @hide
+     */
+    public static final int LISTEN_DATA_CONNECTION_REAL_TIME_INFO           = 0x00002000;
+
+    /**
+     * Listen for changes to LTE network state
+     *
+     * @see #onLteNetworkStateChanged
+     * @hide
+     */
+    public static final int LISTEN_VOLTE_STATE                              = 0x00004000;
+
+    /**
+     * Listen for OEM hook raw event
+     *
+     * @see #onOemHookRawEvent
+     * @hide
+     */
+    public static final int LISTEN_OEM_HOOK_RAW_EVENT                       = 0x00008000;
+
+     /*
+     * Subscription used to listen to the phone state changes
+     * @hide
+     */
+    /** @hide */
+    protected int mSubId = SubscriptionManager.INVALID_SUBSCRIPTION_ID;
+
+    private final Handler mHandler;
+
+    /**
+     * Create a PhoneStateListener for the Phone with the default subscription.
+     * This class requires Looper.myLooper() not return null.
+     */
     public PhoneStateListener() {
+        this(SubscriptionManager.DEFAULT_SUBSCRIPTION_ID, Looper.myLooper());
+    }
+
+    /**
+     * Create a PhoneStateListener for the Phone with the default subscription
+     * using a particular non-null Looper.
+     * @hide
+     */
+    public PhoneStateListener(Looper looper) {
+        this(SubscriptionManager.DEFAULT_SUBSCRIPTION_ID, looper);
+    }
+
+    /**
+     * Create a PhoneStateListener for the Phone using the specified subscription.
+     * This class requires Looper.myLooper() not return null. To supply your
+     * own non-null Looper use PhoneStateListener(int subId, Looper looper) below.
+     * @hide
+     */
+    public PhoneStateListener(int subId) {
+        this(subId, Looper.myLooper());
+    }
+
+    /**
+     * Create a PhoneStateListener for the Phone using the specified subscription
+     * and non-null Looper.
+     * @hide
+     */
+    public PhoneStateListener(int subId, Looper looper) {
+        if (DBG) log("ctor: subId=" + subId + " looper=" + looper);
+        mSubId = subId;
+        mHandler = new Handler(looper) {
+            public void handleMessage(Message msg) {
+                if (DBG) {
+                    log("mSubId=" + mSubId + " what=0x" + Integer.toHexString(msg.what)
+                            + " msg=" + msg);
+                }
+                switch (msg.what) {
+                    case LISTEN_SERVICE_STATE:
+                        PhoneStateListener.this.onServiceStateChanged((ServiceState)msg.obj);
+                        break;
+                    case LISTEN_SIGNAL_STRENGTH:
+                        PhoneStateListener.this.onSignalStrengthChanged(msg.arg1);
+                        break;
+                    case LISTEN_MESSAGE_WAITING_INDICATOR:
+                        PhoneStateListener.this.onMessageWaitingIndicatorChanged(msg.arg1 != 0);
+                        break;
+                    case LISTEN_CALL_FORWARDING_INDICATOR:
+                        PhoneStateListener.this.onCallForwardingIndicatorChanged(msg.arg1 != 0);
+                        break;
+                    case LISTEN_CELL_LOCATION:
+                        PhoneStateListener.this.onCellLocationChanged((CellLocation)msg.obj);
+                        break;
+                    case LISTEN_CALL_STATE:
+                        PhoneStateListener.this.onCallStateChanged(msg.arg1, (String)msg.obj);
+                        break;
+                    case LISTEN_DATA_CONNECTION_STATE:
+                        PhoneStateListener.this.onDataConnectionStateChanged(msg.arg1, msg.arg2);
+                        PhoneStateListener.this.onDataConnectionStateChanged(msg.arg1);
+                        break;
+                    case LISTEN_DATA_ACTIVITY:
+                        PhoneStateListener.this.onDataActivity(msg.arg1);
+                        break;
+                    case LISTEN_SIGNAL_STRENGTHS:
+                        PhoneStateListener.this.onSignalStrengthsChanged((SignalStrength)msg.obj);
+                        break;
+                    case LISTEN_OTASP_CHANGED:
+                        PhoneStateListener.this.onOtaspChanged(msg.arg1);
+                        break;
+                    case LISTEN_CELL_INFO:
+                        PhoneStateListener.this.onCellInfoChanged((List<CellInfo>)msg.obj);
+                        break;
+                    case LISTEN_PRECISE_CALL_STATE:
+                        PhoneStateListener.this.onPreciseCallStateChanged((PreciseCallState)msg.obj);
+                        break;
+                    case LISTEN_PRECISE_DATA_CONNECTION_STATE:
+                        PhoneStateListener.this.onPreciseDataConnectionStateChanged(
+                                (PreciseDataConnectionState)msg.obj);
+                        break;
+                    case LISTEN_DATA_CONNECTION_REAL_TIME_INFO:
+                        PhoneStateListener.this.onDataConnectionRealTimeInfoChanged(
+                                (DataConnectionRealTimeInfo)msg.obj);
+                        break;
+                    case LISTEN_VOLTE_STATE:
+                        PhoneStateListener.this.onVoLteServiceStateChanged((VoLteServiceState)msg.obj);
+                        break;
+                    case LISTEN_OEM_HOOK_RAW_EVENT:
+                        PhoneStateListener.this.onOemHookRawEvent((byte[])msg.obj);
+                        break;
+
+                }
+            }
+        };
     }
 
     /**
@@ -275,7 +438,7 @@ public class PhoneStateListener {
      * @param otaspMode is integer <code>OTASP_UNKNOWN=1<code>
      *   means the value is currently unknown and the system should wait until
      *   <code>OTASP_NEEDED=2<code> or <code>OTASP_NOT_NEEDED=3<code> is received before
-     *   making the decisision to perform OTASP or not.
+     *   making the decision to perform OTASP or not.
      *
      * @hide
      */
@@ -284,16 +447,58 @@ public class PhoneStateListener {
     }
 
     /**
-     * Callback invoked when a observed cell info gets changed.
-     *
-     * A notification should be sent when:
-     *     1. a cell is newly-observed.
-     *     2. a observed cell is not visible.
-     *     3. any of the cell info of a observed cell has changed.
-     *
-     * @hide pending API review
+     * Callback invoked when a observed cell info has changed,
+     * or new cells have been added or removed.
+     * @param cellInfo is the list of currently visible cells.
      */
-    public void onCellInfoChanged(CellInfo cellInfo) {
+    public void onCellInfoChanged(List<CellInfo> cellInfo) {
+    }
+
+    /**
+     * Callback invoked when precise device call state changes.
+     *
+     * @hide
+     */
+    public void onPreciseCallStateChanged(PreciseCallState callState) {
+        // default implementation empty
+    }
+
+    /**
+     * Callback invoked when data connection state changes with precise information.
+     *
+     * @hide
+     */
+    public void onPreciseDataConnectionStateChanged(
+            PreciseDataConnectionState dataConnectionState) {
+        // default implementation empty
+    }
+
+    /**
+     * Callback invoked when data connection state changes with precise information.
+     *
+     * @hide
+     */
+    public void onDataConnectionRealTimeInfoChanged(
+            DataConnectionRealTimeInfo dcRtInfo) {
+        // default implementation empty
+    }
+
+    /**
+     * Callback invoked when the service state of LTE network
+     * related to the VoLTE service has changed.
+     * @param stateInfo is the current LTE network information
+     * @hide
+     */
+    public void onVoLteServiceStateChanged(VoLteServiceState stateInfo) {
+    }
+
+    /**
+     * Callback invoked when OEM hook raw event is received. Requires
+     * the READ_PRIVILEGED_PHONE_STATE permission.
+     * @param rawData is the byte array of the OEM hook raw data.
+     * @hide
+     */
+    public void onOemHookRawEvent(byte[] rawData) {
         // default implementation empty
     }
 
@@ -346,49 +551,36 @@ public class PhoneStateListener {
             Message.obtain(mHandler, LISTEN_OTASP_CHANGED, otaspMode, 0).sendToTarget();
         }
 
-        public void onCellInfoChanged(CellInfo cellInfo) {
-            Message.obtain(mHandler, LISTEN_CELL_INFO, 0, 0).sendToTarget();
+        public void onCellInfoChanged(List<CellInfo> cellInfo) {
+            Message.obtain(mHandler, LISTEN_CELL_INFO, 0, 0, cellInfo).sendToTarget();
+        }
+
+        public void onPreciseCallStateChanged(PreciseCallState callState) {
+            Message.obtain(mHandler, LISTEN_PRECISE_CALL_STATE, 0, 0, callState).sendToTarget();
+        }
+
+        public void onPreciseDataConnectionStateChanged(
+                PreciseDataConnectionState dataConnectionState) {
+            Message.obtain(mHandler, LISTEN_PRECISE_DATA_CONNECTION_STATE, 0, 0,
+                    dataConnectionState).sendToTarget();
+        }
+
+        public void onDataConnectionRealTimeInfoChanged(
+                DataConnectionRealTimeInfo dcRtInfo) {
+            Message.obtain(mHandler, LISTEN_DATA_CONNECTION_REAL_TIME_INFO, 0, 0,
+                    dcRtInfo).sendToTarget();
+        }
+
+        public void onVoLteServiceStateChanged(VoLteServiceState lteState) {
+            Message.obtain(mHandler, LISTEN_VOLTE_STATE, 0, 0, lteState).sendToTarget();
+        }
+
+        public void onOemHookRawEvent(byte[] rawData) {
+            Message.obtain(mHandler, LISTEN_OEM_HOOK_RAW_EVENT, 0, 0, rawData).sendToTarget();
         }
     };
 
-    Handler mHandler = new Handler() {
-        public void handleMessage(Message msg) {
-            //Log.d("TelephonyRegistry", "what=0x" + Integer.toHexString(msg.what) + " msg=" + msg);
-            switch (msg.what) {
-                case LISTEN_SERVICE_STATE:
-                    PhoneStateListener.this.onServiceStateChanged((ServiceState)msg.obj);
-                    break;
-                case LISTEN_SIGNAL_STRENGTH:
-                    PhoneStateListener.this.onSignalStrengthChanged(msg.arg1);
-                    break;
-                case LISTEN_MESSAGE_WAITING_INDICATOR:
-                    PhoneStateListener.this.onMessageWaitingIndicatorChanged(msg.arg1 != 0);
-                    break;
-                case LISTEN_CALL_FORWARDING_INDICATOR:
-                    PhoneStateListener.this.onCallForwardingIndicatorChanged(msg.arg1 != 0);
-                    break;
-                case LISTEN_CELL_LOCATION:
-                    PhoneStateListener.this.onCellLocationChanged((CellLocation)msg.obj);
-                    break;
-                case LISTEN_CALL_STATE:
-                    PhoneStateListener.this.onCallStateChanged(msg.arg1, (String)msg.obj);
-                    break;
-                case LISTEN_DATA_CONNECTION_STATE:
-                    PhoneStateListener.this.onDataConnectionStateChanged(msg.arg1, msg.arg2);
-                    PhoneStateListener.this.onDataConnectionStateChanged(msg.arg1);
-                    break;
-                case LISTEN_DATA_ACTIVITY:
-                    PhoneStateListener.this.onDataActivity(msg.arg1);
-                    break;
-                case LISTEN_SIGNAL_STRENGTHS:
-                    PhoneStateListener.this.onSignalStrengthsChanged((SignalStrength)msg.obj);
-                    break;
-                case LISTEN_OTASP_CHANGED:
-                    PhoneStateListener.this.onOtaspChanged(msg.arg1);
-                    break;
-                case LISTEN_CELL_INFO:
-                    PhoneStateListener.this.onCellInfoChanged((CellInfo)msg.obj);
-            }
-        }
-    };
+    private void log(String s) {
+        Rlog.d(LOG_TAG, s);
+    }
 }

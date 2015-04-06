@@ -24,7 +24,7 @@ import java.io.FileDescriptor;
 import java.io.PrintWriter;
 
 /**
- * An abstract class that performs asynchronous loading of data. While Loaders are active
+ * A class that performs asynchronous loading of data. While Loaders are active
  * they should monitor the source of their data and deliver new results when the contents
  * change.  See {@link android.app.LoaderManager} for more detail.
  *
@@ -58,6 +58,7 @@ public class Loader<D> {
     boolean mAbandoned = false;
     boolean mReset = true;
     boolean mContentChanged = false;
+    boolean mProcessingChange = false;
 
     /**
      * An implementation of a ContentObserver that takes care of connecting
@@ -412,7 +413,7 @@ public class Loader<D> {
      * {@link #onReset()} happens.  You can retrieve the current abandoned
      * state with {@link #isAbandoned}.
      */
-    protected void onAbandon() {        
+    protected void onAbandon() {
     }
     
     /**
@@ -439,6 +440,7 @@ public class Loader<D> {
         mStarted = false;
         mAbandoned = false;
         mContentChanged = false;
+        mProcessingChange = false;
     }
 
     /**
@@ -458,9 +460,34 @@ public class Loader<D> {
     public boolean takeContentChanged() {
         boolean res = mContentChanged;
         mContentChanged = false;
+        mProcessingChange |= res;
         return res;
     }
-    
+
+    /**
+     * Commit that you have actually fully processed a content change that
+     * was returned by {@link #takeContentChanged}.  This is for use with
+     * {@link #rollbackContentChanged()} to handle situations where a load
+     * is cancelled.  Call this when you have completely processed a load
+     * without it being cancelled.
+     */
+    public void commitContentChanged() {
+        mProcessingChange = false;
+    }
+
+    /**
+     * Report that you have abandoned the processing of a content change that
+     * was returned by {@link #takeContentChanged()} and would like to rollback
+     * to the state where there is again a pending content change.  This is
+     * to handle the case where a data load due to a content change has been
+     * canceled before its data was delivered back to the loader.
+     */
+    public void rollbackContentChanged() {
+        if (mProcessingChange) {
+            mContentChanged = true;
+        }
+    }
+
     /**
      * Called when {@link ForceLoadContentObserver} detects a change.  The
      * default implementation checks to see if the loader is currently started;
@@ -512,9 +539,14 @@ public class Loader<D> {
     public void dump(String prefix, FileDescriptor fd, PrintWriter writer, String[] args) {
         writer.print(prefix); writer.print("mId="); writer.print(mId);
                 writer.print(" mListener="); writer.println(mListener);
-        writer.print(prefix); writer.print("mStarted="); writer.print(mStarted);
-                writer.print(" mContentChanged="); writer.print(mContentChanged);
-                writer.print(" mAbandoned="); writer.print(mAbandoned);
-                writer.print(" mReset="); writer.println(mReset);
+        if (mStarted || mContentChanged || mProcessingChange) {
+            writer.print(prefix); writer.print("mStarted="); writer.print(mStarted);
+                    writer.print(" mContentChanged="); writer.print(mContentChanged);
+                    writer.print(" mProcessingChange="); writer.println(mProcessingChange);
+        }
+        if (mAbandoned || mReset) {
+            writer.print(prefix); writer.print("mAbandoned="); writer.print(mAbandoned);
+                    writer.print(" mReset="); writer.println(mReset);
+        }
     }
 }

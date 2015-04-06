@@ -22,7 +22,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.nio.ByteOrder;
 import java.nio.ByteBuffer;
@@ -72,58 +71,58 @@ public class AudioEffect {
      * specification. The definitions match the corresponding interface IDs in
      * OpenSLES_IID.h
      */
-
     /**
-     * UUID for environmental reverb effect
-     * @hide
+     * UUID for environmental reverberation effect
      */
     public static final UUID EFFECT_TYPE_ENV_REVERB = UUID
             .fromString("c2e5d5f0-94bd-4763-9cac-4e234d06839e");
     /**
-     * UUID for preset reverb effect
-     * @hide
+     * UUID for preset reverberation effect
      */
     public static final UUID EFFECT_TYPE_PRESET_REVERB = UUID
             .fromString("47382d60-ddd8-11db-bf3a-0002a5d5c51b");
     /**
      * UUID for equalizer effect
-     * @hide
      */
     public static final UUID EFFECT_TYPE_EQUALIZER = UUID
             .fromString("0bed4300-ddd6-11db-8f34-0002a5d5c51b");
     /**
      * UUID for bass boost effect
-     * @hide
      */
     public static final UUID EFFECT_TYPE_BASS_BOOST = UUID
             .fromString("0634f220-ddd4-11db-a0fc-0002a5d5c51b");
     /**
      * UUID for virtualizer effect
-     * @hide
      */
     public static final UUID EFFECT_TYPE_VIRTUALIZER = UUID
             .fromString("37cc2c00-dddd-11db-8577-0002a5d5c51b");
 
     /**
-     * UUID for Automatic Gain Control (AGC) audio pre-processing
-     * @hide
+     * UUIDs for effect types not covered by OpenSL ES.
+     */
+    /**
+     * UUID for Automatic Gain Control (AGC)
      */
     public static final UUID EFFECT_TYPE_AGC = UUID
             .fromString("0a8abfe0-654c-11e0-ba26-0002a5d5c51b");
 
     /**
-     * UUID for Acoustic Echo Canceler (AEC) audio pre-processing
-     * @hide
+     * UUID for Acoustic Echo Canceler (AEC)
      */
     public static final UUID EFFECT_TYPE_AEC = UUID
             .fromString("7b491460-8d4d-11e0-bd61-0002a5d5c51b");
 
     /**
-     * UUID for Noise Suppressor (NS) audio pre-processing
-     * @hide
+     * UUID for Noise Suppressor (NS)
      */
     public static final UUID EFFECT_TYPE_NS = UUID
             .fromString("58b4b260-8e06-11e0-aa8e-0002a5d5c51b");
+
+    /**
+     * UUID for Loudness Enhancer
+     */
+    public static final UUID EFFECT_TYPE_LOUDNESS_ENHANCER = UUID
+              .fromString("fe3199be-aed0-413f-87bb-11260eb63cf1");
 
     /**
      * Null effect UUID. Used when the UUID for effect type of
@@ -199,10 +198,14 @@ public class AudioEffect {
      * The effect descriptor contains information on a particular effect implemented in the
      * audio framework:<br>
      * <ul>
-     *  <li>type: UUID corresponding to the OpenSL ES interface implemented by this effect</li>
+     *  <li>type: UUID identifying the effect type. May be one of:
+     * {@link AudioEffect#EFFECT_TYPE_AEC}, {@link AudioEffect#EFFECT_TYPE_AGC},
+     * {@link AudioEffect#EFFECT_TYPE_BASS_BOOST}, {@link AudioEffect#EFFECT_TYPE_ENV_REVERB},
+     * {@link AudioEffect#EFFECT_TYPE_EQUALIZER}, {@link AudioEffect#EFFECT_TYPE_NS},
+     * {@link AudioEffect#EFFECT_TYPE_PRESET_REVERB}, {@link AudioEffect#EFFECT_TYPE_VIRTUALIZER}.
+     *  </li>
      *  <li>uuid: UUID for this particular implementation</li>
-     *  <li>connectMode: {@link #EFFECT_INSERT}, {@link #EFFECT_AUXILIARY} or
-     *  {at_link #EFFECT_PRE_PROCESSING}</li>
+     *  <li>connectMode: {@link #EFFECT_INSERT} or {@link #EFFECT_AUXILIARY}</li>
      *  <li>name: human readable effect name</li>
      *  <li>implementor: human readable effect implementor name</li>
      * </ul>
@@ -214,6 +217,19 @@ public class AudioEffect {
         public Descriptor() {
         }
 
+        /**
+         * @param type          UUID identifying the effect type. May be one of:
+         * {@link AudioEffect#EFFECT_TYPE_AEC}, {@link AudioEffect#EFFECT_TYPE_AGC},
+         * {@link AudioEffect#EFFECT_TYPE_BASS_BOOST}, {@link AudioEffect#EFFECT_TYPE_ENV_REVERB},
+         * {@link AudioEffect#EFFECT_TYPE_EQUALIZER}, {@link AudioEffect#EFFECT_TYPE_NS},
+         * {@link AudioEffect#EFFECT_TYPE_PRESET_REVERB},
+         * {@link AudioEffect#EFFECT_TYPE_VIRTUALIZER}.
+         * @param uuid         UUID for this particular implementation
+         * @param connectMode  {@link #EFFECT_INSERT} or {@link #EFFECT_AUXILIARY}
+         * @param name         human readable effect name
+         * @param implementor  human readable effect implementor name
+        *
+        */
         public Descriptor(String type, String uuid, String connectMode,
                 String name, String implementor) {
             this.type = UUID.fromString(type);
@@ -224,8 +240,14 @@ public class AudioEffect {
         }
 
         /**
-         *  Indicates the generic type of the effect (Equalizer, Bass boost ...). The UUID
-         *  corresponds to the OpenSL ES Interface ID for this type of effect.
+         *  Indicates the generic type of the effect (Equalizer, Bass boost ...).
+         *  One of {@link AudioEffect#EFFECT_TYPE_AEC},
+         *  {@link AudioEffect#EFFECT_TYPE_AGC}, {@link AudioEffect#EFFECT_TYPE_BASS_BOOST},
+         *  {@link AudioEffect#EFFECT_TYPE_ENV_REVERB}, {@link AudioEffect#EFFECT_TYPE_EQUALIZER},
+         *  {@link AudioEffect#EFFECT_TYPE_NS}, {@link AudioEffect#EFFECT_TYPE_PRESET_REVERB}
+         *   or {@link AudioEffect#EFFECT_TYPE_VIRTUALIZER}.<br>
+         *  For reverberation, bass boost, EQ and virtualizer, the UUID
+         *  corresponds to the OpenSL ES Interface ID.
          */
         public UUID type;
         /**
@@ -234,13 +256,14 @@ public class AudioEffect {
          */
         public UUID uuid;
         /**
-         *  Indicates if the effect is of insert category {@link #EFFECT_INSERT}, auxiliary
-         *  category {@link #EFFECT_AUXILIARY} or pre processing category
-         *  {at_link #EFFECT_PRE_PROCESSING}. Insert effects (Typically an Equalizer) are applied
+         *  Indicates if the effect is of insert category {@link #EFFECT_INSERT} or auxiliary
+         *  category {@link #EFFECT_AUXILIARY}.
+         *  Insert effects (typically an {@link Equalizer}) are applied
          *  to the entire audio source and usually not shared by several sources. Auxiliary effects
          *  (typically a reverberator) are applied to part of the signal (wet) and the effect output
          *  is added to the original signal (dry).
-         *  Audio pre processing are applied to audio captured on a particular AudioRecord.
+         *  Audio pre processing are applied to audio captured on a particular
+         * {@link android.media.AudioRecord}.
          */
         public String connectMode;
         /**
@@ -291,8 +314,8 @@ public class AudioEffect {
     private int mId;
 
     // accessed by native methods
-    private int mNativeAudioEffect;
-    private int mJniData;
+    private long mNativeAudioEffect;
+    private long mJniData;
 
     /**
      * Effect descriptor
@@ -440,7 +463,7 @@ public class AudioEffect {
     }
 
     /**
-     * Query all audio pre processing effects applied to the AudioRecord with the supplied
+     * Query all audio pre-processing effects applied to the AudioRecord with the supplied
      * audio session ID. Returns an array of {@link android.media.audiofx.AudioEffect.Descriptor}
      * objects.
      * @param audioSession system wide unique audio session identifier.
@@ -460,6 +483,10 @@ public class AudioEffect {
      */
     public static boolean isEffectTypeAvailable(UUID type) {
         AudioEffect.Descriptor[] desc = AudioEffect.queryEffects();
+        if (desc == null) {
+            return false;
+        }
+
         for (int i = 0; i < desc.length; i++) {
             if (desc[i].type.equals(type)) {
                 return true;
@@ -1259,7 +1286,7 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public int byteArrayToInt(byte[] valueBuf) {
+    public static int byteArrayToInt(byte[] valueBuf) {
         return byteArrayToInt(valueBuf, 0);
 
     }
@@ -1267,7 +1294,7 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public int byteArrayToInt(byte[] valueBuf, int offset) {
+    public static int byteArrayToInt(byte[] valueBuf, int offset) {
         ByteBuffer converter = ByteBuffer.wrap(valueBuf);
         converter.order(ByteOrder.nativeOrder());
         return converter.getInt(offset);
@@ -1277,7 +1304,7 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public byte[] intToByteArray(int value) {
+    public static byte[] intToByteArray(int value) {
         ByteBuffer converter = ByteBuffer.allocate(4);
         converter.order(ByteOrder.nativeOrder());
         converter.putInt(value);
@@ -1287,14 +1314,14 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public short byteArrayToShort(byte[] valueBuf) {
+    public static short byteArrayToShort(byte[] valueBuf) {
         return byteArrayToShort(valueBuf, 0);
     }
 
     /**
      * @hide
      */
-    public short byteArrayToShort(byte[] valueBuf, int offset) {
+    public static short byteArrayToShort(byte[] valueBuf, int offset) {
         ByteBuffer converter = ByteBuffer.wrap(valueBuf);
         converter.order(ByteOrder.nativeOrder());
         return converter.getShort(offset);
@@ -1304,7 +1331,7 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public byte[] shortToByteArray(short value) {
+    public static byte[] shortToByteArray(short value) {
         ByteBuffer converter = ByteBuffer.allocate(2);
         converter.order(ByteOrder.nativeOrder());
         short sValue = (short) value;
@@ -1315,7 +1342,7 @@ public class AudioEffect {
     /**
      * @hide
      */
-    public byte[] concatArrays(byte[]... arrays) {
+    public static byte[] concatArrays(byte[]... arrays) {
         int len = 0;
         for (byte[] a : arrays) {
             len += a.length;

@@ -18,20 +18,26 @@ package android.widget;
 
 import java.util.ArrayList;
 
+import android.annotation.Nullable;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.drawable.Drawable;
 import android.util.AttributeSet;
 import android.view.Gravity;
+import android.view.RemotableViewMethod;
 import android.view.View;
 import android.view.ViewDebug;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.RemoteViews.RemoteView;
+
+import com.android.internal.R;
 
 
 /**
@@ -55,13 +61,17 @@ import android.widget.RemoteViews.RemoteView;
  */
 @RemoteView
 public class FrameLayout extends ViewGroup {
-    private static final int DEFAULT_CHILD_GRAVITY = Gravity.TOP | Gravity.LEFT;
+    private static final int DEFAULT_CHILD_GRAVITY = Gravity.TOP | Gravity.START;
 
     @ViewDebug.ExportedProperty(category = "measurement")
     boolean mMeasureAllChildren = false;
 
     @ViewDebug.ExportedProperty(category = "drawing")
     private Drawable mForeground;
+    private ColorStateList mForegroundTintList = null;
+    private PorterDuff.Mode mForegroundTintMode = null;
+    private boolean mHasForegroundTint = false;
+    private boolean mHasForegroundTintMode = false;
 
     @ViewDebug.ExportedProperty(category = "padding")
     private int mForegroundPaddingLeft = 0;
@@ -97,11 +107,15 @@ public class FrameLayout extends ViewGroup {
         this(context, attrs, 0);
     }
 
-    public FrameLayout(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public FrameLayout(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
 
-        TypedArray a = context.obtainStyledAttributes(attrs, com.android.internal.R.styleable.FrameLayout,
-                    defStyle, 0);
+    public FrameLayout(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.FrameLayout, defStyleAttr, defStyleRes);
 
         mForegroundGravity = a.getInt(
                 com.android.internal.R.styleable.FrameLayout_foregroundGravity, mForegroundGravity);
@@ -115,10 +129,22 @@ public class FrameLayout extends ViewGroup {
             setMeasureAllChildren(true);
         }
 
-        mForegroundInPadding = a.getBoolean(
-                com.android.internal.R.styleable.FrameLayout_foregroundInsidePadding, true);
+        if (a.hasValue(R.styleable.FrameLayout_foregroundTintMode)) {
+            mForegroundTintMode = Drawable.parseTintMode(a.getInt(
+                    R.styleable.FrameLayout_foregroundTintMode, -1), mForegroundTintMode);
+            mHasForegroundTintMode = true;
+        }
+
+        if (a.hasValue(R.styleable.FrameLayout_foregroundTint)) {
+            mForegroundTintList = a.getColorStateList(R.styleable.FrameLayout_foregroundTint);
+            mHasForegroundTint = true;
+        }
+
+        mForegroundInPadding = a.getBoolean(R.styleable.FrameLayout_foregroundInsidePadding, true);
 
         a.recycle();
+
+        applyForegroundTint();
     }
 
     /**
@@ -176,6 +202,15 @@ public class FrameLayout extends ViewGroup {
         }
     }
 
+    @Override
+    @RemotableViewMethod
+    public void setVisibility(@Visibility int visibility) {
+        super.setVisibility(visibility);
+        if (mForeground != null) {
+            mForeground.setVisible(visibility == VISIBLE, false);
+        }
+    }
+
     /**
      * {@inheritDoc}
      */
@@ -201,6 +236,15 @@ public class FrameLayout extends ViewGroup {
         }
     }
 
+    @Override
+    public void drawableHotspotChanged(float x, float y) {
+        super.drawableHotspotChanged(x, y);
+
+        if (mForeground != null) {
+            mForeground.setHotspot(x, y);
+        }
+    }
+
     /**
      * Returns a set of layout parameters with a width of
      * {@link android.view.ViewGroup.LayoutParams#MATCH_PARENT},
@@ -217,32 +261,34 @@ public class FrameLayout extends ViewGroup {
      * into account by ensuring that the children are inset to be placed
      * inside of the padding area.
      * 
-     * @param drawable The Drawable to be drawn on top of the children.
+     * @param d The Drawable to be drawn on top of the children.
      * 
      * @attr ref android.R.styleable#FrameLayout_foreground
      */
-    public void setForeground(Drawable drawable) {
-        if (mForeground != drawable) {
+    public void setForeground(Drawable d) {
+        if (mForeground != d) {
             if (mForeground != null) {
                 mForeground.setCallback(null);
                 unscheduleDrawable(mForeground);
             }
 
-            mForeground = drawable;
+            mForeground = d;
             mForegroundPaddingLeft = 0;
             mForegroundPaddingTop = 0;
             mForegroundPaddingRight = 0;
             mForegroundPaddingBottom = 0;
 
-            if (drawable != null) {
+            if (d != null) {
                 setWillNotDraw(false);
-                drawable.setCallback(this);
-                if (drawable.isStateful()) {
-                    drawable.setState(getDrawableState());
+                d.setCallback(this);
+                d.setLayoutDirection(getLayoutDirection());
+                if (d.isStateful()) {
+                    d.setState(getDrawableState());
                 }
+                applyForegroundTint();
                 if (mForegroundGravity == Gravity.FILL) {
                     Rect padding = new Rect();
-                    if (drawable.getPadding(padding)) {
+                    if (d.getPadding(padding)) {
                         mForegroundPaddingLeft = padding.left;
                         mForegroundPaddingTop = padding.top;
                         mForegroundPaddingRight = padding.right;
@@ -267,12 +313,92 @@ public class FrameLayout extends ViewGroup {
         return mForeground;
     }
 
-    private int getPaddingLeftWithForeground() {
+    /**
+     * Applies a tint to the foreground drawable. Does not modify the current
+     * tint mode, which is {@link PorterDuff.Mode#SRC_IN} by default.
+     * <p>
+     * Subsequent calls to {@link #setForeground(Drawable)} will automatically
+     * mutate the drawable and apply the specified tint and tint mode using
+     * {@link Drawable#setTintList(ColorStateList)}.
+     *
+     * @param tint the tint to apply, may be {@code null} to clear tint
+     *
+     * @attr ref android.R.styleable#FrameLayout_foregroundTint
+     * @see #getForegroundTintList()
+     * @see Drawable#setTintList(ColorStateList)
+     */
+    public void setForegroundTintList(@Nullable ColorStateList tint) {
+        mForegroundTintList = tint;
+        mHasForegroundTint = true;
+
+        applyForegroundTint();
+    }
+
+    /**
+     * @return the tint applied to the foreground drawable
+     * @attr ref android.R.styleable#FrameLayout_foregroundTint
+     * @see #setForegroundTintList(ColorStateList)
+     */
+    @Nullable
+    public ColorStateList getForegroundTintList() {
+        return mForegroundTintList;
+    }
+
+    /**
+     * Specifies the blending mode used to apply the tint specified by
+     * {@link #setForegroundTintList(ColorStateList)}} to the foreground drawable.
+     * The default mode is {@link PorterDuff.Mode#SRC_IN}.
+     *
+     * @param tintMode the blending mode used to apply the tint, may be
+     *                 {@code null} to clear tint
+     * @attr ref android.R.styleable#FrameLayout_foregroundTintMode
+     * @see #getForegroundTintMode()
+     * @see Drawable#setTintMode(PorterDuff.Mode)
+     */
+    public void setForegroundTintMode(@Nullable PorterDuff.Mode tintMode) {
+        mForegroundTintMode = tintMode;
+        mHasForegroundTintMode = true;
+
+        applyForegroundTint();
+    }
+
+    /**
+     * @return the blending mode used to apply the tint to the foreground
+     *         drawable
+     * @attr ref android.R.styleable#FrameLayout_foregroundTintMode
+     * @see #setForegroundTintMode(PorterDuff.Mode)
+     */
+    @Nullable
+    public PorterDuff.Mode getForegroundTintMode() {
+        return mForegroundTintMode;
+    }
+
+    private void applyForegroundTint() {
+        if (mForeground != null && (mHasForegroundTint || mHasForegroundTintMode)) {
+            mForeground = mForeground.mutate();
+
+            if (mHasForegroundTint) {
+                mForeground.setTintList(mForegroundTintList);
+            }
+
+            if (mHasForegroundTintMode) {
+                mForeground.setTintMode(mForegroundTintMode);
+            }
+
+            // The drawable (or one of its children) may not have been
+            // stateful before applying the tint, so let's try again.
+            if (mForeground.isStateful()) {
+                mForeground.setState(getDrawableState());
+            }
+        }
+    }
+
+    int getPaddingLeftWithForeground() {
         return mForegroundInPadding ? Math.max(mPaddingLeft, mForegroundPaddingLeft) :
             mPaddingLeft + mForegroundPaddingLeft;
     }
 
-    private int getPaddingRightWithForeground() {
+    int getPaddingRightWithForeground() {
         return mForegroundInPadding ? Math.max(mPaddingRight, mForegroundPaddingRight) :
             mPaddingRight + mForegroundPaddingRight;
     }
@@ -385,6 +511,11 @@ public class FrameLayout extends ViewGroup {
      */
     @Override
     protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        layoutChildren(left, top, right, bottom, false /* no force left gravity */);
+    }
+
+    void layoutChildren(int left, int top, int right, int bottom,
+                                  boolean forceLeftGravity) {
         final int count = getChildCount();
 
         final int parentLeft = getPaddingLeftWithForeground();
@@ -411,21 +542,21 @@ public class FrameLayout extends ViewGroup {
                     gravity = DEFAULT_CHILD_GRAVITY;
                 }
 
-                final int layoutDirection = getResolvedLayoutDirection();
+                final int layoutDirection = getLayoutDirection();
                 final int absoluteGravity = Gravity.getAbsoluteGravity(gravity, layoutDirection);
                 final int verticalGravity = gravity & Gravity.VERTICAL_GRAVITY_MASK;
 
                 switch (absoluteGravity & Gravity.HORIZONTAL_GRAVITY_MASK) {
-                    case Gravity.LEFT:
-                        childLeft = parentLeft + lp.leftMargin;
-                        break;
                     case Gravity.CENTER_HORIZONTAL:
                         childLeft = parentLeft + (parentRight - parentLeft - width) / 2 +
                         lp.leftMargin - lp.rightMargin;
                         break;
                     case Gravity.RIGHT:
-                        childLeft = parentRight - width - lp.rightMargin;
-                        break;
+                        if (!forceLeftGravity) {
+                            childLeft = parentRight - width - lp.rightMargin;
+                            break;
+                        }
+                    case Gravity.LEFT:
                     default:
                         childLeft = parentLeft + lp.leftMargin;
                 }
@@ -483,7 +614,7 @@ public class FrameLayout extends ViewGroup {
                     selfBounds.set(mPaddingLeft, mPaddingTop, w - mPaddingRight, h - mPaddingBottom);
                 }
 
-                final int layoutDirection = getResolvedLayoutDirection();
+                final int layoutDirection = getLayoutDirection();
                 Gravity.apply(mForegroundGravity, foreground.getIntrinsicWidth(),
                         foreground.getIntrinsicHeight(), selfBounds, overlayBounds,
                         layoutDirection);
@@ -650,6 +781,18 @@ public class FrameLayout extends ViewGroup {
          */
         public LayoutParams(ViewGroup.MarginLayoutParams source) {
             super(source);
+        }
+
+        /**
+         * Copy constructor. Clones the width, height, margin values, and
+         * gravity of the source.
+         *
+         * @param source The layout params to copy from.
+         */
+        public LayoutParams(LayoutParams source) {
+            super(source);
+
+            this.gravity = source.gravity;
         }
     }
 }

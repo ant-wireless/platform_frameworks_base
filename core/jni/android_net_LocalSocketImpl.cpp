@@ -35,34 +35,18 @@
 
 #include <cutils/sockets.h>
 #include <netinet/tcp.h>
+#include <ScopedUtfChars.h>
 
 namespace android {
+
+template <typename T>
+void UNUSED(T t) {}
 
 static jfieldID field_inboundFileDescriptors;
 static jfieldID field_outboundFileDescriptors;
 static jclass class_Credentials;
 static jclass class_FileDescriptor;
 static jmethodID method_CredentialsInit;
-
-/*
- * private native FileDescriptor
- * create_native(boolean stream)
- *               throws IOException;
- */
-static jobject
-socket_create (JNIEnv *env, jobject object, jboolean stream)
-{
-    int ret;
-
-    ret = socket(PF_LOCAL, stream ? SOCK_STREAM : SOCK_DGRAM, 0);
-
-    if (ret < 0) {
-        jniThrowIOException(env, errno);
-        return NULL;
-    }
-
-    return jniCreateFileDescriptor(env,ret);
-}
 
 /* private native void connectLocal(FileDescriptor fd,
  * String name, int namespace) throws IOException
@@ -72,24 +56,21 @@ socket_connect_local(JNIEnv *env, jobject object,
                         jobject fileDescriptor, jstring name, jint namespaceId)
 {
     int ret;
-    const char *nameUtf8;
     int fd;
-
-    nameUtf8 = env->GetStringUTFChars(name, NULL);
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
+    ScopedUtfChars nameUtf8(env, name);
+
     ret = socket_local_client_connect(
                 fd,
-                nameUtf8,
+                nameUtf8.c_str(),
                 namespaceId,
                 SOCK_STREAM);
-
-    env->ReleaseStringUTFChars(name, nameUtf8);
 
     if (ret < 0) {
         jniThrowIOException(env, errno);
@@ -109,24 +90,21 @@ socket_bind_local (JNIEnv *env, jobject object, jobject fileDescriptor,
 {
     int ret;
     int fd;
-    const char *nameUtf8;
-
 
     if (name == NULL) {
         jniThrowNullPointerException(env, NULL);
+        return;
     }
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
-    nameUtf8 = env->GetStringUTFChars(name, NULL);
+    ScopedUtfChars nameUtf8(env, name);
 
-    ret = socket_local_server_bind(fd, nameUtf8, namespaceId);
-
-    env->ReleaseStringUTFChars(name, nameUtf8);
+    ret = socket_local_server_bind(fd, nameUtf8.c_str(), namespaceId);
 
     if (ret < 0) {
         jniThrowIOException(env, errno);
@@ -136,14 +114,14 @@ socket_bind_local (JNIEnv *env, jobject object, jobject fileDescriptor,
 
 /* private native void listen_native(int fd, int backlog) throws IOException; */
 static void
-socket_listen (JNIEnv *env, jobject object, jobject fileDescriptor, int backlog)
+socket_listen (JNIEnv *env, jobject object, jobject fileDescriptor, jint backlog)
 {
     int ret;
     int fd;
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
@@ -179,7 +157,7 @@ socket_accept (JNIEnv *env, jobject object, jobject fileDescriptor, jobject s)
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return NULL;
     }
 
@@ -209,7 +187,7 @@ socket_shutdown (JNIEnv *env, jobject object, jobject fileDescriptor,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
@@ -256,7 +234,7 @@ java_opt_to_real(int optID, int* opt, int* level)
 }
 
 static jint
-socket_getOption(JNIEnv *env, jobject object, jobject fileDescriptor, int optID)
+socket_getOption(JNIEnv *env, jobject object, jobject fileDescriptor, jint optID)
 {
     int ret, value;
     int opt, level;
@@ -271,7 +249,7 @@ socket_getOption(JNIEnv *env, jobject object, jobject fileDescriptor, int optID)
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return 0;
     }
 
@@ -304,7 +282,7 @@ socket_getOption(JNIEnv *env, jobject object, jobject fileDescriptor, int optID)
 }
 
 static void socket_setOption(
-        JNIEnv *env, jobject object, jobject fileDescriptor, int optID,
+        JNIEnv *env, jobject object, jobject fileDescriptor, jint optID,
         jint boolValue, jint intValue) {
     int ret;
     int optname;
@@ -318,7 +296,7 @@ static void socket_setOption(
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
@@ -371,7 +349,31 @@ static void socket_setOption(
         return;
     }
 }
+static jint socket_pending (JNIEnv *env, jobject object,
+        jobject fileDescriptor)
+{
+    int fd;
 
+    fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
+
+    if (env->ExceptionCheck()) {
+        return (jint)-1;
+    }
+
+    int pending;
+    int ret = ioctl(fd, TIOCOUTQ, &pending);
+
+    // If this were a non-socket fd, there would be other cases to worry
+    // about...
+
+    //ALOGD("socket_pending, ioctl ret:%d, pending:%d", ret, pending);
+    if (ret < 0) {
+        jniThrowIOException(env, errno);
+        return (jint) 0;
+    }
+
+    return (jint)pending;
+}
 static jint socket_available (JNIEnv *env, jobject object,
         jobject fileDescriptor)
 {
@@ -379,7 +381,7 @@ static jint socket_available (JNIEnv *env, jobject object,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return (jint)-1;
     }
 
@@ -421,32 +423,6 @@ static jint socket_available (JNIEnv *env, jobject object,
 #endif
 }
 
-static void socket_close (JNIEnv *env, jobject object, jobject fileDescriptor)
-{
-    int fd;
-    int err;
-
-    if (fileDescriptor == NULL) {
-        jniThrowNullPointerException(env, NULL);
-        return;
-    }
-
-    fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
-
-    if (env->ExceptionOccurred() != NULL) {
-        return;
-    }
-
-    do {
-        err = close(fd);
-    } while (err < 0 && errno == EINTR);
-
-    if (err < 0) {
-        jniThrowIOException(env, errno);
-        return;
-    }
-}
-
 /**
  * Processes ancillary data, handling only
  * SCM_RIGHTS. Creates appropriate objects and sets appropriate
@@ -473,6 +449,7 @@ static int socket_process_cmsg(JNIEnv *env, jobject thisJ, struct msghdr * pMsg)
             if (count < 0) {
                 jniThrowException(env, "java/io/IOException",
                     "invalid cmsg length");
+                return -1;
             }
 
             fdArray = env->NewObjectArray(count, class_FileDescriptor, NULL);
@@ -485,20 +462,20 @@ static int socket_process_cmsg(JNIEnv *env, jobject thisJ, struct msghdr * pMsg)
                 jobject fdObject
                         = jniCreateFileDescriptor(env, pDescriptors[i]);
 
-                if (env->ExceptionOccurred() != NULL) {
+                if (env->ExceptionCheck()) {
                     return -1;
                 }
 
                 env->SetObjectArrayElement(fdArray, i, fdObject);
 
-                if (env->ExceptionOccurred() != NULL) {
+                if (env->ExceptionCheck()) {
                     return -1;
                 }
             }
 
             env->SetObjectField(thisJ, field_inboundFileDescriptors, fdArray);
 
-            if (env->ExceptionOccurred() != NULL) {
+            if (env->ExceptionCheck()) {
                 return -1;
             }
         }
@@ -518,7 +495,6 @@ static ssize_t socket_read_all(JNIEnv *env, jobject thisJ, int fd,
         void *buffer, size_t len)
 {
     ssize_t ret;
-    ssize_t bytesread = 0;
     struct msghdr msg;
     struct iovec iv;
     unsigned char *buf = (unsigned char *)buffer;
@@ -584,7 +560,7 @@ static int socket_write_all(JNIEnv *env, jobject object, int fd,
             = (jobjectArray)env->GetObjectField(
                 object, field_outboundFileDescriptors);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return -1;
     }
 
@@ -596,18 +572,18 @@ static int socket_write_all(JNIEnv *env, jobject object, int fd,
     // Add any pending outbound file descriptors to the message
     if (outboundFds != NULL) {
 
-        if (env->ExceptionOccurred() != NULL) {
+        if (env->ExceptionCheck()) {
             return -1;
         }
 
         for (int i = 0; i < countFds; i++) {
             jobject fdObject = env->GetObjectArrayElement(outboundFds, i);
-            if (env->ExceptionOccurred() != NULL) {
+            if (env->ExceptionCheck()) {
                 return -1;
             }
 
             fds[i] = jniGetFDFromFileDescriptor(env, fdObject);
-            if (env->ExceptionOccurred() != NULL) {
+            if (env->ExceptionCheck()) {
                 return -1;
             }
         }
@@ -664,7 +640,7 @@ static jint socket_read (JNIEnv *env, jobject object, jobject fileDescriptor)
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return (jint)0;
     }
 
@@ -709,7 +685,7 @@ static jint socket_readba (JNIEnv *env, jobject object,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return (jint)-1;
     }
 
@@ -743,12 +719,12 @@ static void socket_write (JNIEnv *env, jobject object,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
     err = socket_write_all(env, object, fd, &b, 1);
-
+    UNUSED(err);
     // A return of -1 above means an exception is pending
 }
 
@@ -771,7 +747,7 @@ static void socket_writeba (JNIEnv *env, jobject object,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return;
     }
 
@@ -784,7 +760,7 @@ static void socket_writeba (JNIEnv *env, jobject object,
 
     err = socket_write_all(env, object, fd,
             byteBuffer + off, len);
-
+    UNUSED(err);
     // A return of -1 above means an exception is pending
 
     env->ReleaseByteArrayElements(buffer, byteBuffer, JNI_ABORT);
@@ -803,7 +779,7 @@ static jobject socket_get_peer_credentials(JNIEnv *env,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return NULL;
     }
 
@@ -842,7 +818,7 @@ static jobject socket_getSockName(JNIEnv *env,
 
     fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
 
-    if (env->ExceptionOccurred() != NULL) {
+    if (env->ExceptionCheck()) {
         return NULL;
     }
 
@@ -885,7 +861,6 @@ static JNINativeMethod gMethods[] = {
      /* name, signature, funcPtr */
     {"getOption_native", "(Ljava/io/FileDescriptor;I)I", (void*)socket_getOption},
     {"setOption_native", "(Ljava/io/FileDescriptor;III)V", (void*)socket_setOption},
-    {"create_native", "(Z)Ljava/io/FileDescriptor;", (void*)socket_create},
     {"connectLocal", "(Ljava/io/FileDescriptor;Ljava/lang/String;I)V",
                                                 (void*)socket_connect_local},
     {"bindLocal", "(Ljava/io/FileDescriptor;Ljava/lang/String;I)V", (void*)socket_bind_local},
@@ -893,7 +868,7 @@ static JNINativeMethod gMethods[] = {
     {"accept", "(Ljava/io/FileDescriptor;Landroid/net/LocalSocketImpl;)Ljava/io/FileDescriptor;", (void*)socket_accept},
     {"shutdown", "(Ljava/io/FileDescriptor;Z)V", (void*)socket_shutdown},
     {"available_native", "(Ljava/io/FileDescriptor;)I", (void*) socket_available},
-    {"close_native", "(Ljava/io/FileDescriptor;)V", (void*) socket_close},
+    {"pending_native", "(Ljava/io/FileDescriptor;)I", (void*) socket_pending},
     {"read_native", "(Ljava/io/FileDescriptor;)I", (void*) socket_read},
     {"readba_native", "([BIILjava/io/FileDescriptor;)I", (void*) socket_readba},
     {"writeba_native", "([BIILjava/io/FileDescriptor;)V", (void*) socket_writeba},

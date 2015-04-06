@@ -23,7 +23,6 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
-import android.os.Looper;
 import android.util.AttributeSet;
 import android.util.Log;
 
@@ -108,6 +107,7 @@ public class TextureView extends View {
     private HardwareLayer mLayer;
     private SurfaceTexture mSurface;
     private SurfaceTextureListener mListener;
+    private boolean mHadSurface;
 
     private boolean mOpaque = true;
 
@@ -118,15 +118,12 @@ public class TextureView extends View {
     private boolean mUpdateLayer;
     private boolean mUpdateSurface;
 
-    private SurfaceTexture.OnFrameAvailableListener mUpdateListener;
-
     private Canvas mCanvas;
     private int mSaveCount;
 
     private final Object[] mNativeWindowLock = new Object[0];
-    // Used from native code, do not write!
-    @SuppressWarnings({"UnusedDeclaration"})
-    private int mNativeWindow;
+    // Set by native code, do not write!
+    private long mNativeWindow;
 
     /**
      * Creates a new TextureView.
@@ -144,7 +141,6 @@ public class TextureView extends View {
      * @param context The context to associate this view with.
      * @param attrs The attributes of the XML tag that is inflating the view.
      */
-    @SuppressWarnings({"UnusedDeclaration"})
     public TextureView(Context context, AttributeSet attrs) {
         super(context, attrs);
         init();
@@ -155,14 +151,30 @@ public class TextureView extends View {
      * 
      * @param context The context to associate this view with.
      * @param attrs The attributes of the XML tag that is inflating the view.
-     * @param defStyle The default style to apply to this view. If 0, no style
-     *        will be applied (beyond what is included in the theme). This may
-     *        either be an attribute resource, whose value will be retrieved
-     *        from the current theme, or an explicit style resource.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
      */
-    @SuppressWarnings({"UnusedDeclaration"})
-    public TextureView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public TextureView(Context context, AttributeSet attrs, int defStyleAttr) {
+        super(context, attrs, defStyleAttr);
+        init();
+    }
+
+    /**
+     * Creates a new TextureView.
+     *
+     * @param context The context to associate this view with.
+     * @param attrs The attributes of the XML tag that is inflating the view.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
+     * @param defStyleRes A resource identifier of a style resource that
+     *        supplies default values for the view, used only if
+     *        defStyleAttr is 0 or can not be found in the theme. Can be 0
+     *        to not look for defaults.
+     */
+    public TextureView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         init();
     }
 
@@ -189,7 +201,7 @@ public class TextureView extends View {
         if (opaque != mOpaque) {
             mOpaque = opaque;
             if (mLayer != null) {
-                updateLayer();
+                updateLayerAndInvalidate();
             }
         }
     }
@@ -202,28 +214,23 @@ public class TextureView extends View {
             Log.w(LOG_TAG, "A TextureView or a subclass can only be "
                     + "used with hardware acceleration enabled.");
         }
+
+        if (mHadSurface) {
+            invalidate(true);
+            mHadSurface = false;
+        }
     }
 
+    /** @hide */
     @Override
-    protected void onDetachedFromWindow() {
-        super.onDetachedFromWindow();
-        if (mLayer != null && mAttachInfo != null && mAttachInfo.mHardwareRenderer != null) {
-            boolean success = mAttachInfo.mHardwareRenderer.safelyRun(new Runnable() {
-                @Override
-                public void run() {
-                    destroySurface();
-                }
-            });
-
-            if (!success) {
-                Log.w(LOG_TAG, "TextureView was not able to destroy its surface: " + this);
-            }
-        }
+    protected void onDetachedFromWindowInternal() {
+        destroySurface();
+        super.onDetachedFromWindowInternal();
     }
 
     private void destroySurface() {
         if (mLayer != null) {
-            mSurface.detachFromGLContext();
+            mLayer.detachSurfaceTexture();
 
             boolean shouldRelease = true;
             if (mListener != null) {
@@ -238,6 +245,8 @@ public class TextureView extends View {
             if (shouldRelease) mSurface.release();
             mSurface = null;
             mLayer = null;
+
+            mHadSurface = true;
         }
     }
 
@@ -257,9 +266,14 @@ public class TextureView extends View {
     @Override
     public void setLayerType(int layerType, Paint paint) {
         if (paint != mLayerPaint) {
-            mLayerPaint = paint;
+            mLayerPaint = paint == null ? new Paint() : paint;
             invalidate();
         }
+    }
+
+    @Override
+    public void setLayerPaint(Paint paint) {
+        setLayerType(/* ignored */ 0, paint);
     }
 
     /**
@@ -290,6 +304,9 @@ public class TextureView extends View {
      */
     @Override
     public final void draw(Canvas canvas) {
+        // NOTE: Maintain this carefully (see View.java)
+        mPrivateFlags = (mPrivateFlags & ~PFLAG_DIRTY_MASK) | PFLAG_DRAWN;
+
         applyUpdate();
         applyTransformMatrix();
     }
@@ -308,16 +325,12 @@ public class TextureView extends View {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         if (mSurface != null) {
-            nSetDefaultBufferSize(mSurface, getWidth(), getHeight());
+            mSurface.setDefaultBufferSize(getWidth(), getHeight());
+            updateLayer();
             if (mListener != null) {
                 mListener.onSurfaceTextureSizeChanged(mSurface, getWidth(), getHeight());
             }
         }
-    }
-
-    @Override
-    boolean destroyLayer(boolean valid) {
-        return false;
     }
 
     /**
@@ -333,40 +346,30 @@ public class TextureView extends View {
 
     @Override
     HardwareLayer getHardwareLayer() {
+        // NOTE: Maintain these two lines very carefully (see View.java)
+        mPrivateFlags |= PFLAG_DRAWN | PFLAG_DRAWING_CACHE_VALID;
+        mPrivateFlags &= ~PFLAG_DIRTY_MASK;
+
         if (mLayer == null) {
             if (mAttachInfo == null || mAttachInfo.mHardwareRenderer == null) {
                 return null;
             }
 
-            mLayer = mAttachInfo.mHardwareRenderer.createHardwareLayer(mOpaque);
+            mLayer = mAttachInfo.mHardwareRenderer.createTextureLayer();
             if (!mUpdateSurface) {
                 // Create a new SurfaceTexture for the layer.
-                mSurface = mAttachInfo.mHardwareRenderer.createSurfaceTexture(mLayer);
+                mSurface = new SurfaceTexture(false);
+                mLayer.setSurfaceTexture(mSurface);
             }
-            nSetDefaultBufferSize(mSurface, getWidth(), getHeight());
+            mSurface.setDefaultBufferSize(getWidth(), getHeight());
             nCreateNativeWindow(mSurface);
 
-            mUpdateListener = new SurfaceTexture.OnFrameAvailableListener() {
-                @Override
-                public void onFrameAvailable(SurfaceTexture surfaceTexture) {
-                    // Per SurfaceTexture's documentation, the callback may be invoked
-                    // from an arbitrary thread
-                    synchronized (mLock) {
-                        mUpdateLayer = true;
-                    }
-
-                    if (Looper.myLooper() == Looper.getMainLooper()) {
-                        invalidate();
-                    } else {
-                        postInvalidate();
-                    }
-                }
-            };
-            mSurface.setOnFrameAvailableListener(mUpdateListener);
+            mSurface.setOnFrameAvailableListener(mUpdateListener, mAttachInfo.mHandler);
 
             if (mListener != null && !mUpdateSurface) {
                 mListener.onSurfaceTextureAvailable(mSurface, getWidth(), getHeight());
             }
+            mLayer.setLayerPaint(mLayerPaint);
         }
 
         if (mUpdateSurface) {
@@ -377,13 +380,11 @@ public class TextureView extends View {
 
             // Since we are updating the layer, force an update to ensure its
             // parameters are correct (width, height, transform, etc.)
-            synchronized (mLock) {
-                mUpdateLayer = true;
-            }
+            updateLayer();
             mMatrixChanged = true;
 
-            mAttachInfo.mHardwareRenderer.setSurfaceTexture(mLayer, mSurface);
-            nSetDefaultBufferSize(mSurface, getWidth(), getHeight());
+            mLayer.setSurfaceTexture(mSurface);
+            mSurface.setDefaultBufferSize(getWidth(), getHeight());
         }
 
         applyUpdate();
@@ -401,8 +402,10 @@ public class TextureView extends View {
             // To cancel updates, the easiest thing to do is simply to remove the
             // updates listener
             if (visibility == VISIBLE) {
-                mSurface.setOnFrameAvailableListener(mUpdateListener);
-                updateLayer();
+                if (mLayer != null) {
+                    mSurface.setOnFrameAvailableListener(mUpdateListener, mAttachInfo.mHandler);
+                }
+                updateLayerAndInvalidate();
             } else {
                 mSurface.setOnFrameAvailableListener(null);
             }
@@ -410,7 +413,15 @@ public class TextureView extends View {
     }
 
     private void updateLayer() {
-        mUpdateLayer = true;
+        synchronized (mLock) {
+            mUpdateLayer = true;
+        }
+    }
+
+    private void updateLayerAndInvalidate() {
+        synchronized (mLock) {
+            mUpdateLayer = true;
+        }
         invalidate();
     }
 
@@ -427,7 +438,8 @@ public class TextureView extends View {
             }
         }
         
-        mLayer.update(getWidth(), getHeight(), mOpaque);
+        mLayer.prepare(getWidth(), getHeight(), mOpaque);
+        mLayer.updateSurfaceTexture();
 
         if (mListener != null) {
             mListener.onSurfaceTextureUpdated(mSurface);
@@ -534,7 +546,8 @@ public class TextureView extends View {
      */
     public Bitmap getBitmap(int width, int height) {
         if (isAvailable() && width > 0 && height > 0) {
-            return getBitmap(Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888));
+            return getBitmap(Bitmap.createBitmap(getResources().getDisplayMetrics(),
+                    width, height, Bitmap.Config.ARGB_8888));
         }
         return null;
     }
@@ -564,14 +577,6 @@ public class TextureView extends View {
      */
     public Bitmap getBitmap(Bitmap bitmap) {
         if (bitmap != null && isAvailable()) {
-            AttachInfo info = mAttachInfo;
-            if (info != null && info.mHardwareRenderer != null &&
-                    info.mHardwareRenderer.isEnabled()) {
-                if (!info.mHardwareRenderer.validate()) {
-                    throw new IllegalStateException("Could not acquire hardware rendering context");
-                }
-            }
-
             applyUpdate();
             applyTransformMatrix();
 
@@ -631,13 +636,19 @@ public class TextureView extends View {
      * rectangle. Every pixel within that rectangle must be written; however
      * pixels outside the dirty rectangle will be preserved by the next call
      * to lockCanvas().
+     *
+     * This method can return null if the underlying surface texture is not
+     * available (see {@link #isAvailable()} or if the surface texture is
+     * already connected to an image producer (for instance: the camera,
+     * OpenGL, a media player, etc.)
      * 
      * @param dirty Area of the surface that will be modified.
 
      * @return A Canvas used to draw into the surface.
      * 
      * @see #lockCanvas() 
-     * @see #unlockCanvasAndPost(android.graphics.Canvas) 
+     * @see #unlockCanvasAndPost(android.graphics.Canvas)
+     * @see #isAvailable()
      */
     public Canvas lockCanvas(Rect dirty) {
         if (!isAvailable()) return null;
@@ -647,7 +658,9 @@ public class TextureView extends View {
         }
 
         synchronized (mNativeWindowLock) {
-            nLockCanvas(mNativeWindow, mCanvas, dirty);
+            if (!nLockCanvas(mNativeWindow, mCanvas, dirty)) {
+                return null;
+            }
         }
         mSaveCount = mCanvas.save();
 
@@ -736,6 +749,15 @@ public class TextureView extends View {
         mListener = listener;
     }
 
+    private final SurfaceTexture.OnFrameAvailableListener mUpdateListener =
+            new SurfaceTexture.OnFrameAvailableListener() {
+        @Override
+        public void onFrameAvailable(SurfaceTexture surfaceTexture) {
+            updateLayer();
+            invalidate();
+        }
+    };
+
     /**
      * This listener can be used to be notified when the surface texture
      * associated with this texture view is available.
@@ -765,6 +787,7 @@ public class TextureView extends View {
          * Invoked when the specified {@link SurfaceTexture} is about to be destroyed.
          * If returns true, no rendering should happen inside the surface texture after this method
          * is invoked. If returns false, the client needs to call {@link SurfaceTexture#release()}.
+         * Most applications should return true.
          * 
          * @param surface The surface about to be destroyed
          */
@@ -782,9 +805,6 @@ public class TextureView extends View {
     private native void nCreateNativeWindow(SurfaceTexture surface);
     private native void nDestroyNativeWindow();
 
-    private static native void nSetDefaultBufferSize(SurfaceTexture surfaceTexture,
-            int width, int height);
-
-    private static native void nLockCanvas(int nativeWindow, Canvas canvas, Rect dirty);
-    private static native void nUnlockCanvasAndPost(int nativeWindow, Canvas canvas);
+    private static native boolean nLockCanvas(long nativeWindow, Canvas canvas, Rect dirty);
+    private static native void nUnlockCanvasAndPost(long nativeWindow, Canvas canvas);
 }

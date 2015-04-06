@@ -16,6 +16,9 @@
 
 #define LOG_TAG "OpenGLRenderer"
 
+#include <utils/JenkinsHash.h>
+
+#include "Caches.h"
 #include "Debug.h"
 #include "TextDropShadowCache.h"
 #include "Properties.h"
@@ -24,11 +27,76 @@ namespace android {
 namespace uirenderer {
 
 ///////////////////////////////////////////////////////////////////////////////
+// Cache support
+///////////////////////////////////////////////////////////////////////////////
+
+hash_t ShadowText::hash() const {
+    uint32_t charCount = len / sizeof(char16_t);
+    uint32_t hash = JenkinsHashMix(0, len);
+    hash = JenkinsHashMix(hash, android::hash_type(radius));
+    hash = JenkinsHashMix(hash, android::hash_type(textSize));
+    hash = JenkinsHashMix(hash, android::hash_type(typeface));
+    hash = JenkinsHashMix(hash, flags);
+    hash = JenkinsHashMix(hash, android::hash_type(italicStyle));
+    hash = JenkinsHashMix(hash, android::hash_type(scaleX));
+    if (text) {
+        hash = JenkinsHashMixShorts(
+            hash, reinterpret_cast<const uint16_t*>(text), charCount);
+    }
+    if (positions) {
+        for (uint32_t i = 0; i < charCount * 2; i++) {
+            hash = JenkinsHashMix(hash, android::hash_type(positions[i]));
+        }
+    }
+    return JenkinsHashWhiten(hash);
+}
+
+int ShadowText::compare(const ShadowText& lhs, const ShadowText& rhs) {
+    int deltaInt = int(lhs.len) - int(rhs.len);
+    if (deltaInt != 0) return deltaInt;
+
+    deltaInt = lhs.flags - rhs.flags;
+    if (deltaInt != 0) return deltaInt;
+
+    if (lhs.radius < rhs.radius) return -1;
+    if (lhs.radius > rhs.radius) return +1;
+
+    if (lhs.typeface < rhs.typeface) return -1;
+    if (lhs.typeface > rhs.typeface) return +1;
+
+    if (lhs.textSize < rhs.textSize) return -1;
+    if (lhs.textSize > rhs.textSize) return +1;
+
+    if (lhs.italicStyle < rhs.italicStyle) return -1;
+    if (lhs.italicStyle > rhs.italicStyle) return +1;
+
+    if (lhs.scaleX < rhs.scaleX) return -1;
+    if (lhs.scaleX > rhs.scaleX) return +1;
+
+    if (lhs.text != rhs.text) {
+        if (!lhs.text) return -1;
+        if (!rhs.text) return +1;
+
+        deltaInt = memcmp(lhs.text, rhs.text, lhs.len);
+        if (deltaInt != 0) return deltaInt;
+    }
+
+    if (lhs.positions != rhs.positions) {
+        if (!lhs.positions) return -1;
+        if (!rhs.positions) return +1;
+
+        return memcmp(lhs.positions, rhs.positions, lhs.len << 2);
+    }
+
+    return 0;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Constructors/destructor
 ///////////////////////////////////////////////////////////////////////////////
 
 TextDropShadowCache::TextDropShadowCache():
-        mCache(GenerationCache<ShadowText, ShadowTexture*>::kUnlimitedCapacity),
+        mCache(LruCache<ShadowText, ShadowTexture*>::kUnlimitedCapacity),
         mSize(0), mMaxSize(MB(DEFAULT_DROP_SHADOW_CACHE_SIZE)) {
     char property[PROPERTY_VALUE_MAX];
     if (property_get(PROPERTY_DROP_SHADOW_CACHE_SIZE, property, NULL) > 0) {
@@ -43,7 +111,7 @@ TextDropShadowCache::TextDropShadowCache():
 }
 
 TextDropShadowCache::TextDropShadowCache(uint32_t maxByteSize):
-        mCache(GenerationCache<ShadowText, ShadowTexture*>::kUnlimitedCapacity),
+        mCache(LruCache<ShadowText, ShadowTexture*>::kUnlimitedCapacity),
         mSize(0), mMaxSize(maxByteSize) {
     init();
 }
@@ -80,7 +148,7 @@ void TextDropShadowCache::setMaxSize(uint32_t maxSize) {
 // Callbacks
 ///////////////////////////////////////////////////////////////////////////////
 
-void TextDropShadowCache::operator()(ShadowText& text, ShadowTexture*& texture) {
+void TextDropShadowCache::operator()(ShadowText&, ShadowTexture*& texture) {
     if (texture) {
         mSize -= texture->bitmapSize;
 
@@ -88,7 +156,7 @@ void TextDropShadowCache::operator()(ShadowText& text, ShadowTexture*& texture) 
             ALOGD("Shadow texture deleted, size = %d", texture->bitmapSize);
         }
 
-        glDeleteTextures(1, &texture->id);
+        texture->deleteTexture();
         delete texture;
     }
 }
@@ -101,16 +169,24 @@ void TextDropShadowCache::clear() {
     mCache.clear();
 }
 
-ShadowTexture* TextDropShadowCache::get(SkPaint* paint, const char* text, uint32_t len,
-        int numGlyphs, uint32_t radius) {
-    ShadowText entry(paint, radius, len, text);
+ShadowTexture* TextDropShadowCache::get(const SkPaint* paint, const char* text, uint32_t len,
+        int numGlyphs, float radius, const float* positions) {
+    ShadowText entry(paint, radius, len, text, positions);
     ShadowTexture* texture = mCache.get(entry);
 
     if (!texture) {
-        FontRenderer::DropShadow shadow = mRenderer->renderDropShadow(paint, text, 0,
-                len, numGlyphs, radius);
+        SkPaint paintCopy(*paint);
+        paintCopy.setTextAlign(SkPaint::kLeft_Align);
+        FontRenderer::DropShadow shadow = mRenderer->renderDropShadow(&paintCopy, text, 0,
+                len, numGlyphs, radius, positions);
 
-        texture = new ShadowTexture;
+        if (!shadow.image) {
+            return NULL;
+        }
+
+        Caches& caches = Caches::getInstance();
+
+        texture = new ShadowTexture(caches);
         texture->left = shadow.penX;
         texture->top = shadow.penY;
         texture->width = shadow.width;
@@ -130,7 +206,7 @@ ShadowTexture* TextDropShadowCache::get(SkPaint* paint, const char* text, uint32
 
         glGenTextures(1, &texture->id);
 
-        glBindTexture(GL_TEXTURE_2D, texture->id);
+        caches.bindTexture(texture->id);
         // Textures are Alpha8
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
@@ -154,7 +230,7 @@ ShadowTexture* TextDropShadowCache::get(SkPaint* paint, const char* text, uint32
         }
 
         // Cleanup shadow
-        delete[] shadow.image;
+        free(shadow.image);
     }
 
     return texture;

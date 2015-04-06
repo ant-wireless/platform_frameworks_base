@@ -21,11 +21,17 @@ import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.media.MediaHTTPService;
 import android.net.Uri;
+import android.os.IBinder;
+
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * MediaExtractor facilitates extraction of demuxed, typically encoded,  media data
@@ -44,7 +50,7 @@ import java.util.Map;
  * }
  * ByteBuffer inputBuffer = ByteBuffer.allocate(...)
  * while (extractor.readSampleData(inputBuffer, ...) &gt;= 0) {
- *   int trackIndex = extractor.getTrackIndex();
+ *   int trackIndex = extractor.getSampleTrackIndex();
  *   long presentationTimeUs = extractor.getSampleTime();
  *   ...
  *   extractor.advance();
@@ -58,6 +64,12 @@ final public class MediaExtractor {
     public MediaExtractor() {
         native_setup();
     }
+
+    /**
+     * Sets the DataSource object to be used as the data source for this extractor
+     * {@hide}
+     */
+    public native final void setDataSource(DataSource source) throws IOException;
 
     /**
      * Sets the data source as a content Uri.
@@ -111,7 +123,8 @@ final public class MediaExtractor {
      * @param path the path of the file, or the http URL
      * @param headers the headers associated with the http request for the stream you want to play
      */
-    public final void setDataSource(String path, Map<String, String> headers) {
+    public final void setDataSource(String path, Map<String, String> headers)
+        throws IOException {
         String[] keys = null;
         String[] values = null;
 
@@ -126,11 +139,19 @@ final public class MediaExtractor {
                 ++i;
             }
         }
-        setDataSource(path, keys, values);
+
+        nativeSetDataSource(
+                MediaHTTPService.createHttpServiceBinderIfNecessary(path),
+                path,
+                keys,
+                values);
     }
 
-    private native final void setDataSource(
-            String path, String[] keys, String[] values);
+    private native final void nativeSetDataSource(
+            IBinder httpServiceBinder,
+            String path,
+            String[] keys,
+            String[] values) throws IOException;
 
     /**
      * Sets the data source (file-path or http URL) to use.
@@ -144,8 +165,12 @@ final public class MediaExtractor {
      * As an alternative, the application could first open the file for reading,
      * and then use the file descriptor form {@link #setDataSource(FileDescriptor)}.
      */
-    public final void setDataSource(String path) {
-        setDataSource(path, null, null);
+    public final void setDataSource(String path) throws IOException {
+        nativeSetDataSource(
+                MediaHTTPService.createHttpServiceBinderIfNecessary(path),
+                path,
+                null,
+                null);
     }
 
     /**
@@ -154,7 +179,7 @@ final public class MediaExtractor {
      *
      * @param fd the FileDescriptor for the file you want to extract from.
      */
-    public final void setDataSource(FileDescriptor fd) {
+    public final void setDataSource(FileDescriptor fd) throws IOException {
         setDataSource(fd, 0, 0x7ffffffffffffffL);
     }
 
@@ -168,7 +193,7 @@ final public class MediaExtractor {
      * @param length the length in bytes of the data to be extracted
      */
     public native final void setDataSource(
-            FileDescriptor fd, long offset, long length);
+            FileDescriptor fd, long offset, long length) throws IOException;
 
     @Override
     protected void finalize() {
@@ -186,6 +211,38 @@ final public class MediaExtractor {
      * Count the number of tracks found in the data source.
      */
     public native final int getTrackCount();
+
+    /**
+     * Get the PSSH info if present.
+     * @return a map of uuid-to-bytes, with the uuid specifying
+     * the crypto scheme, and the bytes being the data specific to that scheme.
+     */
+    public Map<UUID, byte[]> getPsshInfo() {
+        Map<UUID, byte[]> psshMap = null;
+        Map<String, Object> formatMap = getFileFormatNative();
+        if (formatMap != null && formatMap.containsKey("pssh")) {
+            ByteBuffer rawpssh = (ByteBuffer) formatMap.get("pssh");
+            rawpssh.order(ByteOrder.nativeOrder());
+            rawpssh.rewind();
+            formatMap.remove("pssh");
+            // parse the flat pssh bytebuffer into something more manageable
+            psshMap = new HashMap<UUID, byte[]>();
+            while (rawpssh.remaining() > 0) {
+                rawpssh.order(ByteOrder.BIG_ENDIAN);
+                long msb = rawpssh.getLong();
+                long lsb = rawpssh.getLong();
+                UUID uuid = new UUID(msb, lsb);
+                rawpssh.order(ByteOrder.nativeOrder());
+                int datalen = rawpssh.getInt();
+                byte [] psshdata = new byte[datalen];
+                rawpssh.get(psshdata);
+                psshMap.put(uuid, psshdata);
+            }
+        }
+        return psshMap;
+    }
+
+    private native Map<String, Object> getFileFormatNative();
 
     /**
      * Get the track format at the specified index.
@@ -240,8 +297,12 @@ final public class MediaExtractor {
 
     /**
      * Retrieve the current encoded sample and store it in the byte buffer
-     * starting at the given offset. Returns the sample size (or -1 if
-     * no more samples are available).
+     * starting at the given offset.
+     * <p>
+     * <b>Note:</b>As of API 21, on success the position and limit of
+     * {@code byteBuf} is updated to point to the data just read.
+     * @param byteBuf the destination byte buffer
+     * @return the sample size (or -1 if no more samples are available).
      */
     public native int readSampleData(ByteBuffer byteBuf, int offset);
 
@@ -259,7 +320,10 @@ final public class MediaExtractor {
 
     // Keep these in sync with their equivalents in NuMediaExtractor.h
     /**
-     * The sample is a sync sample
+     * The sample is a sync sample (or in {@link MediaCodec}'s terminology
+     * it is a key frame.)
+     *
+     * @see MediaCodec#BUFFER_FLAG_KEY_FRAME
      */
     public static final int SAMPLE_FLAG_SYNC      = 1;
 
@@ -309,5 +373,5 @@ final public class MediaExtractor {
         native_init();
     }
 
-    private int mNativeContext;
+    private long mNativeContext;
 }

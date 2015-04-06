@@ -16,18 +16,20 @@
 
 package android.media;
 
+import android.media.AudioAttributes;
 import android.net.Uri;
+import android.os.UserHandle;
 
 /**
  * @hide
  */
 interface IRingtonePlayer {
     /** Used for Ringtone.java playback */
-    void play(IBinder token, in Uri uri, int streamType);
+    void play(IBinder token, in Uri uri, in AudioAttributes aa);
     void stop(IBinder token);
     boolean isPlaying(IBinder token);
 
     /** Used for Notification sound playback. */
-    void playAsync(in Uri uri, boolean looping, int streamType);
+    void playAsync(in Uri uri, in UserHandle user, boolean looping, in AudioAttributes aa);
     void stopAsync();
 }

@@ -17,40 +17,49 @@
 package android.app;
 
 import com.android.internal.R;
-import com.android.internal.app.MediaRouteChooserDialogFragment;
+import com.android.internal.app.MediaRouteDialogPresenter;
 
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.media.MediaRouter;
 import android.media.MediaRouter.RouteGroup;
 import android.media.MediaRouter.RouteInfo;
+import android.text.TextUtils;
 import android.util.AttributeSet;
-import android.util.Log;
+import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.SoundEffectConstants;
 import android.view.View;
+import android.widget.Toast;
 
 public class MediaRouteButton extends View {
-    private static final String TAG = "MediaRouteButton";
+    private final MediaRouter mRouter;
+    private final MediaRouterCallback mCallback;
 
-    private MediaRouter mRouter;
-    private final MediaRouteCallback mRouterCallback = new MediaRouteCallback();
     private int mRouteTypes;
 
     private boolean mAttachedToWindow;
 
     private Drawable mRemoteIndicator;
     private boolean mRemoteActive;
-    private boolean mToggleMode;
+    private boolean mCheatSheetEnabled;
+    private boolean mIsConnecting;
 
     private int mMinWidth;
     private int mMinHeight;
 
     private OnClickListener mExtendedSettingsClickListener;
-    private MediaRouteChooserDialogFragment mDialogFragment;
 
+    // The checked state is used when connected to a remote route.
+    private static final int[] CHECKED_STATE_SET = {
+        R.attr.state_checked
+    };
+
+    // The activated state is used while connecting to a remote route.
     private static final int[] ACTIVATED_STATE_SET = {
         R.attr.state_activated
     };
@@ -64,12 +73,18 @@ public class MediaRouteButton extends View {
     }
 
     public MediaRouteButton(Context context, AttributeSet attrs, int defStyleAttr) {
-        super(context, attrs, defStyleAttr);
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public MediaRouteButton(
+            Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
 
         mRouter = (MediaRouter)context.getSystemService(Context.MEDIA_ROUTER_SERVICE);
+        mCallback = new MediaRouterCallback();
 
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.MediaRouteButton, defStyleAttr, 0);
+        final TypedArray a = context.obtainStyledAttributes(attrs,
+                com.android.internal.R.styleable.MediaRouteButton, defStyleAttr, defStyleRes);
         setRemoteIndicatorDrawable(a.getDrawable(
                 com.android.internal.R.styleable.MediaRouteButton_externalRouteEnabledDrawable));
         mMinWidth = a.getDimensionPixelSize(
@@ -82,8 +97,170 @@ public class MediaRouteButton extends View {
         a.recycle();
 
         setClickable(true);
+        setLongClickable(true);
 
         setRouteTypes(routeTypes);
+    }
+
+    /**
+     * Gets the media route types for filtering the routes that the user can
+     * select using the media route chooser dialog.
+     *
+     * @return The route types.
+     */
+    public int getRouteTypes() {
+        return mRouteTypes;
+    }
+
+    /**
+     * Sets the types of routes that will be shown in the media route chooser dialog
+     * launched by this button.
+     *
+     * @param types The route types to match.
+     */
+    public void setRouteTypes(int types) {
+        if (mRouteTypes != types) {
+            if (mAttachedToWindow && mRouteTypes != 0) {
+                mRouter.removeCallback(mCallback);
+            }
+
+            mRouteTypes = types;
+
+            if (mAttachedToWindow && types != 0) {
+                mRouter.addCallback(types, mCallback,
+                        MediaRouter.CALLBACK_FLAG_PASSIVE_DISCOVERY);
+            }
+
+            refreshRoute();
+        }
+    }
+
+    public void setExtendedSettingsClickListener(OnClickListener listener) {
+        mExtendedSettingsClickListener = listener;
+    }
+
+    /**
+     * Show the route chooser or controller dialog.
+     * <p>
+     * If the default route is selected or if the currently selected route does
+     * not match the {@link #getRouteTypes route types}, then shows the route chooser dialog.
+     * Otherwise, shows the route controller dialog to offer the user
+     * a choice to disconnect from the route or perform other control actions
+     * such as setting the route's volume.
+     * </p><p>
+     * This will attach a {@link DialogFragment} to the containing Activity.
+     * </p>
+     */
+    public void showDialog() {
+        showDialogInternal();
+    }
+
+    boolean showDialogInternal() {
+        if (!mAttachedToWindow) {
+            return false;
+        }
+
+        DialogFragment f = MediaRouteDialogPresenter.showDialogFragment(getActivity(),
+                mRouteTypes, mExtendedSettingsClickListener);
+        return f != null;
+    }
+
+    private Activity getActivity() {
+        // Gross way of unwrapping the Activity so we can get the FragmentManager
+        Context context = getContext();
+        while (context instanceof ContextWrapper) {
+            if (context instanceof Activity) {
+                return (Activity)context;
+            }
+            context = ((ContextWrapper)context).getBaseContext();
+        }
+        throw new IllegalStateException("The MediaRouteButton's Context is not an Activity.");
+    }
+
+    /**
+     * Sets whether to enable showing a toast with the content descriptor of the
+     * button when the button is long pressed.
+     */
+    void setCheatSheetEnabled(boolean enable) {
+        mCheatSheetEnabled = enable;
+    }
+
+    @Override
+    public boolean performClick() {
+        // Send the appropriate accessibility events and call listeners
+        boolean handled = super.performClick();
+        if (!handled) {
+            playSoundEffect(SoundEffectConstants.CLICK);
+        }
+        return showDialogInternal() || handled;
+    }
+
+    @Override
+    public boolean performLongClick() {
+        if (super.performLongClick()) {
+            return true;
+        }
+
+        if (!mCheatSheetEnabled) {
+            return false;
+        }
+
+        final CharSequence contentDesc = getContentDescription();
+        if (TextUtils.isEmpty(contentDesc)) {
+            // Don't show the cheat sheet if we have no description
+            return false;
+        }
+
+        final int[] screenPos = new int[2];
+        final Rect displayFrame = new Rect();
+        getLocationOnScreen(screenPos);
+        getWindowVisibleDisplayFrame(displayFrame);
+
+        final Context context = getContext();
+        final int width = getWidth();
+        final int height = getHeight();
+        final int midy = screenPos[1] + height / 2;
+        final int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
+
+        Toast cheatSheet = Toast.makeText(context, contentDesc, Toast.LENGTH_SHORT);
+        if (midy < displayFrame.height()) {
+            // Show along the top; follow action buttons
+            cheatSheet.setGravity(Gravity.TOP | Gravity.END,
+                    screenWidth - screenPos[0] - width / 2, height);
+        } else {
+            // Show along the bottom center
+            cheatSheet.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, height);
+        }
+        cheatSheet.show();
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        return true;
+    }
+
+    @Override
+    protected int[] onCreateDrawableState(int extraSpace) {
+        final int[] drawableState = super.onCreateDrawableState(extraSpace + 1);
+
+        // Technically we should be handling this more completely, but these
+        // are implementation details here. Checked is used to express the connecting
+        // drawable state and it's mutually exclusive with activated for the purposes
+        // of state selection here.
+        if (mIsConnecting) {
+            mergeDrawableStates(drawableState, CHECKED_STATE_SET);
+        } else if (mRemoteActive) {
+            mergeDrawableStates(drawableState, ACTIVATED_STATE_SET);
+        }
+        return drawableState;
+    }
+
+    @Override
+    protected void drawableStateChanged() {
+        super.drawableStateChanged();
+
+        if (mRemoteIndicator != null) {
+            int[] myDrawableState = getDrawableState();
+            mRemoteIndicator.setState(myDrawableState);
+            invalidate();
+        }
     }
 
     private void setRemoteIndicatorDrawable(Drawable d) {
@@ -102,110 +279,6 @@ public class MediaRouteButton extends View {
     }
 
     @Override
-    public boolean performClick() {
-        // Send the appropriate accessibility events and call listeners
-        boolean handled = super.performClick();
-        if (!handled) {
-            playSoundEffect(SoundEffectConstants.CLICK);
-        }
-
-        if (mToggleMode) {
-            if (mRemoteActive) {
-                mRouter.selectRouteInt(mRouteTypes, mRouter.getSystemAudioRoute());
-            } else {
-                final int N = mRouter.getRouteCount();
-                for (int i = 0; i < N; i++) {
-                    final RouteInfo route = mRouter.getRouteAt(i);
-                    if ((route.getSupportedTypes() & mRouteTypes) != 0 &&
-                            route != mRouter.getSystemAudioRoute()) {
-                        mRouter.selectRouteInt(mRouteTypes, route);
-                    }
-                }
-            }
-        } else {
-            showDialog();
-        }
-
-        return handled;
-    }
-
-    public void setRouteTypes(int types) {
-        if (types == mRouteTypes) {
-            // Already registered; nothing to do.
-            return;
-        }
-
-        if (mAttachedToWindow && mRouteTypes != 0) {
-            mRouter.removeCallback(mRouterCallback);
-        }
-
-        mRouteTypes = types;
-
-        if (mAttachedToWindow) {
-            updateRouteInfo();
-            mRouter.addCallback(types, mRouterCallback);
-        }
-    }
-
-    private void updateRouteInfo() {
-        updateRemoteIndicator();
-        updateRouteCount();
-    }
-
-    public int getRouteTypes() {
-        return mRouteTypes;
-    }
-
-    void updateRemoteIndicator() {
-        final boolean isRemote =
-                mRouter.getSelectedRoute(mRouteTypes) != mRouter.getSystemAudioRoute();
-        if (mRemoteActive != isRemote) {
-            mRemoteActive = isRemote;
-            refreshDrawableState();
-        }
-    }
-
-    void updateRouteCount() {
-        final int N = mRouter.getRouteCount();
-        int count = 0;
-        for (int i = 0; i < N; i++) {
-            final RouteInfo route = mRouter.getRouteAt(i);
-            if ((route.getSupportedTypes() & mRouteTypes) != 0) {
-                if (route instanceof RouteGroup) {
-                    count += ((RouteGroup) route).getRouteCount();
-                } else {
-                    count++;
-                }
-            }
-        }
-
-        setEnabled(count != 0);
-
-        // Only allow toggling if we have more than just user routes
-        mToggleMode = count == 2 && (mRouteTypes & MediaRouter.ROUTE_TYPE_LIVE_AUDIO) != 0;
-    }
-
-    @Override
-    protected int[] onCreateDrawableState(int extraSpace) {
-        final int[] drawableState = super.onCreateDrawableState(extraSpace + 1);
-        if (mRemoteActive) {
-            mergeDrawableStates(drawableState, ACTIVATED_STATE_SET);
-        }
-        return drawableState;
-    }
-
-    @Override
-    protected void drawableStateChanged() {
-        super.drawableStateChanged();
-
-        if (mRemoteIndicator != null) {
-            int[] myDrawableState = getDrawableState();
-            mRemoteIndicator.setState(myDrawableState);
-            invalidate();
-        }
-    }
-
-    @Override
     protected boolean verifyDrawable(Drawable who) {
         return super.verifyDrawable(who) || who == mRemoteIndicator;
     }
@@ -213,12 +286,16 @@ public class MediaRouteButton extends View {
     @Override
     public void jumpDrawablesToCurrentState() {
         super.jumpDrawablesToCurrentState();
-        if (mRemoteIndicator != null) mRemoteIndicator.jumpToCurrentState();
+
+        if (mRemoteIndicator != null) {
+            mRemoteIndicator.jumpToCurrentState();
+        }
     }
 
     @Override
     public void setVisibility(int visibility) {
         super.setVisibility(visibility);
+
         if (mRemoteIndicator != null) {
             mRemoteIndicator.setVisible(getVisibility() == VISIBLE, false);
         }
@@ -227,19 +304,22 @@ public class MediaRouteButton extends View {
     @Override
     public void onAttachedToWindow() {
         super.onAttachedToWindow();
+
         mAttachedToWindow = true;
         if (mRouteTypes != 0) {
-            mRouter.addCallback(mRouteTypes, mRouterCallback);
-            updateRouteInfo();
+            mRouter.addCallback(mRouteTypes, mCallback,
+                    MediaRouter.CALLBACK_FLAG_PASSIVE_DISCOVERY);
         }
+        refreshRoute();
     }
 
     @Override
     public void onDetachedFromWindow() {
-        if (mRouteTypes != 0) {
-            mRouter.removeCallback(mRouterCallback);
-        }
         mAttachedToWindow = false;
+        if (mRouteTypes != 0) {
+            mRouter.removeCallback(mCallback);
+        }
+
         super.onDetachedFromWindow();
     }
 
@@ -302,88 +382,71 @@ public class MediaRouteButton extends View {
         final int drawLeft = left + (right - left - drawWidth) / 2;
         final int drawTop = top + (bottom - top - drawHeight) / 2;
 
-        mRemoteIndicator.setBounds(drawLeft, drawTop, drawLeft + drawWidth, drawTop + drawHeight);
+        mRemoteIndicator.setBounds(drawLeft, drawTop,
+                drawLeft + drawWidth, drawTop + drawHeight);
         mRemoteIndicator.draw(canvas);
     }
 
-    public void setExtendedSettingsClickListener(OnClickListener listener) {
-        mExtendedSettingsClickListener = listener;
-        if (mDialogFragment != null) {
-            mDialogFragment.setExtendedSettingsClickListener(listener);
-        }
-    }
+    private void refreshRoute() {
+        if (mAttachedToWindow) {
+            final MediaRouter.RouteInfo route = mRouter.getSelectedRoute();
+            final boolean isRemote = !route.isDefault() && route.matchesTypes(mRouteTypes);
+            final boolean isConnecting = isRemote && route.isConnecting();
 
-    /**
-     * Asynchronously show the route chooser dialog.
-     * This will attach a {@link DialogFragment} to the containing Activity.
-     */
-    public void showDialog() {
-        final FragmentManager fm = getActivity().getFragmentManager();
-        if (mDialogFragment == null) {
-            // See if one is already attached to this activity.
-            mDialogFragment = (MediaRouteChooserDialogFragment) fm.findFragmentByTag(
-                    MediaRouteChooserDialogFragment.FRAGMENT_TAG);
-        }
-        if (mDialogFragment != null) {
-            Log.w(TAG, "showDialog(): Already showing!");
-            return;
-        }
-
-        mDialogFragment = new MediaRouteChooserDialogFragment();
-        mDialogFragment.setExtendedSettingsClickListener(mExtendedSettingsClickListener);
-        mDialogFragment.setLauncherListener(new MediaRouteChooserDialogFragment.LauncherListener() {
-            @Override
-            public void onDetached(MediaRouteChooserDialogFragment detachedFragment) {
-                mDialogFragment = null;
+            boolean needsRefresh = false;
+            if (mRemoteActive != isRemote) {
+                mRemoteActive = isRemote;
+                needsRefresh = true;
             }
-        });
-        mDialogFragment.setRouteTypes(mRouteTypes);
-        mDialogFragment.show(fm, MediaRouteChooserDialogFragment.FRAGMENT_TAG);
+            if (mIsConnecting != isConnecting) {
+                mIsConnecting = isConnecting;
+                needsRefresh = true;
+            }
+
+            if (needsRefresh) {
+                refreshDrawableState();
+            }
+
+            setEnabled(mRouter.isRouteAvailable(mRouteTypes,
+                    MediaRouter.AVAILABILITY_FLAG_IGNORE_DEFAULT_ROUTE));
+        }
     }
 
-    private Activity getActivity() {
-        // Gross way of unwrapping the Activity so we can get the FragmentManager
-        Context context = getContext();
-        while (context instanceof ContextWrapper && !(context instanceof Activity)) {
-            context = ((ContextWrapper) context).getBaseContext();
-        }
-        if (!(context instanceof Activity)) {
-            throw new IllegalStateException("The MediaRouteButton's Context is not an Activity.");
-        }
-
-        return (Activity) context;
-    }
-
-    private class MediaRouteCallback extends MediaRouter.SimpleCallback {
-        @Override
-        public void onRouteSelected(MediaRouter router, int type, RouteInfo info) {
-            updateRemoteIndicator();
-        }
-
-        @Override
-        public void onRouteUnselected(MediaRouter router, int type, RouteInfo info) {
-            updateRemoteIndicator();
-        }
-
+    private final class MediaRouterCallback extends MediaRouter.SimpleCallback {
         @Override
         public void onRouteAdded(MediaRouter router, RouteInfo info) {
-            updateRouteCount();
+            refreshRoute();
         }
 
         @Override
         public void onRouteRemoved(MediaRouter router, RouteInfo info) {
-            updateRouteCount();
+            refreshRoute();
+        }
+
+        @Override
+        public void onRouteChanged(MediaRouter router, RouteInfo info) {
+            refreshRoute();
+        }
+
+        @Override
+        public void onRouteSelected(MediaRouter router, int type, RouteInfo info) {
+            refreshRoute();
+        }
+
+        @Override
+        public void onRouteUnselected(MediaRouter router, int type, RouteInfo info) {
+            refreshRoute();
         }
 
         @Override
         public void onRouteGrouped(MediaRouter router, RouteInfo info, RouteGroup group,
                 int index) {
-            updateRouteCount();
+            refreshRoute();
         }
 
         @Override
         public void onRouteUngrouped(MediaRouter router, RouteInfo info, RouteGroup group) {
-            updateRouteCount();
+            refreshRoute();
         }
     }
 }

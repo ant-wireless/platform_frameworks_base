@@ -38,9 +38,22 @@ import java.util.Locale;
  * the specified subtype of the designated IME directly.
  *
  * <p>It should be defined in an XML resource file of the input method with the
- * <code>&lt;subtype&gt;</code> element. For more information, see the guide to
- * <a href="{@docRoot}resources/articles/creating-input-method.html">
+ * <code>&lt;subtype&gt;</code> element, which resides within an {@code &lt;input-method>} element.
+ * For more information, see the guide to
+ * <a href="{@docRoot}guide/topics/text/creating-input-method.html">
  * Creating an Input Method</a>.</p>
+ *
+ * @see InputMethodInfo
+ *
+ * @attr ref android.R.styleable#InputMethod_Subtype_label
+ * @attr ref android.R.styleable#InputMethod_Subtype_icon
+ * @attr ref android.R.styleable#InputMethod_Subtype_imeSubtypeLocale
+ * @attr ref android.R.styleable#InputMethod_Subtype_imeSubtypeMode
+ * @attr ref android.R.styleable#InputMethod_Subtype_imeSubtypeExtraValue
+ * @attr ref android.R.styleable#InputMethod_Subtype_isAuxiliary
+ * @attr ref android.R.styleable#InputMethod_Subtype_overridesImplicitlyEnabledSubtype
+ * @attr ref android.R.styleable#InputMethod_Subtype_subtypeId
+ * @attr ref android.R.styleable#InputMethod_Subtype_isAsciiCapable
  */
 public final class InputMethodSubtype implements Parcelable {
     private static final String TAG = InputMethodSubtype.class.getSimpleName();
@@ -52,42 +65,168 @@ public final class InputMethodSubtype implements Parcelable {
 
     private final boolean mIsAuxiliary;
     private final boolean mOverridesImplicitlyEnabledSubtype;
+    private final boolean mIsAsciiCapable;
     private final int mSubtypeHashCode;
     private final int mSubtypeIconResId;
     private final int mSubtypeNameResId;
+    private final int mSubtypeId;
     private final String mSubtypeLocale;
     private final String mSubtypeMode;
     private final String mSubtypeExtraValue;
     private volatile HashMap<String, String> mExtraValueHashMapCache;
 
     /**
-     * Constructor.
-     * @param nameId Resource ID of the subtype name string. The string resource may have exactly
-     * one %s in it. If there is, the %s part will be replaced with the locale's display name by
-     * the formatter. Please refer to {@link #getDisplayName} for details.
-     * @param iconId Resource ID of the subtype icon drawable.
-     * @param locale The locale supported by the subtype
-     * @param mode The mode supported by the subtype
-     * @param extraValue The extra value of the subtype. This string is free-form, but the API
-     * supplies tools to deal with a key-value comma-separated list; see
-     * {@link #containsExtraValueKey} and {@link #getExtraValueOf}.
-     * @param isAuxiliary true when this subtype is auxiliary, false otherwise. An auxiliary
-     * subtype will not be shown in the list of enabled IMEs for choosing the current IME in
-     * the Settings even when this subtype is enabled. Please note that this subtype will still
-     * be shown in the list of IMEs in the IME switcher to allow the user to tentatively switch
-     * to this subtype while an IME is shown. The framework will never switch the current IME to
-     * this subtype by {@link android.view.inputmethod.InputMethodManager#switchToLastInputMethod}.
-     * The intent of having this flag is to allow for IMEs that are invoked in a one-shot way as
-     * auxiliary input mode, and return to the previous IME once it is finished (e.g. voice input).
-     * @hide
+     * InputMethodSubtypeBuilder is a builder class of InputMethodSubtype.
+     * This class is designed to be used with
+     * {@link android.view.inputmethod.InputMethodManager#setAdditionalInputMethodSubtypes}.
+     * The developer needs to be aware of what each parameter means.
+     */
+    public static class InputMethodSubtypeBuilder {
+        /**
+         * @param isAuxiliary should true when this subtype is auxiliary, false otherwise.
+         * An auxiliary subtype has the following differences with a regular subtype:
+         * - An auxiliary subtype cannot be chosen as the default IME in Settings.
+         * - The framework will never switch to this subtype through
+         *   {@link android.view.inputmethod.InputMethodManager#switchToLastInputMethod}.
+         * Note that the subtype will still be available in the IME switcher.
+         * The intent is to allow for IMEs to specify they are meant to be invoked temporarily
+         * in a one-shot way, and to return to the previous IME once finished (e.g. voice input).
+         */
+        public InputMethodSubtypeBuilder setIsAuxiliary(boolean isAuxiliary) {
+            mIsAuxiliary = isAuxiliary;
+            return this;
+        }
+        private boolean mIsAuxiliary = false;
+
+        /**
+         * @param overridesImplicitlyEnabledSubtype should be true if this subtype should be
+         * enabled by default if no other subtypes in the IME are enabled explicitly. Note that a
+         * subtype with this parameter set will not be shown in the list of subtypes in each IME's
+         * subtype enabler. A canonical use of this would be for an IME to supply an "automatic"
+         * subtype that adapts to the current system language.
+         */
+        public InputMethodSubtypeBuilder setOverridesImplicitlyEnabledSubtype(
+                boolean overridesImplicitlyEnabledSubtype) {
+            mOverridesImplicitlyEnabledSubtype = overridesImplicitlyEnabledSubtype;
+            return this;
+        }
+        private boolean mOverridesImplicitlyEnabledSubtype = false;
+
+        /**
+         * @param isAsciiCapable should be true if this subtype is ASCII capable. If the subtype
+         * is ASCII capable, it should guarantee that the user can input ASCII characters with
+         * this subtype. This is important because many password fields only allow
+         * ASCII-characters.
+         */
+        public InputMethodSubtypeBuilder setIsAsciiCapable(boolean isAsciiCapable) {
+            mIsAsciiCapable = isAsciiCapable;
+            return this;
+        }
+        private boolean mIsAsciiCapable = false;
+
+        /**
+         * @param subtypeIconResId is a resource ID of the subtype icon drawable.
+         */
+        public InputMethodSubtypeBuilder setSubtypeIconResId(int subtypeIconResId) {
+            mSubtypeIconResId = subtypeIconResId;
+            return this;
+        }
+        private int mSubtypeIconResId = 0;
+
+        /**
+         * @param subtypeNameResId is the resource ID of the subtype name string.
+         * The string resource may have exactly one %s in it. If present,
+         * the %s part will be replaced with the locale's display name by
+         * the formatter. Please refer to {@link #getDisplayName} for details.
+         */
+        public InputMethodSubtypeBuilder setSubtypeNameResId(int subtypeNameResId) {
+            mSubtypeNameResId = subtypeNameResId;
+            return this;
+        }
+        private int mSubtypeNameResId = 0;
+
+        /**
+         * @param subtypeId is the unique ID for this subtype. The input method framework keeps
+         * track of enabled subtypes by ID. When the IME package gets upgraded, enabled IDs will
+         * stay enabled even if other attributes are different. If the ID is unspecified or 0,
+         * Arrays.hashCode(new Object[] {locale, mode, extraValue,
+         * isAuxiliary, overridesImplicitlyEnabledSubtype}) will be used instead.
+         */
+        public InputMethodSubtypeBuilder setSubtypeId(int subtypeId) {
+            mSubtypeId = subtypeId;
+            return this;
+        }
+        private int mSubtypeId = 0;
+
+        /**
+         * @param subtypeLocale is the locale supported by this subtype.
+         */
+        public InputMethodSubtypeBuilder setSubtypeLocale(String subtypeLocale) {
+            mSubtypeLocale = subtypeLocale == null ? "" : subtypeLocale;
+            return this;
+        }
+        private String mSubtypeLocale = "";
+
+        /**
+         * @param subtypeMode is the mode supported by this subtype.
+         */
+        public InputMethodSubtypeBuilder setSubtypeMode(String subtypeMode) {
+            mSubtypeMode = subtypeMode == null ? "" : subtypeMode;
+            return this;
+        }
+        private String mSubtypeMode = "";
+        /**
+         * @param subtypeExtraValue is the extra value of the subtype. This string is free-form,
+         * but the API supplies tools to deal with a key-value comma-separated list; see
+         * {@link #containsExtraValueKey} and {@link #getExtraValueOf}.
+         */
+        public InputMethodSubtypeBuilder setSubtypeExtraValue(String subtypeExtraValue) {
+            mSubtypeExtraValue = subtypeExtraValue == null ? "" : subtypeExtraValue;
+            return this;
+        }
+        private String mSubtypeExtraValue = "";
+
+        /**
+         * @return InputMethodSubtype using parameters in this InputMethodSubtypeBuilder.
+         */
+        public InputMethodSubtype build() {
+            return new InputMethodSubtype(this);
+        }
+     }
+
+     private static InputMethodSubtypeBuilder getBuilder(int nameId, int iconId, String locale,
+             String mode, String extraValue, boolean isAuxiliary,
+             boolean overridesImplicitlyEnabledSubtype, int id, boolean isAsciiCapable) {
+         final InputMethodSubtypeBuilder builder = new InputMethodSubtypeBuilder();
+         builder.mSubtypeNameResId = nameId;
+         builder.mSubtypeIconResId = iconId;
+         builder.mSubtypeLocale = locale;
+         builder.mSubtypeMode = mode;
+         builder.mSubtypeExtraValue = extraValue;
+         builder.mIsAuxiliary = isAuxiliary;
+         builder.mOverridesImplicitlyEnabledSubtype = overridesImplicitlyEnabledSubtype;
+         builder.mSubtypeId = id;
+         builder.mIsAsciiCapable = isAsciiCapable;
+         return builder;
+     }
+
+    /**
+     * Constructor with no subtype ID specified.
+     * @deprecated use {@link InputMethodSubtypeBuilder} instead.
+     * Arguments for this constructor have the same meanings as
+     * {@link InputMethodSubtype#InputMethodSubtype(int, int, String, String, String, boolean,
+     * boolean, int)} except "id".
      */
     public InputMethodSubtype(int nameId, int iconId, String locale, String mode, String extraValue,
-            boolean isAuxiliary) {
-        this(nameId, iconId, locale, mode, extraValue, isAuxiliary, false);
+            boolean isAuxiliary, boolean overridesImplicitlyEnabledSubtype) {
+        this(nameId, iconId, locale, mode, extraValue, isAuxiliary,
+                overridesImplicitlyEnabledSubtype, 0);
     }
 
     /**
      * Constructor.
+     * @deprecated use {@link InputMethodSubtypeBuilder} instead.
+     * "isAsciiCapable" is "false" in this constructor.
      * @param nameId Resource ID of the subtype name string. The string resource may have exactly
      * one %s in it. If there is, the %s part will be replaced with the locale's display name by
      * the formatter. Please refer to {@link #getDisplayName} for details.
@@ -109,18 +248,37 @@ public final class InputMethodSubtype implements Parcelable {
      * if no other subtypes in the IME are enabled explicitly. Note that a subtype with this
      * parameter being true will not be shown in the list of subtypes in each IME's subtype enabler.
      * Having an "automatic" subtype is an example use of this flag.
+     * @param id The unique ID for the subtype. The input method framework keeps track of enabled
+     * subtypes by ID. When the IME package gets upgraded, enabled IDs will stay enabled even if
+     * other attributes are different. If the ID is unspecified or 0,
+     * Arrays.hashCode(new Object[] {locale, mode, extraValue,
+     * isAuxiliary, overridesImplicitlyEnabledSubtype}) will be used instead.
      */
     public InputMethodSubtype(int nameId, int iconId, String locale, String mode, String extraValue,
-            boolean isAuxiliary, boolean overridesImplicitlyEnabledSubtype) {
-        mSubtypeNameResId = nameId;
-        mSubtypeIconResId = iconId;
-        mSubtypeLocale = locale != null ? locale : "";
-        mSubtypeMode = mode != null ? mode : "";
-        mSubtypeExtraValue = extraValue != null ? extraValue : "";
-        mIsAuxiliary = isAuxiliary;
-        mOverridesImplicitlyEnabledSubtype = overridesImplicitlyEnabledSubtype;
-        mSubtypeHashCode = hashCodeInternal(mSubtypeLocale, mSubtypeMode, mSubtypeExtraValue,
-                mIsAuxiliary, mOverridesImplicitlyEnabledSubtype);
+            boolean isAuxiliary, boolean overridesImplicitlyEnabledSubtype, int id) {
+        this(getBuilder(nameId, iconId, locale, mode, extraValue, isAuxiliary,
+                overridesImplicitlyEnabledSubtype, id, false));
+    }
+
+    /**
+     * Constructor.
+     * @param builder Builder for InputMethodSubtype
+     */
+    private InputMethodSubtype(InputMethodSubtypeBuilder builder) {
+        mSubtypeNameResId = builder.mSubtypeNameResId;
+        mSubtypeIconResId = builder.mSubtypeIconResId;
+        mSubtypeLocale = builder.mSubtypeLocale;
+        mSubtypeMode = builder.mSubtypeMode;
+        mSubtypeExtraValue = builder.mSubtypeExtraValue;
+        mIsAuxiliary = builder.mIsAuxiliary;
+        mOverridesImplicitlyEnabledSubtype = builder.mOverridesImplicitlyEnabledSubtype;
+        mSubtypeId = builder.mSubtypeId;
+        mIsAsciiCapable = builder.mIsAsciiCapable;
+        // If hashCode() of this subtype is 0 and you want to specify it as an id of this subtype,
+        // just specify 0 as this subtype's id. Then, this subtype's id is treated as 0.
+        mSubtypeHashCode = mSubtypeId != 0 ? mSubtypeId : hashCodeInternal(mSubtypeLocale,
+                mSubtypeMode, mSubtypeExtraValue, mIsAuxiliary, mOverridesImplicitlyEnabledSubtype,
+                mIsAsciiCapable);
     }
 
     InputMethodSubtype(Parcel source) {
@@ -135,8 +293,9 @@ public final class InputMethodSubtype implements Parcelable {
         mSubtypeExtraValue = s != null ? s : "";
         mIsAuxiliary = (source.readInt() == 1);
         mOverridesImplicitlyEnabledSubtype = (source.readInt() == 1);
-        mSubtypeHashCode = hashCodeInternal(mSubtypeLocale, mSubtypeMode, mSubtypeExtraValue,
-                mIsAuxiliary, mOverridesImplicitlyEnabledSubtype);
+        mSubtypeHashCode = source.readInt();
+        mSubtypeId = source.readInt();
+        mIsAsciiCapable = (source.readInt() == 1);
     }
 
     /**
@@ -197,6 +356,15 @@ public final class InputMethodSubtype implements Parcelable {
      */
     public boolean overridesImplicitlyEnabledSubtype() {
         return mOverridesImplicitlyEnabledSubtype;
+    }
+
+    /**
+     * @return true if this subtype is Ascii capable, false otherwise. If the subtype is ASCII
+     * capable, it should guarantee that the user can input ASCII characters with this subtype.
+     * This is important because many password fields only allow ASCII-characters.
+     */
+    public boolean isAsciiCapable() {
+        return mIsAsciiCapable;
     }
 
     /**
@@ -288,13 +456,17 @@ public final class InputMethodSubtype implements Parcelable {
     public boolean equals(Object o) {
         if (o instanceof InputMethodSubtype) {
             InputMethodSubtype subtype = (InputMethodSubtype) o;
+            if (subtype.mSubtypeId != 0 || mSubtypeId != 0) {
+                return (subtype.hashCode() == hashCode());
+            }
             return (subtype.hashCode() == hashCode())
-                && (subtype.getNameResId() == getNameResId())
-                && (subtype.getMode().equals(getMode()))
-                && (subtype.getIconResId() == getIconResId())
                 && (subtype.getLocale().equals(getLocale()))
+                && (subtype.getMode().equals(getMode()))
                 && (subtype.getExtraValue().equals(getExtraValue()))
-                && (subtype.isAuxiliary() == isAuxiliary());
+                && (subtype.isAuxiliary() == isAuxiliary())
+                && (subtype.overridesImplicitlyEnabledSubtype()
+                        == overridesImplicitlyEnabledSubtype())
+                && (subtype.isAsciiCapable() == isAsciiCapable());
         }
         return false;
     }
@@ -313,6 +485,9 @@ public final class InputMethodSubtype implements Parcelable {
         dest.writeString(mSubtypeExtraValue);
         dest.writeInt(mIsAuxiliary ? 1 : 0);
         dest.writeInt(mOverridesImplicitlyEnabledSubtype ? 1 : 0);
+        dest.writeInt(mSubtypeHashCode);
+        dest.writeInt(mSubtypeId);
+        dest.writeInt(mIsAsciiCapable ? 1 : 0);
     }
 
     public static final Parcelable.Creator<InputMethodSubtype> CREATOR
@@ -345,9 +520,17 @@ public final class InputMethodSubtype implements Parcelable {
     }
 
     private static int hashCodeInternal(String locale, String mode, String extraValue,
-            boolean isAuxiliary, boolean overridesImplicitlyEnabledSubtype) {
+            boolean isAuxiliary, boolean overridesImplicitlyEnabledSubtype,
+            boolean isAsciiCapable) {
+        // CAVEAT: Must revisit how to compute needsToCalculateCompatibleHashCode when a new
+        // attribute is added in order to avoid enabled subtypes being unexpectedly disabled.
+        final boolean needsToCalculateCompatibleHashCode = !isAsciiCapable;
+        if (needsToCalculateCompatibleHashCode) {
+            return Arrays.hashCode(new Object[] {locale, mode, extraValue, isAuxiliary,
+                    overridesImplicitlyEnabledSubtype});
+        }
         return Arrays.hashCode(new Object[] {locale, mode, extraValue, isAuxiliary,
-                overridesImplicitlyEnabledSubtype});
+                overridesImplicitlyEnabledSubtype, isAsciiCapable});
     }
 
     /**

@@ -16,6 +16,7 @@
 
 package android.text;
 
+import android.graphics.Color;
 import com.android.internal.util.ArrayUtils;
 import org.ccil.cowan.tagsoup.HTMLSchema;
 import org.ccil.cowan.tagsoup.Parser;
@@ -47,11 +48,8 @@ import android.text.style.TypefaceSpan;
 import android.text.style.URLSpan;
 import android.text.style.UnderlineSpan;
 
-import com.android.internal.util.XmlUtils;
-
 import java.io.IOException;
 import java.io.StringReader;
-import java.util.HashMap;
 
 /**
  * This class processes HTML strings into displayable styled text.
@@ -63,7 +61,7 @@ public class Html {
      */
     public static interface ImageGetter {
         /**
-         * This methos is called when the HTML parser encounters an
+         * This method is called when the HTML parser encounters an
          * &lt;img&gt; tag.  The <code>source</code> argument is the
          * string from the "src" attribute; the return value should be
          * a Drawable representation of the image or <code>null</code>
@@ -168,7 +166,7 @@ public class Html {
 
             for(int j = 0; j < style.length; j++) {
                 if (style[j] instanceof AlignmentSpan) {
-                    Layout.Alignment align = 
+                    Layout.Alignment align =
                         ((AlignmentSpan) style[j]).getAlignment();
                     needDiv = true;
                     if (align == Layout.Alignment.ALIGN_CENTER) {
@@ -181,7 +179,7 @@ public class Html {
                 }
             }
             if (needDiv) {
-                out.append("<div " + elements + ">");
+                out.append("<div ").append(elements).append(">");
             }
 
             withinDiv(out, text, i, next);
@@ -199,13 +197,13 @@ public class Html {
             next = text.nextSpanTransition(i, end, QuoteSpan.class);
             QuoteSpan[] quotes = text.getSpans(i, next, QuoteSpan.class);
 
-            for (QuoteSpan quote: quotes) {
+            for (QuoteSpan quote : quotes) {
                 out.append("<blockquote>");
             }
 
             withinBlockquote(out, text, i, next);
 
-            for (QuoteSpan quote: quotes) {
+            for (QuoteSpan quote : quotes) {
                 out.append("</blockquote>\n");
             }
         }
@@ -213,7 +211,7 @@ public class Html {
 
     private static String getOpenParaTagWithDirection(Spanned text, int start, int end) {
         final int len = end - start;
-        final byte[] levels = new byte[ArrayUtils.idealByteArraySize(len)];
+        final byte[] levels = ArrayUtils.newUnpaddedByteArray(len);
         final char[] buffer = TextUtils.obtain(len);
         TextUtils.getChars(text, start, end, buffer, 0);
 
@@ -221,10 +219,10 @@ public class Html {
                 false /* no info */);
         switch(paraDir) {
             case Layout.DIR_RIGHT_TO_LEFT:
-                return "<p dir=rtl>";
+                return "<p dir=\"rtl\">";
             case Layout.DIR_LEFT_TO_RIGHT:
             default:
-                return "<p dir=ltr>";
+                return "<p dir=\"ltr\">";
         }
     }
 
@@ -390,8 +388,17 @@ public class Html {
                 out.append("&gt;");
             } else if (c == '&') {
                 out.append("&amp;");
+            } else if (c >= 0xD800 && c <= 0xDFFF) {
+                if (c < 0xDC00 && i + 1 < end) {
+                    char d = text.charAt(i + 1);
+                    if (d >= 0xDC00 && d <= 0xDFFF) {
+                        i++;
+                        int codepoint = 0x010000 | (int) c - 0xD800 << 10 | (int) d - 0xDC00;
+                        out.append("&#").append(codepoint).append(";");
+                    }
+                }
             } else if (c > 0x7E || c < ' ') {
-                out.append("&#" + ((int) c) + ";");
+                out.append("&#").append((int) c).append(";");
             } else if (c == ' ') {
                 while (i + 1 < end && text.charAt(i + 1) == ' ') {
                     out.append("&nbsp;");
@@ -616,8 +623,6 @@ class HtmlToSpannedConverter implements ContentHandler {
         if (where != len) {
             text.setSpan(repl, where, len, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-
-        return;
     }
 
     private static void startImg(SpannableStringBuilder text,
@@ -673,7 +678,7 @@ class HtmlToSpannedConverter implements ContentHandler {
                                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
                     }
                 } else {
-                    int c = getHtmlColor(f.mColor);
+                    int c = Color.getHtmlColor(f.mColor);
                     if (c != -1) {
                         text.setSpan(new ForegroundColorSpan(c | 0xFF000000),
                                 where, len,
@@ -842,47 +847,4 @@ class HtmlToSpannedConverter implements ContentHandler {
             mLevel = level;
         }
     }
-
-    private static HashMap<String,Integer> COLORS = buildColorMap();
-
-    private static HashMap<String,Integer> buildColorMap() {
-        HashMap<String,Integer> map = new HashMap<String,Integer>();
-        map.put("aqua", 0x00FFFF);
-        map.put("black", 0x000000);
-        map.put("blue", 0x0000FF);
-        map.put("fuchsia", 0xFF00FF);
-        map.put("green", 0x008000);
-        map.put("grey", 0x808080);
-        map.put("lime", 0x00FF00);
-        map.put("maroon", 0x800000);
-        map.put("navy", 0x000080);
-        map.put("olive", 0x808000);
-        map.put("purple", 0x800080);
-        map.put("red", 0xFF0000);
-        map.put("silver", 0xC0C0C0);
-        map.put("teal", 0x008080);
-        map.put("white", 0xFFFFFF);
-        map.put("yellow", 0xFFFF00);
-        return map;
-    }
-
-    /**
-     * Converts an HTML color (named or numeric) to an integer RGB value.
-     *
-     * @param color Non-null color string.
-     * @return A color value, or {@code -1} if the color string could not be interpreted.
-     */
-    private static int getHtmlColor(String color) {
-        Integer i = COLORS.get(color.toLowerCase());
-        if (i != null) {
-            return i;
-        } else {
-            try {
-                return XmlUtils.convertValueToInt(color, -1);
-            } catch (NumberFormatException nfe) {
-                return -1;
-            }
-        }
-      }
-
 }

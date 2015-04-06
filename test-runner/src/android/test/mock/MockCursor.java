@@ -24,8 +24,6 @@ import android.database.DataSetObserver;
 import android.net.Uri;
 import android.os.Bundle;
 
-import java.util.Map;
-
 /**
  * <P>
  * A mock {@link android.database.Cursor} class that isolates the test code from real
@@ -177,17 +175,18 @@ public class MockCursor implements Cursor {
         throw new UnsupportedOperationException("unimplemented mock method");
     }
 
-    @SuppressWarnings("deprecation")
     public void setNotificationUri(ContentResolver cr, Uri uri) {
         throw new UnsupportedOperationException("unimplemented mock method");
     }
 
-    @SuppressWarnings("deprecation")
+    public Uri getNotificationUri() {
+        throw new UnsupportedOperationException("unimplemented mock method");
+    }
+
     public void unregisterContentObserver(ContentObserver observer) {
         throw new UnsupportedOperationException("unimplemented mock method");
     }
 
-    @SuppressWarnings("deprecation")
     public void unregisterDataSetObserver(DataSetObserver observer) {
         throw new UnsupportedOperationException("unimplemented mock method");
     }

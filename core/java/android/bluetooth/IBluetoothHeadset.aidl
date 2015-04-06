@@ -35,20 +35,26 @@ interface IBluetoothHeadset {
     boolean startVoiceRecognition(in BluetoothDevice device);
     boolean stopVoiceRecognition(in BluetoothDevice device);
     boolean isAudioConnected(in BluetoothDevice device);
+    boolean sendVendorSpecificResultCode(in BluetoothDevice device,
+                                         in String command,
+                                         in String arg);
 
     // APIs that can be made public in future
     int getBatteryUsageHint(in BluetoothDevice device);
 
     // Internal functions, not be made public
-    boolean createIncomingConnect(in BluetoothDevice device);
     boolean acceptIncomingConnect(in BluetoothDevice device);
     boolean rejectIncomingConnect(in BluetoothDevice device);
-    boolean cancelConnectThread();
-    boolean connectHeadsetInternal(in BluetoothDevice device);
-    boolean disconnectHeadsetInternal(in BluetoothDevice device);
-    boolean setAudioState(in BluetoothDevice device, int state);
     int getAudioState(in BluetoothDevice device);
 
+    boolean isAudioOn();
+    boolean connectAudio();
+    boolean disconnectAudio();
     boolean startScoUsingVirtualVoiceCall(in BluetoothDevice device);
     boolean stopScoUsingVirtualVoiceCall(in BluetoothDevice device);
+    void phoneStateChanged(int numActive, int numHeld, int callState, String number, int type);
+    void clccResponse(int index, int direction, int status, int mode, boolean mpty,
+                      String number, int type);
+    boolean enableWBS();
+    boolean disableWBS();
 }

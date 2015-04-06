@@ -37,7 +37,11 @@ import android.widget.RelativeLayout;
  * layout for this object.
  * 
  * @attr ref android.R.styleable#TwoLineListItem_mode
+ * 
+ * @deprecated This class can be implemented easily by apps using a {@link RelativeLayout}
+ * or a {@link LinearLayout}.
  */
+@Deprecated
 @Widget
 public class TwoLineListItem extends RelativeLayout {
 
@@ -52,11 +56,15 @@ public class TwoLineListItem extends RelativeLayout {
         this(context, attrs, 0); 
     }
 
-    public TwoLineListItem(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+    public TwoLineListItem(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
 
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                com.android.internal.R.styleable.TwoLineListItem, defStyle, 0);
+    public TwoLineListItem(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.TwoLineListItem, defStyleAttr, defStyleRes);
 
         a.recycle();
     }

@@ -17,8 +17,6 @@
 package com.android.mediaframeworktest;
 
 import com.android.mediaframeworktest.performance.MediaPlayerPerformance;
-/*Video Editor performance Test cases*/
-import com.android.mediaframeworktest.performance.VideoEditorPerformance;
 import junit.framework.TestSuite;
 
 import android.os.Bundle;
@@ -38,14 +36,12 @@ import android.util.Log;
 public class MediaFrameworkPerfTestRunner extends InstrumentationTestRunner {
 
     public static boolean mGetNativeHeapDump = false;
-
+    public static boolean mGetProcmem = false;
 
     @Override
     public TestSuite getAllTests() {
         TestSuite suite = new InstrumentationTestSuite(this);
         suite.addTestSuite(MediaPlayerPerformance.class);
-        /* Video Editor performance Test cases */
-        suite.addTestSuite(VideoEditorPerformance.class);
         return suite;
     }
 
@@ -61,6 +57,12 @@ public class MediaFrameworkPerfTestRunner extends InstrumentationTestRunner {
         if (get_heap_dump != null) {
             mGetNativeHeapDump = true;
         }
+
+        String get_procmem = (String) icicle.get("get_procmem");
+        if (get_procmem != null) {
+            mGetProcmem = true;
+        }
+
     }
 }
 

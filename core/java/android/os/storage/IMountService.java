@@ -20,9 +20,7 @@ import android.os.Binder;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Parcel;
-import android.os.Parcelable;
 import android.os.RemoteException;
-import android.os.storage.StorageVolume;
 
 /**
  * WARNING! Update IMountService.h and IMountService.cpp if you change this
@@ -323,7 +321,7 @@ public interface IMountService extends IInterface {
              * Mount a secure container with the specified key and owner UID.
              * Returns an int consistent with MountServiceResultCode
              */
-            public int mountSecureContainer(String id, String key, int ownerUid)
+            public int mountSecureContainer(String id, String key, int ownerUid, boolean readOnly)
                     throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
@@ -333,6 +331,7 @@ public interface IMountService extends IInterface {
                     _data.writeString(id);
                     _data.writeString(key);
                     _data.writeInt(ownerUid);
+                    _data.writeInt(readOnly ? 1 : 0);
                     mRemote.transact(Stub.TRANSACTION_mountSecureContainer, _data, _reply, 0);
                     _reply.readException();
                     _result = _reply.readInt();
@@ -489,13 +488,14 @@ public interface IMountService extends IInterface {
              * IObbActionListener to inform it of the terminal state of the
              * call.
              */
-            public void mountObb(String filename, String key, IObbActionListener token, int nonce)
-                    throws RemoteException {
+            public void mountObb(String rawPath, String canonicalPath, String key,
+                    IObbActionListener token, int nonce) throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
-                    _data.writeString(filename);
+                    _data.writeString(rawPath);
+                    _data.writeString(canonicalPath);
                     _data.writeString(key);
                     _data.writeStrongBinder((token != null ? token.asBinder() : null));
                     _data.writeInt(nonce);
@@ -514,13 +514,14 @@ public interface IMountService extends IInterface {
              * IObbActionListener to inform it of the terminal state of the
              * call.
              */
-            public void unmountObb(String filename, boolean force, IObbActionListener token,
-                    int nonce) throws RemoteException {
+            public void unmountObb(
+                    String rawPath, boolean force, IObbActionListener token, int nonce)
+                    throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
-                    _data.writeString(filename);
+                    _data.writeString(rawPath);
                     _data.writeInt((force ? 1 : 0));
                     _data.writeStrongBinder((token != null ? token.asBinder() : null));
                     _data.writeInt(nonce);
@@ -536,13 +537,13 @@ public interface IMountService extends IInterface {
              * Checks whether the specified Opaque Binary Blob (OBB) is mounted
              * somewhere.
              */
-            public boolean isObbMounted(String filename) throws RemoteException {
+            public boolean isObbMounted(String rawPath) throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 boolean _result;
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
-                    _data.writeString(filename);
+                    _data.writeString(rawPath);
                     mRemote.transact(Stub.TRANSACTION_isObbMounted, _data, _reply, 0);
                     _reply.readException();
                     _result = 0 != _reply.readInt();
@@ -556,13 +557,13 @@ public interface IMountService extends IInterface {
             /**
              * Gets the path to the mounted Opaque Binary Blob (OBB).
              */
-            public String getMountedObbPath(String filename) throws RemoteException {
+            public String getMountedObbPath(String rawPath) throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 String _result;
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
-                    _data.writeString(filename);
+                    _data.writeString(rawPath);
                     mRemote.transact(Stub.TRANSACTION_getMountedObbPath, _data, _reply, 0);
                     _reply.readException();
                     _result = _reply.readString();
@@ -625,12 +626,13 @@ public interface IMountService extends IInterface {
                 return _result;
             }
 
-            public int encryptStorage(String password) throws RemoteException {
+            public int encryptStorage(int type, String password) throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 int _result;
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeInt(type);
                     _data.writeString(password);
                     mRemote.transact(Stub.TRANSACTION_encryptStorage, _data, _reply, 0);
                     _reply.readException();
@@ -642,12 +644,13 @@ public interface IMountService extends IInterface {
                 return _result;
             }
 
-            public int changeEncryptionPassword(String password) throws RemoteException {
+            public int changeEncryptionPassword(int type, String password) throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
                 int _result;
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeInt(type);
                     _data.writeString(password);
                     mRemote.transact(Stub.TRANSACTION_changeEncryptionPassword, _data, _reply, 0);
                     _reply.readException();
@@ -677,15 +680,92 @@ public interface IMountService extends IInterface {
                 return _result;
             }
 
-            public Parcelable[] getVolumeList() throws RemoteException {
+            public int getPasswordType() throws RemoteException {
                 Parcel _data = Parcel.obtain();
                 Parcel _reply = Parcel.obtain();
-                Parcelable[] _result;
+                int _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(Stub.TRANSACTION_getPasswordType, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readInt();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            public String getPassword() throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                String _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(Stub.TRANSACTION_getPassword, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readString();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            public void clearPassword() throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(Stub.TRANSACTION_clearPassword, _data, _reply, IBinder.FLAG_ONEWAY);
+                    _reply.readException();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+            }
+
+            public void setField(String field, String data) throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(field);
+                    _data.writeString(data);
+                    mRemote.transact(Stub.TRANSACTION_setField, _data, _reply, IBinder.FLAG_ONEWAY);
+                    _reply.readException();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+            }
+
+            public String getField(String field) throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                String _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(field);
+                    mRemote.transact(Stub.TRANSACTION_getField, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readString();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            public StorageVolume[] getVolumeList() throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                StorageVolume[] _result;
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
                     mRemote.transact(Stub.TRANSACTION_getVolumeList, _data, _reply, 0);
                     _reply.readException();
-                    _result = _reply.readParcelableArray(StorageVolume.class.getClassLoader());
+                    _result = _reply.createTypedArray(StorageVolume.CREATOR);
                 } finally {
                     _reply.recycle();
                     _data.recycle();
@@ -735,7 +815,78 @@ public interface IMountService extends IInterface {
                     _data.recycle();
                 }
                 return _result;
+            }
 
+            @Override
+            public int mkdirs(String callingPkg, String path) throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                int _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(callingPkg);
+                    _data.writeString(path);
+                    mRemote.transact(Stub.TRANSACTION_mkdirs, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readInt();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            @Override
+            public int resizeSecureContainer(String id, int sizeMb, String key)
+                    throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                int _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(id);
+                    _data.writeInt(sizeMb);
+                    _data.writeString(key);
+                    mRemote.transact(Stub.TRANSACTION_resizeSecureContainer, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readInt();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            @Override
+            public long lastMaintenance() throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                long _result;
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(Stub.TRANSACTION_lastMaintenance, _data, _reply, 0);
+                    _reply.readException();
+                    _result = _reply.readLong();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return _result;
+            }
+
+            @Override
+            public void runMaintenance() throws RemoteException {
+                Parcel _data = Parcel.obtain();
+                Parcel _reply = Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(Stub.TRANSACTION_runMaintenance, _data, _reply, 0);
+                    _reply.readException();
+                } finally {
+                    _reply.recycle();
+                    _data.recycle();
+                }
+                return;
             }
         }
 
@@ -808,6 +959,24 @@ public interface IMountService extends IInterface {
         static final int TRANSACTION_verifyEncryptionPassword = IBinder.FIRST_CALL_TRANSACTION + 32;
 
         static final int TRANSACTION_fixPermissionsSecureContainer = IBinder.FIRST_CALL_TRANSACTION + 33;
+
+        static final int TRANSACTION_mkdirs = IBinder.FIRST_CALL_TRANSACTION + 34;
+
+        static final int TRANSACTION_getPasswordType = IBinder.FIRST_CALL_TRANSACTION + 35;
+
+        static final int TRANSACTION_getPassword = IBinder.FIRST_CALL_TRANSACTION + 36;
+
+        static final int TRANSACTION_clearPassword = IBinder.FIRST_CALL_TRANSACTION + 37;
+
+        static final int TRANSACTION_setField = IBinder.FIRST_CALL_TRANSACTION + 38;
+
+        static final int TRANSACTION_getField = IBinder.FIRST_CALL_TRANSACTION + 39;
+
+        static final int TRANSACTION_resizeSecureContainer = IBinder.FIRST_CALL_TRANSACTION + 40;
+
+        static final int TRANSACTION_lastMaintenance = IBinder.FIRST_CALL_TRANSACTION + 41;
+
+        static final int TRANSACTION_runMaintenance = IBinder.FIRST_CALL_TRANSACTION + 42;
 
         /**
          * Cast an IBinder object into an IMountService interface, generating a
@@ -973,7 +1142,9 @@ public interface IMountService extends IInterface {
                     key = data.readString();
                     int ownerUid;
                     ownerUid = data.readInt();
-                    int resultCode = mountSecureContainer(id, key, ownerUid);
+                    boolean readOnly;
+                    readOnly = data.readInt() != 0;
+                    int resultCode = mountSecureContainer(id, key, ownerUid, readOnly);
                     reply.writeNoException();
                     reply.writeInt(resultCode);
                     return true;
@@ -1042,15 +1213,14 @@ public interface IMountService extends IInterface {
                 }
                 case TRANSACTION_mountObb: {
                     data.enforceInterface(DESCRIPTOR);
-                    String filename;
-                    filename = data.readString();
-                    String key;
-                    key = data.readString();
+                    final String rawPath = data.readString();
+                    final String canonicalPath = data.readString();
+                    final String key = data.readString();
                     IObbActionListener observer;
                     observer = IObbActionListener.Stub.asInterface(data.readStrongBinder());
                     int nonce;
                     nonce = data.readInt();
-                    mountObb(filename, key, observer, nonce);
+                    mountObb(rawPath, canonicalPath, key, observer, nonce);
                     reply.writeNoException();
                     return true;
                 }
@@ -1103,25 +1273,27 @@ public interface IMountService extends IInterface {
                 }
                 case TRANSACTION_encryptStorage: {
                     data.enforceInterface(DESCRIPTOR);
+                    int type = data.readInt();
                     String password = data.readString();
-                    int result = encryptStorage(password);
+                    int result = encryptStorage(type, password);
                     reply.writeNoException();
                     reply.writeInt(result);
                     return true;
                 }
                 case TRANSACTION_changeEncryptionPassword: {
                     data.enforceInterface(DESCRIPTOR);
+                    int type = data.readInt();
                     String password = data.readString();
-                    int result = changeEncryptionPassword(password);
+                    int result = changeEncryptionPassword(type, password);
                     reply.writeNoException();
                     reply.writeInt(result);
                     return true;
                 }
                 case TRANSACTION_getVolumeList: {
                     data.enforceInterface(DESCRIPTOR);
-                    Parcelable[] result = getVolumeList();
+                    StorageVolume[] result = getVolumeList();
                     reply.writeNoException();
-                    reply.writeParcelableArray(result, 0);
+                    reply.writeTypedArray(result, android.os.Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
                     return true;
                 }
                 case TRANSACTION_getSecureContainerFilesystemPath: {
@@ -1151,6 +1323,77 @@ public interface IMountService extends IInterface {
                     int resultCode = fixPermissionsSecureContainer(id, gid, filename);
                     reply.writeNoException();
                     reply.writeInt(resultCode);
+                    return true;
+                }
+                case TRANSACTION_mkdirs: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String callingPkg = data.readString();
+                    String path = data.readString();
+                    int result = mkdirs(callingPkg, path);
+                    reply.writeNoException();
+                    reply.writeInt(result);
+                    return true;
+                }
+                case TRANSACTION_getPasswordType: {
+                    data.enforceInterface(DESCRIPTOR);
+                    int result = getPasswordType();
+                    reply.writeNoException();
+                    reply.writeInt(result);
+                    return true;
+                }
+                case TRANSACTION_getPassword: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String result = getPassword();
+                    reply.writeNoException();
+                    reply.writeString(result);
+                    return true;
+                }
+                case TRANSACTION_clearPassword: {
+                    data.enforceInterface(DESCRIPTOR);
+                    clearPassword();
+                    reply.writeNoException();
+                    return true;
+                }
+                case TRANSACTION_setField: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String field = data.readString();
+                    String contents = data.readString();
+                    setField(field, contents);
+                    reply.writeNoException();
+                    return true;
+                }
+                case TRANSACTION_getField: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String field = data.readString();
+                    String contents = getField(field);
+                    reply.writeNoException();
+                    reply.writeString(contents);
+                    return true;
+                }
+                case TRANSACTION_resizeSecureContainer: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String id;
+                    id = data.readString();
+                    int sizeMb;
+                    sizeMb = data.readInt();
+                    String key;
+                    key = data.readString();
+                    int resultCode = resizeSecureContainer(id, sizeMb, key);
+                    reply.writeNoException();
+                    reply.writeInt(resultCode);
+                    return true;
+                }
+                case TRANSACTION_lastMaintenance: {
+                    data.enforceInterface(DESCRIPTOR);
+                    long lastMaintenance = lastMaintenance();
+                    reply.writeNoException();
+                    reply.writeLong(lastMaintenance);
+                    return true;
+                }
+                case TRANSACTION_runMaintenance: {
+                    data.enforceInterface(DESCRIPTOR);
+                    runMaintenance();
+                    reply.writeNoException();
                     return true;
                 }
             }
@@ -1194,7 +1437,7 @@ public interface IMountService extends IInterface {
     /**
      * Gets the path to the mounted Opaque Binary Blob (OBB).
      */
-    public String getMountedObbPath(String filename) throws RemoteException;
+    public String getMountedObbPath(String rawPath) throws RemoteException;
 
     /**
      * Gets an Array of currently known secure container IDs
@@ -1220,7 +1463,7 @@ public interface IMountService extends IInterface {
      * Checks whether the specified Opaque Binary Blob (OBB) is mounted
      * somewhere.
      */
-    public boolean isObbMounted(String filename) throws RemoteException;
+    public boolean isObbMounted(String rawPath) throws RemoteException;
 
     /*
      * Returns true if the specified container is mounted
@@ -1243,14 +1486,15 @@ public interface IMountService extends IInterface {
      * MountService will call back to the supplied IObbActionListener to inform
      * it of the terminal state of the call.
      */
-    public void mountObb(String filename, String key, IObbActionListener token, int nonce)
-            throws RemoteException;
+    public void mountObb(String rawPath, String canonicalPath, String key,
+            IObbActionListener token, int nonce) throws RemoteException;
 
     /*
      * Mount a secure container with the specified key and owner UID. Returns an
      * int consistent with MountServiceResultCode
      */
-    public int mountSecureContainer(String id, String key, int ownerUid) throws RemoteException;
+    public int mountSecureContainer(String id, String key, int ownerUid, boolean readOnly)
+            throws RemoteException;
 
     /**
      * Mount external storage at given mount point. Returns an int consistent
@@ -1287,7 +1531,7 @@ public interface IMountService extends IInterface {
      * MountService will call back to the supplied IObbActionListener to inform
      * it of the terminal state of the call.
      */
-    public void unmountObb(String filename, boolean force, IObbActionListener token, int nonce)
+    public void unmountObb(String rawPath, boolean force, IObbActionListener token, int nonce)
             throws RemoteException;
 
     /*
@@ -1323,10 +1567,14 @@ public interface IMountService extends IInterface {
     static final int ENCRYPTION_STATE_NONE = 1;
     /** The volume has been encrypted succesfully. */
     static final int ENCRYPTION_STATE_OK = 0;
-    /** The volume is in a bad state. */
+    /** The volume is in a bad state.*/
     static final int ENCRYPTION_STATE_ERROR_UNKNOWN = -1;
-    /** The volume is in a bad state - partially encrypted. Data is likely irrecoverable. */
+    /** Encryption is incomplete */
     static final int ENCRYPTION_STATE_ERROR_INCOMPLETE = -2;
+    /** Encryption is incomplete and irrecoverable */
+    static final int ENCRYPTION_STATE_ERROR_INCONSISTENT = -3;
+    /** Underlying data is corrupt */
+    static final int ENCRYPTION_STATE_ERROR_CORRUPT = -4;
 
     /**
      * Determines the encryption state of the volume.
@@ -1342,12 +1590,13 @@ public interface IMountService extends IInterface {
     /**
      * Encrypts storage.
      */
-    public int encryptStorage(String password) throws RemoteException;
+    public int encryptStorage(int type, String password) throws RemoteException;
 
     /**
      * Changes the encryption password.
      */
-    public int changeEncryptionPassword(String password) throws RemoteException;
+    public int changeEncryptionPassword(int type, String password)
+        throws RemoteException;
 
     /**
      * Verify the encryption password against the stored volume.  This method
@@ -1358,7 +1607,7 @@ public interface IMountService extends IInterface {
     /**
      * Returns list of all mountable volumes.
      */
-    public Parcelable[] getVolumeList() throws RemoteException;
+    public StorageVolume[] getVolumeList() throws RemoteException;
 
     /**
      * Gets the path on the filesystem for the ASEC container itself.
@@ -1375,4 +1624,60 @@ public interface IMountService extends IInterface {
      */
     public int fixPermissionsSecureContainer(String id, int gid, String filename)
             throws RemoteException;
+
+    /**
+     * Ensure that all directories along given path exist, creating parent
+     * directories as needed. Validates that given path is absolute and that it
+     * contains no relative "." or ".." paths or symlinks. Also ensures that
+     * path belongs to a volume managed by vold, and that path is either
+     * external storage data or OBB directory belonging to calling app.
+     */
+    public int mkdirs(String callingPkg, String path) throws RemoteException;
+
+    /**
+     * Determines the type of the encryption password
+     * @return PasswordType
+     */
+    public int getPasswordType() throws RemoteException;
+
+    /**
+     * Get password from vold
+     * @return password or empty string
+     */
+    public String getPassword() throws RemoteException;
+
+    /**
+     * Securely clear password from vold
+     */
+    public void clearPassword() throws RemoteException;
+
+    /**
+     * Set a field in the crypto header.
+     * @param field field to set
+     * @param contents contents to set in field
+     */
+    public void setField(String field, String contents) throws RemoteException;
+
+    /**
+     * Gets a field from the crypto header.
+     * @param field field to get
+     * @return contents of field
+     */
+    public String getField(String field) throws RemoteException;
+
+    public int resizeSecureContainer(String id, int sizeMb, String key) throws RemoteException;
+
+    /**
+     * Report the time of the last maintenance operation such as fstrim.
+     * @return Timestamp of the last maintenance operation, in the
+     *     System.currentTimeMillis() time base
+     * @throws RemoteException
+     */
+    public long lastMaintenance() throws RemoteException;
+
+    /**
+     * Kick off an immediate maintenance operation
+     * @throws RemoteException
+     */
+    public void runMaintenance() throws RemoteException;
 }

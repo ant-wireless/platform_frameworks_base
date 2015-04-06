@@ -12,7 +12,6 @@
 
 #include <androidfw/ResourceTypes.h>
 #include <utils/String16.h>
-#include <utils/TextOutput.h>
 #include <utils/TypeHelpers.h>
 
 #include <sys/types.h>
@@ -27,7 +26,10 @@ using namespace android;
 
 #define PRINT_STRING_METRICS 0
 
-void strcpy16_htod(uint16_t* dst, const uint16_t* src);
+#if __cplusplus >= 201103L
+void strcpy16_htod(char16_t* dst, const char16_t* src);
+#endif
+void strcpy16_htod(uint16_t* dst, const char16_t* src);
 
 void printStringPool(const ResStringPool* pool);
 
@@ -139,7 +141,14 @@ public:
     const Vector<size_t>* offsetsForString(const String16& val) const;
 
 private:
-    static int config_sort(void* state, const void* lhs, const void* rhs);
+    class ConfigSorter
+    {
+    public:
+        explicit ConfigSorter(const StringPool&);
+        bool operator()(size_t l, size_t r);
+    private:
+        const StringPool& pool;
+    };
 
     const bool                              mUTF8;
 

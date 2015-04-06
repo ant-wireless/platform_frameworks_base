@@ -17,6 +17,7 @@
 package com.android.internal.os;
 
 import android.app.ActivityManagerNative;
+import android.app.ActivityThread;
 import android.app.ApplicationErrorReport;
 import android.os.Build;
 import android.os.Debug;
@@ -54,6 +55,11 @@ public class RuntimeInit {
     private static final native void nativeFinishInit();
     private static final native void nativeSetExitWithoutCleanup(boolean exitWithoutCleanup);
 
+    private static int Clog_e(String tag, String msg, Throwable tr) {
+        return Log.println_native(Log.LOG_ID_CRASH, Log.ERROR, tag,
+                msg + '\n' + Log.getStackTraceString(tr));
+    }
+
     /**
      * Use this to log a message when a thread exits due to an uncaught
      * exception.  The framework catches these for the main threads, so
@@ -67,9 +73,16 @@ public class RuntimeInit {
                 mCrashing = true;
 
                 if (mApplicationObject == null) {
-                    Slog.e(TAG, "*** FATAL EXCEPTION IN SYSTEM PROCESS: " + t.getName(), e);
+                    Clog_e(TAG, "*** FATAL EXCEPTION IN SYSTEM PROCESS: " + t.getName(), e);
                 } else {
-                    Slog.e(TAG, "FATAL EXCEPTION: " + t.getName(), e);
+                    StringBuilder message = new StringBuilder();
+                    message.append("FATAL EXCEPTION: ").append(t.getName()).append("\n");
+                    final String processName = ActivityThread.currentProcessName();
+                    if (processName != null) {
+                        message.append("Process: ").append(processName).append(", ");
+                    }
+                    message.append("PID: ").append(Process.myPid());
+                    Clog_e(TAG, message.toString(), e);
                 }
 
                 // Bring up crash dialog, wait for it to be dismissed
@@ -77,9 +90,9 @@ public class RuntimeInit {
                         mApplicationObject, new ApplicationErrorReport.CrashInfo(e));
             } catch (Throwable t2) {
                 try {
-                    Slog.e(TAG, "Error reporting crash", t2);
+                    Clog_e(TAG, "Error reporting crash", t2);
                 } catch (Throwable t3) {
-                    // Even Slog.e() fails!  Oh well.
+                    // Even Clog_e() fails!  Oh well.
                 }
             } finally {
                 // Try everything to make sure this process goes away.
@@ -179,13 +192,14 @@ public class RuntimeInit {
      *
      * @param className Fully-qualified class name
      * @param argv Argument vector for main()
+     * @param classLoader the classLoader to load {@className} with
      */
-    private static void invokeStaticMain(String className, String[] argv)
+    private static void invokeStaticMain(String className, String[] argv, ClassLoader classLoader)
             throws ZygoteInit.MethodAndArgsCaller {
         Class<?> cl;
 
         try {
-            cl = Class.forName(className);
+            cl = Class.forName(className, true, classLoader);
         } catch (ClassNotFoundException ex) {
             throw new RuntimeException(
                     "Missing class when invoking static main " + className,
@@ -219,6 +233,7 @@ public class RuntimeInit {
     }
 
     public static final void main(String[] argv) {
+        enableDdms();
         if (argv.length == 2 && argv[1].equals("application")) {
             if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application");
             redirectLogStreams();
@@ -250,7 +265,7 @@ public class RuntimeInit {
      * @param targetSdkVersion target SDK version
      * @param argv arg strings
      */
-    public static final void zygoteInit(int targetSdkVersion, String[] argv)
+    public static final void zygoteInit(int targetSdkVersion, String[] argv, ClassLoader classLoader)
             throws ZygoteInit.MethodAndArgsCaller {
         if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application from zygote");
 
@@ -259,7 +274,7 @@ public class RuntimeInit {
         commonInit();
         nativeZygoteInit();
 
-        applicationInit(targetSdkVersion, argv);
+        applicationInit(targetSdkVersion, argv, classLoader);
     }
 
     /**
@@ -277,10 +292,10 @@ public class RuntimeInit {
             throws ZygoteInit.MethodAndArgsCaller {
         if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application from wrapper");
 
-        applicationInit(targetSdkVersion, argv);
+        applicationInit(targetSdkVersion, argv, null);
     }
 
-    private static void applicationInit(int targetSdkVersion, String[] argv)
+    private static void applicationInit(int targetSdkVersion, String[] argv, ClassLoader classLoader)
             throws ZygoteInit.MethodAndArgsCaller {
         // If the application calls System.exit(), terminate the process
         // immediately without running any shutdown hooks.  It is not possible to
@@ -304,7 +319,7 @@ public class RuntimeInit {
         }
 
         // Remaining arguments are passed to the start class's static main
-        invokeStaticMain(args.startClass, args.startArgs);
+        invokeStaticMain(args.startClass, args.startArgs, classLoader);
     }
 
     /**
@@ -324,16 +339,17 @@ public class RuntimeInit {
      * @param tag to record with the error
      * @param t exception describing the error site and conditions
      */
-    public static void wtf(String tag, Throwable t) {
+    public static void wtf(String tag, Throwable t, boolean system) {
         try {
             if (ActivityManagerNative.getDefault().handleApplicationWtf(
-                    mApplicationObject, tag, new ApplicationErrorReport.CrashInfo(t))) {
+                    mApplicationObject, tag, system, new ApplicationErrorReport.CrashInfo(t))) {
                 // The Activity Manager has already written us off -- now exit.
                 Process.killProcess(Process.myPid());
                 System.exit(10);
             }
         } catch (Throwable t2) {
             Slog.e(TAG, "Error reporting WTF", t2);
+            Slog.e(TAG, "Original WTF:", t);
         }
     }
 
@@ -350,9 +366,9 @@ public class RuntimeInit {
     }
 
     /**
-     * Enable debugging features.
+     * Enable DDMS.
      */
-    static {
+    static final void enableDdms() {
         // Register handlers for DDM messages.
         android.ddm.DdmRegister.registerHandlers();
     }

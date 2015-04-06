@@ -47,13 +47,13 @@ public final class BridgeWindow implements IWindow {
     }
 
     @Override
-    public void resized(int arg0, int arg1, Rect arg2, Rect arg3,
-            boolean arg4, Configuration arg5) throws RemoteException {
+    public void resized(Rect rect, Rect rect2, Rect rect3, Rect rect4, Rect rect5, boolean b,
+            Configuration configuration) throws RemoteException {
         // pass for now.
     }
 
     @Override
-    public void dispatchScreenState(boolean on) throws RemoteException {
+    public void moved(int arg0, int arg1) throws RemoteException {
         // pass for now.
     }
 
@@ -92,6 +92,10 @@ public final class BridgeWindow implements IWindow {
 
     @Override
     public void doneAnimating() {
+    }
+
+    @Override
+    public void dispatchWindowShown() {
     }
 
     @Override

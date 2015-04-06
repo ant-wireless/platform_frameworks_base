@@ -18,8 +18,6 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
-
-
 LOCAL_SRC_FILES := \
     com_android_defcontainer_MeasurementUtils.cpp
 
@@ -28,12 +26,15 @@ LOCAL_C_INCLUDES += \
 
 LOCAL_SHARED_LIBRARIES := \
     libnativehelper \
-    libutils
+    libutils \
+    liblog
 
 LOCAL_STATIC_LIBRARIES := \
     libdiskusage
 
 LOCAL_MODULE := libdefcontainer_jni
 LOCAL_MODULE_TAGS := optional
+
+LOCAL_CFLAGS += -Wall -Werror -Wunused -Wunreachable-code
 
 include $(BUILD_SHARED_LIBRARY)

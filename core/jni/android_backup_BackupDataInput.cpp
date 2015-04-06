@@ -22,6 +22,8 @@
 
 #include <androidfw/BackupHelpers.h>
 
+#include "core_jni_helpers.h"
+
 namespace android
 {
 
@@ -29,25 +31,25 @@ namespace android
 static jfieldID s_keyField = 0;
 static jfieldID s_dataSizeField = 0;
 
-static int
+static jlong
 ctor_native(JNIEnv* env, jobject clazz, jobject fileDescriptor)
 {
     int fd = jniGetFDFromFileDescriptor(env, fileDescriptor);
     if (fd == -1) {
-        return NULL;
+        return (jlong)NULL;
     }
 
-    return (int)new BackupDataReader(fd);
+    return (jlong)new BackupDataReader(fd);
 }
 
 static void
-dtor_native(JNIEnv* env, jobject clazz, int r)
+dtor_native(JNIEnv* env, jobject clazz, jlong r)
 {
     delete (BackupDataReader*)r;
 }
 
 static jint
-readNextHeader_native(JNIEnv* env, jobject clazz, int r, jobject entity)
+readNextHeader_native(JNIEnv* env, jobject clazz, jlong r, jobject entity)
 {
     int err;
     bool done;
@@ -89,7 +91,7 @@ readNextHeader_native(JNIEnv* env, jobject clazz, int r, jobject entity)
 }
 
 static jint
-readEntityData_native(JNIEnv* env, jobject clazz, int r, jbyteArray data, int offset, int size)
+readEntityData_native(JNIEnv* env, jobject clazz, jlong r, jbyteArray data, jint offset, jint size)
 {
     int err;
     BackupDataReader* reader = (BackupDataReader*)r;
@@ -112,7 +114,7 @@ readEntityData_native(JNIEnv* env, jobject clazz, int r, jbyteArray data, int of
 }
 
 static jint
-skipEntityData_native(JNIEnv* env, jobject clazz, int r)
+skipEntityData_native(JNIEnv* env, jobject clazz, jlong r)
 {
     int err;
     BackupDataReader* reader = (BackupDataReader*)r;
@@ -123,29 +125,24 @@ skipEntityData_native(JNIEnv* env, jobject clazz, int r)
 }
 
 static const JNINativeMethod g_methods[] = {
-    { "ctor", "(Ljava/io/FileDescriptor;)I", (void*)ctor_native },
-    { "dtor", "(I)V", (void*)dtor_native },
-    { "readNextHeader_native", "(ILandroid/app/backup/BackupDataInput$EntityHeader;)I",
+    { "ctor", "(Ljava/io/FileDescriptor;)J", (void*)ctor_native },
+    { "dtor", "(J)V", (void*)dtor_native },
+    { "readNextHeader_native", "(JLandroid/app/backup/BackupDataInput$EntityHeader;)I",
             (void*)readNextHeader_native },
-    { "readEntityData_native", "(I[BII)I", (void*)readEntityData_native },
-    { "skipEntityData_native", "(I)I", (void*)skipEntityData_native },
+    { "readEntityData_native", "(J[BII)I", (void*)readEntityData_native },
+    { "skipEntityData_native", "(J)I", (void*)skipEntityData_native },
 };
 
 int register_android_backup_BackupDataInput(JNIEnv* env)
 {
     //ALOGD("register_android_backup_BackupDataInput");
 
-    jclass clazz = env->FindClass("android/app/backup/BackupDataInput$EntityHeader");
-    LOG_FATAL_IF(clazz == NULL, "Unable to find class android.app.backup.BackupDataInput.EntityHeader");
-    s_keyField = env->GetFieldID(clazz, "key", "Ljava/lang/String;");
-    LOG_FATAL_IF(s_keyField == NULL,
-            "Unable to find key field in android.app.backup.BackupDataInput.EntityHeader");
-    s_dataSizeField = env->GetFieldID(clazz, "dataSize", "I");
-    LOG_FATAL_IF(s_dataSizeField == NULL,
-            "Unable to find dataSize field in android.app.backup.BackupDataInput.EntityHeader");
+    jclass clazz = FindClassOrDie(env, "android/app/backup/BackupDataInput$EntityHeader");
+    s_keyField = GetFieldIDOrDie(env, clazz, "key", "Ljava/lang/String;");
+    s_dataSizeField = GetFieldIDOrDie(env, clazz, "dataSize", "I");
 
-    return AndroidRuntime::registerNativeMethods(env, "android/app/backup/BackupDataInput",
-            g_methods, NELEM(g_methods));
+    return RegisterMethodsOrDie(env, "android/app/backup/BackupDataInput", g_methods,
+                                NELEM(g_methods));
 }
 
 }

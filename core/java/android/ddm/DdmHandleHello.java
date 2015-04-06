@@ -21,6 +21,8 @@ import org.apache.harmony.dalvik.ddmc.ChunkHandler;
 import org.apache.harmony.dalvik.ddmc.DdmServer;
 import android.util.Log;
 import android.os.Debug;
+import android.os.UserHandle;
+import dalvik.system.VMRuntime;
 
 import java.nio.ByteBuffer;
 
@@ -35,6 +37,10 @@ public class DdmHandleHello extends ChunkHandler {
 
     private static DdmHandleHello mInstance = new DdmHandleHello();
 
+    private static final String[] FRAMEWORK_FEATURES = new String[] {
+        "opengl-tracing",
+        "view-hierarchy",
+    };
 
     /* singleton, do not instantiate */
     private DdmHandleHello() {}
@@ -92,7 +98,9 @@ public class DdmHandleHello extends ChunkHandler {
     }
 
     /*
-     * Handle introductory packet.
+     * Handle introductory packet. This is called during JNI_CreateJavaVM
+     * before frameworks native methods are registered, so be careful not
+     * to call any APIs that depend on frameworks native code.
      */
     private Chunk handleHELO(Chunk request) {
         if (false)
@@ -119,8 +127,21 @@ public class DdmHandleHello extends ChunkHandler {
         //    appName = "unknown";
         String appName = DdmHandleAppName.getAppName();
 
-        ByteBuffer out = ByteBuffer.allocate(16
-                            + vmIdent.length()*2 + appName.length()*2);
+        VMRuntime vmRuntime = VMRuntime.getRuntime();
+        String instructionSetDescription =
+            vmRuntime.is64Bit() ? "64-bit" : "32-bit";
+        String vmInstructionSet = vmRuntime.vmInstructionSet();
+        if (vmInstructionSet != null && vmInstructionSet.length() > 0) {
+          instructionSetDescription += " (" + vmInstructionSet + ")";
+        }
+        String vmFlags = "CheckJNI="
+            + (vmRuntime.isCheckJniEnabled() ? "true" : "false");
+
+        ByteBuffer out = ByteBuffer.allocate(28
+                            + vmIdent.length() * 2
+                            + appName.length() * 2
+                            + instructionSetDescription.length() * 2
+                            + vmFlags.length() * 2);
         out.order(ChunkHandler.CHUNK_ORDER);
         out.putInt(DdmServer.CLIENT_PROTOCOL_VERSION);
         out.putInt(android.os.Process.myPid());
@@ -128,6 +149,11 @@ public class DdmHandleHello extends ChunkHandler {
         out.putInt(appName.length());
         putString(out, vmIdent);
         putString(out, appName);
+        out.putInt(UserHandle.myUserId());
+        out.putInt(instructionSetDescription.length());
+        putString(out, instructionSetDescription);
+        out.putInt(vmFlags.length());
+        putString(out, vmFlags);
 
         Chunk reply = new Chunk(CHUNK_HELO, out);
 
@@ -147,21 +173,27 @@ public class DdmHandleHello extends ChunkHandler {
     private Chunk handleFEAT(Chunk request) {
         // TODO: query the VM to ensure that support for these features
         // is actually compiled in
-        final String[] features = Debug.getVmFeatureList();
+        final String[] vmFeatures = Debug.getVmFeatureList();
 
         if (false)
             Log.v("ddm-heap", "Got feature list request");
 
-        int size = 4 + 4 * features.length;
-        for (int i = features.length-1; i >= 0; i--)
-            size += features[i].length() * 2;
+        int size = 4 + 4 * (vmFeatures.length + FRAMEWORK_FEATURES.length);
+        for (int i = vmFeatures.length-1; i >= 0; i--)
+            size += vmFeatures[i].length() * 2;
+        for (int i = FRAMEWORK_FEATURES.length-1; i>= 0; i--)
+            size += FRAMEWORK_FEATURES[i].length() * 2;
 
         ByteBuffer out = ByteBuffer.allocate(size);
         out.order(ChunkHandler.CHUNK_ORDER);
-        out.putInt(features.length);
-        for (int i = features.length-1; i >= 0; i--) {
-            out.putInt(features[i].length());
-            putString(out, features[i]);
+        out.putInt(vmFeatures.length + FRAMEWORK_FEATURES.length);
+        for (int i = vmFeatures.length-1; i >= 0; i--) {
+            out.putInt(vmFeatures[i].length());
+            putString(out, vmFeatures[i]);
+        }
+        for (int i = FRAMEWORK_FEATURES.length-1; i >= 0; i--) {
+            out.putInt(FRAMEWORK_FEATURES[i].length());
+            putString(out, FRAMEWORK_FEATURES[i]);
         }
 
         return new Chunk(CHUNK_FEAT, out);

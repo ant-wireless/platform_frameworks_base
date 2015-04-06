@@ -78,7 +78,7 @@ public class AccessibilityRecord {
     private boolean mIsInPool;
 
     boolean mSealed;
-    int mBooleanProperties = PROPERTY_IMPORTANT_FOR_ACCESSIBILITY;
+    int mBooleanProperties = 0;
     int mCurrentItemIndex = UNDEFINED;
     int mItemCount = UNDEFINED;
     int mFromIndex = UNDEFINED;
@@ -164,7 +164,18 @@ public class AccessibilityRecord {
         }
         AccessibilityInteractionClient client = AccessibilityInteractionClient.getInstance();
         return client.findAccessibilityNodeInfoByAccessibilityId(mConnectionId, mSourceWindowId,
-                mSourceNodeId, GET_SOURCE_PREFETCH_FLAGS);
+                mSourceNodeId, false, GET_SOURCE_PREFETCH_FLAGS);
+    }
+
+    /**
+     * Sets the window id.
+     *
+     * @param windowId The window id.
+     *
+     * @hide
+     */
+    public void setWindowId(int windowId) {
+        mSourceWindowId = windowId;
     }
 
     /**
@@ -780,7 +791,7 @@ public class AccessibilityRecord {
      */
     void clear() {
         mSealed = false;
-        mBooleanProperties = PROPERTY_IMPORTANT_FOR_ACCESSIBILITY;
+        mBooleanProperties = 0;
         mCurrentItemIndex = UNDEFINED;
         mItemCount = UNDEFINED;
         mFromIndex = UNDEFINED;

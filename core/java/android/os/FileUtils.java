@@ -16,14 +16,24 @@
 
 package android.os;
 
+import android.system.ErrnoException;
+import android.system.Os;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.Slog;
+
+import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.CheckedInputStream;
@@ -33,6 +43,8 @@ import java.util.zip.CheckedInputStream;
  * @hide
  */
 public class FileUtils {
+    private static final String TAG = "FileUtils";
+
     public static final int S_IRWXU = 00700;
     public static final int S_IRUSR = 00400;
     public static final int S_IWUSR = 00200;
@@ -51,14 +63,84 @@ public class FileUtils {
     /** Regular expression for safe filenames: no spaces or metacharacters */
     private static final Pattern SAFE_FILENAME_PATTERN = Pattern.compile("[\\w%+,./=_-]+");
 
-    public static native int setPermissions(String file, int mode, int uid, int gid);
-
-    /** returns the FAT file system volume ID for the volume mounted 
-     * at the given mount point, or -1 for failure
-     * @param mountPoint point for FAT volume
-     * @return volume ID or -1
+    /**
+     * Set owner and mode of of given {@link File}.
+     *
+     * @param mode to apply through {@code chmod}
+     * @param uid to apply through {@code chown}, or -1 to leave unchanged
+     * @param gid to apply through {@code chown}, or -1 to leave unchanged
+     * @return 0 on success, otherwise errno.
      */
-    public static native int getFatVolumeId(String mountPoint);
+    public static int setPermissions(File path, int mode, int uid, int gid) {
+        return setPermissions(path.getAbsolutePath(), mode, uid, gid);
+    }
+
+    /**
+     * Set owner and mode of of given path.
+     *
+     * @param mode to apply through {@code chmod}
+     * @param uid to apply through {@code chown}, or -1 to leave unchanged
+     * @param gid to apply through {@code chown}, or -1 to leave unchanged
+     * @return 0 on success, otherwise errno.
+     */
+    public static int setPermissions(String path, int mode, int uid, int gid) {
+        try {
+            Os.chmod(path, mode);
+        } catch (ErrnoException e) {
+            Slog.w(TAG, "Failed to chmod(" + path + "): " + e);
+            return e.errno;
+        }
+
+        if (uid >= 0 || gid >= 0) {
+            try {
+                Os.chown(path, uid, gid);
+            } catch (ErrnoException e) {
+                Slog.w(TAG, "Failed to chown(" + path + "): " + e);
+                return e.errno;
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Set owner and mode of of given {@link FileDescriptor}.
+     *
+     * @param mode to apply through {@code chmod}
+     * @param uid to apply through {@code chown}, or -1 to leave unchanged
+     * @param gid to apply through {@code chown}, or -1 to leave unchanged
+     * @return 0 on success, otherwise errno.
+     */
+    public static int setPermissions(FileDescriptor fd, int mode, int uid, int gid) {
+        try {
+            Os.fchmod(fd, mode);
+        } catch (ErrnoException e) {
+            Slog.w(TAG, "Failed to fchmod(): " + e);
+            return e.errno;
+        }
+
+        if (uid >= 0 || gid >= 0) {
+            try {
+                Os.fchown(fd, uid, gid);
+            } catch (ErrnoException e) {
+                Slog.w(TAG, "Failed to fchown(): " + e);
+                return e.errno;
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Return owning UID of given path, otherwise -1.
+     */
+    public static int getUid(String path) {
+        try {
+            return Os.stat(path).st_uid;
+        } catch (ErrnoException e) {
+            return -1;
+        }
+    }
 
     /**
      * Perform an fsync on the given FileOutputStream.  The stream at this
@@ -91,7 +173,7 @@ public class FileUtils {
         }
         return result;
     }
-    
+
     /**
      * Copy data from a source stream to destFile.
      * Return true if succeed, return false if failed.
@@ -143,12 +225,16 @@ public class FileUtils {
      */
     public static String readTextFile(File file, int max, String ellipsis) throws IOException {
         InputStream input = new FileInputStream(file);
+        // wrapping a BufferedInputStream around it because when reading /proc with unbuffered
+        // input stream, bytes read not equal to buffer size is not necessarily the correct
+        // indication for EOF; but it is true for BufferedInputStream due to its implementation.
+        BufferedInputStream bis = new BufferedInputStream(input);
         try {
             long size = file.length();
             if (max > 0 || (size > 0 && max == 0)) {  // "head" mode: read the first N bytes
                 if (size > 0 && (max == 0 || size < max)) max = (int) size;
                 byte[] data = new byte[max + 1];
-                int length = input.read(data);
+                int length = bis.read(data);
                 if (length <= 0) return "";
                 if (length <= max) return new String(data, 0, length);
                 if (ellipsis == null) return new String(data, 0, max);
@@ -156,12 +242,13 @@ public class FileUtils {
             } else if (max < 0) {  // "tail" mode: keep the last N
                 int len;
                 boolean rolled = false;
-                byte[] last = null, data = null;
+                byte[] last = null;
+                byte[] data = null;
                 do {
                     if (last != null) rolled = true;
                     byte[] tmp = last; last = data; data = tmp;
                     if (data == null) data = new byte[-max];
-                    len = input.read(data);
+                    len = bis.read(data);
                 } while (len == data.length);
 
                 if (last == null && len <= 0) return "";
@@ -178,12 +265,13 @@ public class FileUtils {
                 int len;
                 byte[] data = new byte[1024];
                 do {
-                    len = input.read(data);
+                    len = bis.read(data);
                     if (len > 0) contents.write(data, 0, len);
                 } while (len == data.length);
                 return contents.toString();
             }
         } finally {
+            bis.close();
             input.close();
         }
     }
@@ -230,5 +318,202 @@ public class FileUtils {
                 }
             }
         }
+    }
+
+    /**
+     * Delete older files in a directory until only those matching the given
+     * constraints remain.
+     *
+     * @param minCount Always keep at least this many files.
+     * @param minAge Always keep files younger than this age.
+     * @return if any files were deleted.
+     */
+    public static boolean deleteOlderFiles(File dir, int minCount, long minAge) {
+        if (minCount < 0 || minAge < 0) {
+            throw new IllegalArgumentException("Constraints must be positive or 0");
+        }
+
+        final File[] files = dir.listFiles();
+        if (files == null) return false;
+
+        // Sort with newest files first
+        Arrays.sort(files, new Comparator<File>() {
+            @Override
+            public int compare(File lhs, File rhs) {
+                return (int) (rhs.lastModified() - lhs.lastModified());
+            }
+        });
+
+        // Keep at least minCount files
+        boolean deleted = false;
+        for (int i = minCount; i < files.length; i++) {
+            final File file = files[i];
+
+            // Keep files newer than minAge
+            final long age = System.currentTimeMillis() - file.lastModified();
+            if (age > minAge) {
+                if (file.delete()) {
+                    Log.d(TAG, "Deleted old file " + file);
+                    deleted = true;
+                }
+            }
+        }
+        return deleted;
+    }
+
+    /**
+     * Test if a file lives under the given directory, either as a direct child
+     * or a distant grandchild.
+     * <p>
+     * Both files <em>must</em> have been resolved using
+     * {@link File#getCanonicalFile()} to avoid symlink or path traversal
+     * attacks.
+     */
+    public static boolean contains(File dir, File file) {
+        if (file == null) return false;
+
+        String dirPath = dir.getAbsolutePath();
+        String filePath = file.getAbsolutePath();
+
+        if (dirPath.equals(filePath)) {
+            return true;
+        }
+
+        if (!dirPath.endsWith("/")) {
+            dirPath += "/";
+        }
+        return filePath.startsWith(dirPath);
+    }
+
+    public static boolean deleteContents(File dir) {
+        File[] files = dir.listFiles();
+        boolean success = true;
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    success &= deleteContents(file);
+                }
+                if (!file.delete()) {
+                    Log.w(TAG, "Failed to delete " + file);
+                    success = false;
+                }
+            }
+        }
+        return success;
+    }
+
+    private static boolean isValidExtFilenameChar(char c) {
+        switch (c) {
+            case '\0':
+            case '/':
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Check if given filename is valid for an ext4 filesystem.
+     */
+    public static boolean isValidExtFilename(String name) {
+        return (name != null) && name.equals(buildValidExtFilename(name));
+    }
+
+    /**
+     * Mutate the given filename to make it valid for an ext4 filesystem,
+     * replacing any invalid characters with "_".
+     */
+    public static String buildValidExtFilename(String name) {
+        if (TextUtils.isEmpty(name) || ".".equals(name) || "..".equals(name)) {
+            return "(invalid)";
+        }
+        final StringBuilder res = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            final char c = name.charAt(i);
+            if (isValidExtFilenameChar(c)) {
+                res.append(c);
+            } else {
+                res.append('_');
+            }
+        }
+        return res.toString();
+    }
+
+    private static boolean isValidFatFilenameChar(char c) {
+        if ((0x00 <= c && c <= 0x1f)) {
+            return false;
+        }
+        switch (c) {
+            case '"':
+            case '*':
+            case '/':
+            case ':':
+            case '<':
+            case '>':
+            case '?':
+            case '\\':
+            case '|':
+            case 0x7F:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Check if given filename is valid for a FAT filesystem.
+     */
+    public static boolean isValidFatFilename(String name) {
+        return (name != null) && name.equals(buildValidFatFilename(name));
+    }
+
+    /**
+     * Mutate the given filename to make it valid for a FAT filesystem,
+     * replacing any invalid characters with "_".
+     */
+    public static String buildValidFatFilename(String name) {
+        if (TextUtils.isEmpty(name) || ".".equals(name) || "..".equals(name)) {
+            return "(invalid)";
+        }
+        final StringBuilder res = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            final char c = name.charAt(i);
+            if (isValidFatFilenameChar(c)) {
+                res.append(c);
+            } else {
+                res.append('_');
+            }
+        }
+        return res.toString();
+    }
+
+    public static String rewriteAfterRename(File beforeDir, File afterDir, String path) {
+        if (path == null) return null;
+        final File result = rewriteAfterRename(beforeDir, afterDir, new File(path));
+        return (result != null) ? result.getAbsolutePath() : null;
+    }
+
+    public static String[] rewriteAfterRename(File beforeDir, File afterDir, String[] paths) {
+        if (paths == null) return null;
+        final String[] result = new String[paths.length];
+        for (int i = 0; i < paths.length; i++) {
+            result[i] = rewriteAfterRename(beforeDir, afterDir, paths[i]);
+        }
+        return result;
+    }
+
+    /**
+     * Given a path under the "before" directory, rewrite it to live under the
+     * "after" directory. For example, {@code /before/foo/bar.txt} would become
+     * {@code /after/foo/bar.txt}.
+     */
+    public static File rewriteAfterRename(File beforeDir, File afterDir, File file) {
+        if (file == null) return null;
+        if (contains(beforeDir, file)) {
+            final String splice = file.getAbsolutePath().substring(
+                    beforeDir.getAbsolutePath().length());
+            return new File(afterDir, splice);
+        }
+        return null;
     }
 }

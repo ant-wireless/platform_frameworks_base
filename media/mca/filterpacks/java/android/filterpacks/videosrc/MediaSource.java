@@ -23,27 +23,20 @@ import android.filterfw.core.Filter;
 import android.filterfw.core.FilterContext;
 import android.filterfw.core.Frame;
 import android.filterfw.core.FrameFormat;
-import android.filterfw.core.FrameManager;
 import android.filterfw.core.GenerateFieldPort;
 import android.filterfw.core.GenerateFinalPort;
 import android.filterfw.core.GLFrame;
-import android.filterfw.core.KeyValueMap;
 import android.filterfw.core.MutableFrameFormat;
-import android.filterfw.core.NativeFrame;
-import android.filterfw.core.Program;
 import android.filterfw.core.ShaderProgram;
 import android.filterfw.format.ImageFormat;
 import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
-import android.os.ConditionVariable;
+import android.net.Uri;
 import android.opengl.Matrix;
 import android.view.Surface;
 
 import java.io.IOException;
-import java.io.FileDescriptor;
 import java.lang.IllegalArgumentException;
-import java.util.List;
-import java.util.Set;
 
 import android.util.Log;
 
@@ -63,6 +56,12 @@ public class MediaSource extends Filter {
     /** An open asset file descriptor to a local media source. Default is null */
     @GenerateFieldPort(name = "sourceAsset", hasDefault = true)
     private AssetFileDescriptor mSourceAsset = null;
+
+    /** The context for the MediaPlayer to resolve the sourceUrl.
+     * Make sure this is set before the sourceUrl to avoid unexpected result.
+     * If the sourceUrl is not a content URI, it is OK to keep this as null. */
+    @GenerateFieldPort(name = "context", hasDefault = true)
+    private Context mContext = null;
 
     /** Whether the media source is a URL or an asset file descriptor. Defaults
      * to false.
@@ -459,7 +458,11 @@ public class MediaSource extends Filter {
         try {
             if (useUrl) {
                 if (mLogVerbose) Log.v(TAG, "Setting MediaPlayer source to URI " + mSourceUrl);
-                mMediaPlayer.setDataSource(mSourceUrl);
+                if (mContext == null) {
+                    mMediaPlayer.setDataSource(mSourceUrl);
+                } else {
+                    mMediaPlayer.setDataSource(mContext, Uri.parse(mSourceUrl.toString()));
+                }
             } else {
                 if (mLogVerbose) Log.v(TAG, "Setting MediaPlayer source to asset " + mSourceAsset);
                 mMediaPlayer.setDataSource(mSourceAsset.getFileDescriptor(), mSourceAsset.getStartOffset(), mSourceAsset.getLength());

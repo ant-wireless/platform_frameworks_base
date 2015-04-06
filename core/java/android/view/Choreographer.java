@@ -16,12 +16,16 @@
 
 package android.view;
 
+import android.hardware.display.DisplayManagerGlobal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.util.Log;
+import android.util.TimeUtils;
+
+import java.io.PrintWriter;
 
 /**
  * Coordinates the timing of animations, input and drawing.
@@ -108,8 +112,6 @@ public final class Choreographer {
     private static final int SKIPPED_FRAME_WARNING_LIMIT = SystemProperties.getInt(
             "debug.choreographer.skipwarning", 30);
 
-    private static final long NANOS_PER_MS = 1000000;
-
     private static final int MSG_DO_FRAME = 0;
     private static final int MSG_DO_SCHEDULE_VSYNC = 1;
     private static final int MSG_DO_SCHEDULE_CALLBACK = 2;
@@ -164,13 +166,19 @@ public final class Choreographer {
         mHandler = new FrameHandler(looper);
         mDisplayEventReceiver = USE_VSYNC ? new FrameDisplayEventReceiver(looper) : null;
         mLastFrameTimeNanos = Long.MIN_VALUE;
-        mFrameIntervalNanos = (long)(1000000000 /
-                new Display(Display.DEFAULT_DISPLAY, null).getRefreshRate());
+
+        mFrameIntervalNanos = (long)(1000000000 / getRefreshRate());
 
         mCallbackQueues = new CallbackQueue[CALLBACK_LAST + 1];
         for (int i = 0; i <= CALLBACK_LAST; i++) {
             mCallbackQueues[i] = new CallbackQueue();
         }
+    }
+
+    private static float getRefreshRate() {
+        DisplayInfo di = DisplayManagerGlobal.getInstance().getDisplayInfo(
+                Display.DEFAULT_DISPLAY);
+        return di.refreshRate;
     }
 
     /**
@@ -247,6 +255,23 @@ public final class Choreographer {
     public static long subtractFrameDelay(long delayMillis) {
         final long frameDelay = sFrameDelay;
         return delayMillis <= frameDelay ? 0 : delayMillis - frameDelay;
+    }
+
+    /**
+     * @return The refresh rate as the nanoseconds between frames
+     * @hide
+     */
+    public long getFrameIntervalNanos() {
+        return mFrameIntervalNanos;
+    }
+
+    void dump(String prefix, PrintWriter writer) {
+        String innerPrefix = prefix + "  ";
+        writer.print(prefix); writer.println("Choreographer:");
+        writer.print(innerPrefix); writer.print("mFrameScheduled=");
+                writer.println(mFrameScheduled);
+        writer.print(innerPrefix); writer.print("mLastFrameTime=");
+                writer.println(TimeUtils.formatUptime(mLastFrameTimeNanos / 1000000));
     }
 
     /**
@@ -406,7 +431,7 @@ public final class Choreographer {
     /**
      * Gets the time when the current frame started.
      * <p>
-     * This method provides the time in nanoseconds when the frame started being rendered.
+     * This method provides the time in milliseconds when the frame started being rendered.
      * The frame time provides a stable time base for synchronizing animations
      * and drawing.  It should be used instead of {@link SystemClock#uptimeMillis()}
      * or {@link System#nanoTime()} for animations and drawing in the UI.  Using the frame
@@ -429,7 +454,7 @@ public final class Choreographer {
      * @hide
      */
     public long getFrameTime() {
-        return getFrameTimeNanos() / NANOS_PER_MS;
+        return getFrameTimeNanos() / TimeUtils.NANOS_PER_MS;
     }
 
     /**
@@ -470,7 +495,7 @@ public final class Choreographer {
                 }
             } else {
                 final long nextFrameTime = Math.max(
-                        mLastFrameTimeNanos / NANOS_PER_MS + sFrameDelay, now);
+                        mLastFrameTimeNanos / TimeUtils.NANOS_PER_MS + sFrameDelay, now);
                 if (DEBUG) {
                     Log.d(TAG, "Scheduling next frame in " + (nextFrameTime - now) + " ms.");
                 }
@@ -677,7 +702,24 @@ public final class Choreographer {
         }
 
         @Override
-        public void onVsync(long timestampNanos, int frame) {
+        public void onVsync(long timestampNanos, int builtInDisplayId, int frame) {
+            // Ignore vsync from secondary display.
+            // This can be problematic because the call to scheduleVsync() is a one-shot.
+            // We need to ensure that we will still receive the vsync from the primary
+            // display which is the one we really care about.  Ideally we should schedule
+            // vsync for a particular display.
+            // At this time Surface Flinger won't send us vsyncs for secondary displays
+            // but that could change in the future so let's log a message to help us remember
+            // that we need to fix this.
+            if (builtInDisplayId != SurfaceControl.BUILT_IN_DISPLAY_ID_MAIN) {
+                Log.d(TAG, "Received vsync from secondary display, but we don't support "
+                        + "this case yet.  Choreographer needs a way to explicitly request "
+                        + "vsync for a specific display to ensure it doesn't lose track "
+                        + "of its scheduled vsync.");
+                scheduleVsync();
+                return;
+            }
+
             // Post the vsync event to the Handler.
             // The idea is to prevent incoming vsync events from completely starving
             // the message queue.  If there are no messages in the queue with timestamps
@@ -702,7 +744,7 @@ public final class Choreographer {
             mFrame = frame;
             Message msg = Message.obtain(mHandler, this);
             msg.setAsynchronous(true);
-            mHandler.sendMessageAtTime(msg, timestampNanos / NANOS_PER_MS);
+            mHandler.sendMessageAtTime(msg, timestampNanos / TimeUtils.NANOS_PER_MS);
         }
 
         @Override

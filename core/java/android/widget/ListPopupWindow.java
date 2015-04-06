@@ -16,20 +16,35 @@
 
 package android.widget;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ObjectAnimator;
 import android.content.Context;
+import android.content.res.TypedArray;
 import android.database.DataSetObserver;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
+import android.os.SystemClock;
+import android.text.TextUtils;
 import android.util.AttributeSet;
+import android.util.IntProperty;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.View.MeasureSpec;
 import android.view.View.OnTouchListener;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.animation.AccelerateDecelerateInterpolator;
+
+import com.android.internal.R;
+import com.android.internal.widget.AutoScrollHelper.AbsListViewAutoScroller;
+
+import java.util.Locale;
 
 /**
  * A ListPopupWindow anchors itself to a host view and displays a
@@ -64,6 +79,8 @@ public class ListPopupWindow {
     private int mDropDownVerticalOffset;
     private boolean mDropDownVerticalOffsetSet;
 
+    private int mDropDownGravity = Gravity.NO_GRAVITY;
+
     private boolean mDropDownAlwaysVisible = false;
     private boolean mForceIgnoreOutsideTouch = false;
     int mListItemExpandMaximum = Integer.MAX_VALUE;
@@ -91,6 +108,8 @@ public class ListPopupWindow {
     private Rect mTempRect = new Rect();
 
     private boolean mModal;
+
+    private int mLayoutDirection;
 
     /**
      * The provided prompt view should appear above list content.
@@ -191,8 +210,23 @@ public class ListPopupWindow {
      */
     public ListPopupWindow(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         mContext = context;
+
+        final TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.ListPopupWindow,
+                defStyleAttr, defStyleRes);
+        mDropDownHorizontalOffset = a.getDimensionPixelOffset(
+                R.styleable.ListPopupWindow_dropDownHorizontalOffset, 0);
+        mDropDownVerticalOffset = a.getDimensionPixelOffset(
+                R.styleable.ListPopupWindow_dropDownVerticalOffset, 0);
+        if (mDropDownVerticalOffset != 0) {
+            mDropDownVerticalOffsetSet = true;
+        }
+        a.recycle();
+
         mPopup = new PopupWindow(context, attrs, defStyleAttr, defStyleRes);
         mPopup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
+        // Set the default layout direction to match the default locale one
+        final Locale locale = mContext.getResources().getConfiguration().locale;
+        mLayoutDirection = TextUtils.getLayoutDirectionFromLocale(locale);
     }
 
     /**
@@ -250,7 +284,7 @@ public class ListPopupWindow {
      * @param modal {@code true} if the popup window should be modal, {@code false} otherwise.
      */
     public void setModal(boolean modal) {
-        mModal = true;
+        mModal = modal;
         mPopup.setFocusable(modal);
     }
 
@@ -419,6 +453,16 @@ public class ListPopupWindow {
     public void setVerticalOffset(int offset) {
         mDropDownVerticalOffset = offset;
         mDropDownVerticalOffsetSet = true;
+    }
+
+    /**
+     * Set the gravity of the dropdown list. This is commonly used to
+     * set gravity to START or END for alignment with the anchor.
+     *
+     * @param gravity Gravity value to use
+     */
+    public void setDropDownGravity(int gravity) {
+        mDropDownGravity = gravity;
     }
 
     /**
@@ -592,8 +636,8 @@ public class ListPopupWindow {
             // only set this if the dropdown is not always visible
             mPopup.setOutsideTouchable(!mForceIgnoreOutsideTouch && !mDropDownAlwaysVisible);
             mPopup.setTouchInterceptor(mTouchInterceptor);
-            mPopup.showAsDropDown(getAnchorView(),
-                    mDropDownHorizontalOffset, mDropDownVerticalOffset);
+            mPopup.showAsDropDown(getAnchorView(), mDropDownHorizontalOffset,
+                    mDropDownVerticalOffset, mDropDownGravity);
             mDropDownList.setSelection(ListView.INVALID_POSITION);
             
             if (!mModal || mDropDownList.isInTouchMode()) {
@@ -813,8 +857,7 @@ public class ListPopupWindow {
             // to select one of its items
             if (keyCode != KeyEvent.KEYCODE_SPACE
                     && (mDropDownList.getSelectedItemPosition() >= 0
-                            || (keyCode != KeyEvent.KEYCODE_ENTER
-                                    && keyCode != KeyEvent.KEYCODE_DPAD_CENTER))) {
+                            || !KeyEvent.isConfirmKey(keyCode))) {
                 int curIndex = mDropDownList.getSelectedItemPosition();
                 boolean consumed;
 
@@ -902,16 +945,10 @@ public class ListPopupWindow {
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         if (isShowing() && mDropDownList.getSelectedItemPosition() >= 0) {
             boolean consumed = mDropDownList.onKeyUp(keyCode, event);
-            if (consumed) {
-                switch (keyCode) {
-                    // if the list accepts the key events and the key event
-                    // was a click, the text view gets the selected item
-                    // from the drop down as its content
-                    case KeyEvent.KEYCODE_ENTER:
-                    case KeyEvent.KEYCODE_DPAD_CENTER:
-                        dismiss();
-                        break;
-                }
+            if (consumed && KeyEvent.isConfirmKey(keyCode)) {
+                // if the list accepts the key events and the key event was a click, the text view
+                // gets the selected item from the drop down as its content
+                dismiss();
             }
             return consumed;
         }
@@ -952,6 +989,35 @@ public class ListPopupWindow {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns an {@link OnTouchListener} that can be added to the source view
+     * to implement drag-to-open behavior. Generally, the source view should be
+     * the same view that was passed to {@link #setAnchorView}.
+     * <p>
+     * When the listener is set on a view, touching that view and dragging
+     * outside of its bounds will open the popup window. Lifting will select the
+     * currently touched list item.
+     * <p>
+     * Example usage:
+     * <pre>
+     * ListPopupWindow myPopup = new ListPopupWindow(context);
+     * myPopup.setAnchor(myAnchor);
+     * OnTouchListener dragListener = myPopup.createDragToOpenListener(myAnchor);
+     * myAnchor.setOnTouchListener(dragListener);
+     * </pre>
+     *
+     * @param src the view on which the resulting listener will be set
+     * @return a touch listener that controls drag-to-open behavior
+     */
+    public OnTouchListener createDragToOpenListener(View src) {
+        return new ForwardingListener(src) {
+            @Override
+            public ListPopupWindow getPopup() {
+                return ListPopupWindow.this;
+            }
+        };
     }
 
     /**
@@ -1122,13 +1188,305 @@ public class ListPopupWindow {
     }
 
     /**
+     * Abstract class that forwards touch events to a {@link ListPopupWindow}.
+     *
+     * @hide
+     */
+    public static abstract class ForwardingListener
+            implements View.OnTouchListener, View.OnAttachStateChangeListener {
+        /** Scaled touch slop, used for detecting movement outside bounds. */
+        private final float mScaledTouchSlop;
+
+        /** Timeout before disallowing intercept on the source's parent. */
+        private final int mTapTimeout;
+
+        /** Timeout before accepting a long-press to start forwarding. */
+        private final int mLongPressTimeout;
+
+        /** Source view from which events are forwarded. */
+        private final View mSrc;
+
+        /** Runnable used to prevent conflicts with scrolling parents. */
+        private Runnable mDisallowIntercept;
+
+        /** Runnable used to trigger forwarding on long-press. */
+        private Runnable mTriggerLongPress;
+
+        /** Whether this listener is currently forwarding touch events. */
+        private boolean mForwarding;
+
+        /**
+         * Whether forwarding was initiated by a long-press. If so, we won't
+         * force the window to dismiss when the touch stream ends.
+         */
+        private boolean mWasLongPress;
+
+        /** The id of the first pointer down in the current event stream. */
+        private int mActivePointerId;
+
+        public ForwardingListener(View src) {
+            mSrc = src;
+            mScaledTouchSlop = ViewConfiguration.get(src.getContext()).getScaledTouchSlop();
+            mTapTimeout = ViewConfiguration.getTapTimeout();
+
+            // Use a medium-press timeout. Halfway between tap and long-press.
+            mLongPressTimeout = (mTapTimeout + ViewConfiguration.getLongPressTimeout()) / 2;
+
+            src.addOnAttachStateChangeListener(this);
+        }
+
+        /**
+         * Returns the popup to which this listener is forwarding events.
+         * <p>
+         * Override this to return the correct popup. If the popup is displayed
+         * asynchronously, you may also need to override
+         * {@link #onForwardingStopped} to prevent premature cancelation of
+         * forwarding.
+         *
+         * @return the popup to which this listener is forwarding events
+         */
+        public abstract ListPopupWindow getPopup();
+
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            final boolean wasForwarding = mForwarding;
+            final boolean forwarding;
+            if (wasForwarding) {
+                forwarding = onTouchForwarded(event) || !onForwardingStopped();
+            } else {
+                forwarding = onTouchObserved(event) && onForwardingStarted();
+
+                if (forwarding) {
+                    // Make sure we cancel any ongoing source event stream.
+                    final long now = SystemClock.uptimeMillis();
+                    final MotionEvent e = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL,
+                            0.0f, 0.0f, 0);
+                    mSrc.onTouchEvent(e);
+                    e.recycle();
+                }
+            }
+
+            mForwarding = forwarding;
+            return forwarding || wasForwarding;
+        }
+
+        @Override
+        public void onViewAttachedToWindow(View v) {
+        }
+
+        @Override
+        public void onViewDetachedFromWindow(View v) {
+            mForwarding = false;
+            mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+
+            if (mDisallowIntercept != null) {
+                mSrc.removeCallbacks(mDisallowIntercept);
+            }
+        }
+
+        /**
+         * Called when forwarding would like to start.
+         * <p>
+         * By default, this will show the popup returned by {@link #getPopup()}.
+         * It may be overridden to perform another action, like clicking the
+         * source view or preparing the popup before showing it.
+         *
+         * @return true to start forwarding, false otherwise
+         */
+        protected boolean onForwardingStarted() {
+            final ListPopupWindow popup = getPopup();
+            if (popup != null && !popup.isShowing()) {
+                popup.show();
+            }
+            return true;
+        }
+
+        /**
+         * Called when forwarding would like to stop.
+         * <p>
+         * By default, this will dismiss the popup returned by
+         * {@link #getPopup()}. It may be overridden to perform some other
+         * action.
+         *
+         * @return true to stop forwarding, false otherwise
+         */
+        protected boolean onForwardingStopped() {
+            final ListPopupWindow popup = getPopup();
+            if (popup != null && popup.isShowing()) {
+                popup.dismiss();
+            }
+            return true;
+        }
+
+        /**
+         * Observes motion events and determines when to start forwarding.
+         *
+         * @param srcEvent motion event in source view coordinates
+         * @return true to start forwarding motion events, false otherwise
+         */
+        private boolean onTouchObserved(MotionEvent srcEvent) {
+            final View src = mSrc;
+            if (!src.isEnabled()) {
+                return false;
+            }
+
+            final int actionMasked = srcEvent.getActionMasked();
+            switch (actionMasked) {
+                case MotionEvent.ACTION_DOWN:
+                    mActivePointerId = srcEvent.getPointerId(0);
+                    mWasLongPress = false;
+
+                    if (mDisallowIntercept == null) {
+                        mDisallowIntercept = new DisallowIntercept();
+                    }
+                    src.postDelayed(mDisallowIntercept, mTapTimeout);
+
+                    if (mTriggerLongPress == null) {
+                        mTriggerLongPress = new TriggerLongPress();
+                    }
+                    src.postDelayed(mTriggerLongPress, mLongPressTimeout);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    final int activePointerIndex = srcEvent.findPointerIndex(mActivePointerId);
+                    if (activePointerIndex >= 0) {
+                        final float x = srcEvent.getX(activePointerIndex);
+                        final float y = srcEvent.getY(activePointerIndex);
+
+                        // Has the pointer has moved outside of the view?
+                        if (!src.pointInView(x, y, mScaledTouchSlop)) {
+                            clearCallbacks();
+
+                            // Don't let the parent intercept our events.
+                            src.getParent().requestDisallowInterceptTouchEvent(true);
+                            return true;
+                        }
+                    }
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                case MotionEvent.ACTION_UP:
+                    clearCallbacks();
+                    break;
+            }
+
+            return false;
+        }
+
+        private void clearCallbacks() {
+            if (mTriggerLongPress != null) {
+                mSrc.removeCallbacks(mTriggerLongPress);
+            }
+
+            if (mDisallowIntercept != null) {
+                mSrc.removeCallbacks(mDisallowIntercept);
+            }
+        }
+
+        private void onLongPress() {
+            clearCallbacks();
+
+            final View src = mSrc;
+            if (!src.isEnabled() || src.isLongClickable()) {
+                // Ignore long-press if the view is disabled or has its own
+                // handler.
+                return;
+            }
+
+            if (!onForwardingStarted()) {
+                return;
+            }
+
+            // Don't let the parent intercept our events.
+            src.getParent().requestDisallowInterceptTouchEvent(true);
+
+            // Make sure we cancel any ongoing source event stream.
+            final long now = SystemClock.uptimeMillis();
+            final MotionEvent e = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0, 0, 0);
+            src.onTouchEvent(e);
+            e.recycle();
+
+            mForwarding = true;
+            mWasLongPress = true;
+        }
+
+        /**
+         * Handled forwarded motion events and determines when to stop
+         * forwarding.
+         *
+         * @param srcEvent motion event in source view coordinates
+         * @return true to continue forwarding motion events, false to cancel
+         */
+        private boolean onTouchForwarded(MotionEvent srcEvent) {
+            final View src = mSrc;
+            final ListPopupWindow popup = getPopup();
+            if (popup == null || !popup.isShowing()) {
+                return false;
+            }
+
+            final DropDownListView dst = popup.mDropDownList;
+            if (dst == null || !dst.isShown()) {
+                return false;
+            }
+
+            // Convert event to destination-local coordinates.
+            final MotionEvent dstEvent = MotionEvent.obtainNoHistory(srcEvent);
+            src.toGlobalMotionEvent(dstEvent);
+            dst.toLocalMotionEvent(dstEvent);
+
+            // Forward converted event to destination view, then recycle it.
+            final boolean handled = dst.onForwardedEvent(dstEvent, mActivePointerId);
+            dstEvent.recycle();
+
+            // Always cancel forwarding when the touch stream ends.
+            final int action = srcEvent.getActionMasked();
+            final boolean keepForwarding = action != MotionEvent.ACTION_UP
+                    && action != MotionEvent.ACTION_CANCEL;
+
+            return handled && keepForwarding;
+        }
+
+        private class DisallowIntercept implements Runnable {
+            @Override
+            public void run() {
+                final ViewParent parent = mSrc.getParent();
+                parent.requestDisallowInterceptTouchEvent(true);
+            }
+        }
+
+        private class TriggerLongPress implements Runnable {
+            @Override
+            public void run() {
+                onLongPress();
+            }
+        }
+    }
+
+    /**
      * <p>Wrapper class for a ListView. This wrapper can hijack the focus to
      * make sure the list uses the appropriate drawables and states when
      * displayed on screen within a drop down. The focus is never actually
      * passed to the drop down in this mode; the list only looks focused.</p>
      */
     private static class DropDownListView extends ListView {
-        private static final String TAG = ListPopupWindow.TAG + ".DropDownListView";
+        /** Duration in milliseconds of the drag-to-open click animation. */
+        private static final long CLICK_ANIM_DURATION = 150;
+
+        /** Target alpha value for drag-to-open click animation. */
+        private static final int CLICK_ANIM_ALPHA = 0x80;
+
+        /** Wrapper around Drawable's <code>alpha</code> property. */
+        private static final IntProperty<Drawable> DRAWABLE_ALPHA =
+                new IntProperty<Drawable>("alpha") {
+                    @Override
+                    public void setValue(Drawable object, int value) {
+                        object.setAlpha(value);
+                    }
+
+                    @Override
+                    public Integer get(Drawable object) {
+                        return object.getAlpha();
+                    }
+                };
+
         /*
          * WARNING: This is a workaround for a touch mode issue.
          *
@@ -1164,6 +1522,15 @@ public class ListPopupWindow {
          */
         private boolean mHijackFocus;
 
+        /** Whether to force drawing of the pressed state selector. */
+        private boolean mDrawsInPressedState;
+
+        /** Current drag-to-open click animation, if any. */
+        private Animator mClickAnimation;
+
+        /** Helper for drag-to-open auto scrolling. */
+        private AbsListViewAutoScroller mScrollHelper;
+
         /**
          * <p>Creates a new list view wrapper.</p>
          *
@@ -1174,6 +1541,157 @@ public class ListPopupWindow {
             mHijackFocus = hijackFocus;
             // TODO: Add an API to control this
             setCacheColorHint(0); // Transparent, since the background drawable could be anything.
+        }
+
+        /**
+         * Handles forwarded events.
+         *
+         * @param activePointerId id of the pointer that activated forwarding
+         * @return whether the event was handled
+         */
+        public boolean onForwardedEvent(MotionEvent event, int activePointerId) {
+            boolean handledEvent = true;
+            boolean clearPressedItem = false;
+
+            final int actionMasked = event.getActionMasked();
+            switch (actionMasked) {
+                case MotionEvent.ACTION_CANCEL:
+                    handledEvent = false;
+                    break;
+                case MotionEvent.ACTION_UP:
+                    handledEvent = false;
+                    // $FALL-THROUGH$
+                case MotionEvent.ACTION_MOVE:
+                    final int activeIndex = event.findPointerIndex(activePointerId);
+                    if (activeIndex < 0) {
+                        handledEvent = false;
+                        break;
+                    }
+
+                    final int x = (int) event.getX(activeIndex);
+                    final int y = (int) event.getY(activeIndex);
+                    final int position = pointToPosition(x, y);
+                    if (position == INVALID_POSITION) {
+                        clearPressedItem = true;
+                        break;
+                    }
+
+                    final View child = getChildAt(position - getFirstVisiblePosition());
+                    setPressedItem(child, position, x, y);
+                    handledEvent = true;
+
+                    if (actionMasked == MotionEvent.ACTION_UP) {
+                        clickPressedItem(child, position);
+                    }
+                    break;
+            }
+
+            // Failure to handle the event cancels forwarding.
+            if (!handledEvent || clearPressedItem) {
+                clearPressedItem();
+            }
+
+            // Manage automatic scrolling.
+            if (handledEvent) {
+                if (mScrollHelper == null) {
+                    mScrollHelper = new AbsListViewAutoScroller(this);
+                }
+                mScrollHelper.setEnabled(true);
+                mScrollHelper.onTouch(this, event);
+            } else if (mScrollHelper != null) {
+                mScrollHelper.setEnabled(false);
+            }
+
+            return handledEvent;
+        }
+
+        /**
+         * Starts an alpha animation on the selector. When the animation ends,
+         * the list performs a click on the item.
+         */
+        private void clickPressedItem(final View child, final int position) {
+            final long id = getItemIdAtPosition(position);
+            final Animator anim = ObjectAnimator.ofInt(
+                    mSelector, DRAWABLE_ALPHA, 0xFF, CLICK_ANIM_ALPHA, 0xFF);
+            anim.setDuration(CLICK_ANIM_DURATION);
+            anim.setInterpolator(new AccelerateDecelerateInterpolator());
+            anim.addListener(new AnimatorListenerAdapter() {
+                    @Override
+                public void onAnimationEnd(Animator animation) {
+                    performItemClick(child, position, id);
+                }
+            });
+            anim.start();
+
+            if (mClickAnimation != null) {
+                mClickAnimation.cancel();
+            }
+            mClickAnimation = anim;
+        }
+
+        private void clearPressedItem() {
+            mDrawsInPressedState = false;
+            setPressed(false);
+            updateSelectorState();
+
+            final View motionView = getChildAt(mMotionPosition - mFirstPosition);
+            if (motionView != null) {
+                motionView.setPressed(false);
+            }
+
+            if (mClickAnimation != null) {
+                mClickAnimation.cancel();
+                mClickAnimation = null;
+            }
+        }
+
+        private void setPressedItem(View child, int position, float x, float y) {
+            mDrawsInPressedState = true;
+
+            // Ordering is essential. First, update the container's pressed state.
+            drawableHotspotChanged(x, y);
+            if (!isPressed()) {
+                setPressed(true);
+            }
+
+            // Next, run layout if we need to stabilize child positions.
+            if (mDataChanged) {
+                layoutChildren();
+            }
+
+            // Manage the pressed view based on motion position. This allows us to
+            // play nicely with actual touch and scroll events.
+            final View motionView = getChildAt(mMotionPosition - mFirstPosition);
+            if (motionView != null && motionView != child && motionView.isPressed()) {
+                motionView.setPressed(false);
+            }
+            mMotionPosition = position;
+
+            // Offset for child coordinates.
+            final float childX = x - child.getLeft();
+            final float childY = y - child.getTop();
+            child.drawableHotspotChanged(childX, childY);
+            if (!child.isPressed()) {
+                child.setPressed(true);
+            }
+
+            // Ensure that keyboard focus starts from the last touched position.
+            setSelectedPositionInt(position);
+            positionSelectorLikeTouch(position, child, x, y);
+
+            // Refresh the drawable state to reflect the new pressed state,
+            // which will also update the selector state.
+            refreshDrawableState();
+
+            if (mClickAnimation != null) {
+                mClickAnimation.cancel();
+                mClickAnimation = null;
+            }
+        }
+
+        @Override
+        boolean touchModeDrawsInPressedState() {
+            return mDrawsInPressedState || super.touchModeDrawsInPressedState();
         }
 
         /**

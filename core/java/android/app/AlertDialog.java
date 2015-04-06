@@ -27,7 +27,6 @@ import android.os.Message;
 import android.util.TypedValue;
 import android.view.ContextThemeWrapper;
 import android.view.KeyEvent;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.AdapterView;
@@ -90,9 +89,21 @@ public class AlertDialog extends Dialog implements DialogInterface {
 
     /**
      * Special theme constant for {@link #AlertDialog(Context, int)}: use
-     * the device's default alert theme with a dark background.
+     * the device's default alert theme with a light background.
      */
     public static final int THEME_DEVICE_DEFAULT_LIGHT = 5;
+
+    /**
+     * No layout hint.
+     * @hide
+     */
+    public static final int LAYOUT_HINT_NONE = 0;
+
+    /**
+     * Hint layout to the side.
+     * @hide
+     */
+    public static final int LAYOUT_HINT_SIDE = 1;
     
     protected AlertDialog(Context context) {
         this(context, resolveDialogTheme(context, 0), true);
@@ -110,8 +121,9 @@ public class AlertDialog extends Dialog implements DialogInterface {
         this(context, theme, true);
     }
 
-    AlertDialog(Context context, int theme, boolean createContextWrapper) {
-        super(context, resolveDialogTheme(context, theme), createContextWrapper);
+    AlertDialog(Context context, int theme, boolean createThemeContextWrapper) {
+        super(context, resolveDialogTheme(context, theme), createThemeContextWrapper);
+
         mWindow.alwaysReadCloseOnTouchAttr();
         mAlert = new AlertController(getContext(), this, getWindow());
     }
@@ -146,10 +158,10 @@ public class AlertDialog extends Dialog implements DialogInterface {
     }
 
     /**
-     * Gets one of the buttons used in the dialog.
-     * <p>
-     * If a button does not exist in the dialog, null will be returned.
-     * 
+     * Gets one of the buttons used in the dialog. Returns null if the specified
+     * button does not exist or the dialog has not yet been fully created (for
+     * example, via {@link #show()} or {@link #create()}).
+     *
      * @param whichButton The identifier of the button that should be returned.
      *            For example, this can be
      *            {@link DialogInterface#BUTTON_POSITIVE}.
@@ -158,7 +170,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
     public Button getButton(int whichButton) {
         return mAlert.getButton(whichButton);
     }
-    
+
     /**
      * Gets the list view used in the dialog.
      *  
@@ -205,6 +217,14 @@ public class AlertDialog extends Dialog implements DialogInterface {
     public void setView(View view, int viewSpacingLeft, int viewSpacingTop, int viewSpacingRight,
             int viewSpacingBottom) {
         mAlert.setView(view, viewSpacingLeft, viewSpacingTop, viewSpacingRight, viewSpacingBottom);
+    }
+
+    /**
+     * Internal api to allow hinting for the best button panel layout.
+     * @hide
+     */
+    void setButtonPanelLayoutHint(int layoutHint) {
+        mAlert.setButtonPanelLayoutHint(layoutHint);
     }
 
     /**
@@ -446,6 +466,8 @@ public class AlertDialog extends Dialog implements DialogInterface {
         
         /**
          * Set the resource id of the {@link Drawable} to be used in the title.
+         * <p>
+         * Takes precedence over values set using {@link #setIcon(Drawable)}.
          *
          * @return This Builder object to allow for chaining of calls to set methods
          */
@@ -465,7 +487,11 @@ public class AlertDialog extends Dialog implements DialogInterface {
         }
 
         /**
-         * Set an icon as supplied by a theme attribute. e.g. android.R.attr.alertDialogIcon
+         * Set an icon as supplied by a theme attribute. e.g.
+         * {@link android.R.attr#alertDialogIcon}.
+         * <p>
+         * Takes precedence over values set using {@link #setIcon(int)} or
+         * {@link #setIcon(Drawable)}.
          *
          * @param attrId ID of a theme attribute that points to a drawable resource.
          */
@@ -566,7 +592,14 @@ public class AlertDialog extends Dialog implements DialogInterface {
         
         /**
          * Sets the callback that will be called if the dialog is canceled.
+         *
+         * <p>Even in a cancelable dialog, the dialog may be dismissed for reasons other than
+         * being canceled or one of the supplied choices being selected.
+         * If you are interested in listening for all cases where the dialog is dismissed
+         * and not just when it is canceled, see
+         * {@link #setOnDismissListener(android.content.DialogInterface.OnDismissListener) setOnDismissListener}.</p>
          * @see #setCancelable(boolean)
+         * @see #setOnDismissListener(android.content.DialogInterface.OnDismissListener)
          *
          * @return This Builder object to allow for chaining of calls to set methods
          */
@@ -575,6 +608,16 @@ public class AlertDialog extends Dialog implements DialogInterface {
             return this;
         }
         
+        /**
+         * Sets the callback that will be called when the dialog is dismissed for any reason.
+         *
+         * @return This Builder object to allow for chaining of calls to set methods
+         */
+        public Builder setOnDismissListener(OnDismissListener onDismissListener) {
+            P.mOnDismissListener = onDismissListener;
+            return this;
+        }
+
         /**
          * Sets the callback that will be called if a key is dispatched to the dialog.
          *
@@ -835,6 +878,21 @@ public class AlertDialog extends Dialog implements DialogInterface {
         }
         
         /**
+         * Set a custom view resource to be the contents of the Dialog. The
+         * resource will be inflated, adding all top-level views to the screen.
+         *
+         * @param layoutResId Resource ID to be inflated.
+         * @return This Builder object to allow for chaining of calls to set
+         *         methods
+         */
+        public Builder setView(int layoutResId) {
+            P.mView = null;
+            P.mViewLayoutResId = layoutResId;
+            P.mViewSpacingSpecified = false;
+            return this;
+        }
+
+        /**
          * Set a custom view to be the contents of the Dialog. If the supplied view is an instance
          * of a {@link ListView} the light background will be used.
          *
@@ -844,6 +902,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
          */
         public Builder setView(View view) {
             P.mView = view;
+            P.mViewLayoutResId = 0;
             P.mViewSpacingSpecified = false;
             return this;
         }
@@ -873,6 +932,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
         public Builder setView(View view, int viewSpacingLeft, int viewSpacingTop,
                 int viewSpacingRight, int viewSpacingBottom) {
             P.mView = view;
+            P.mViewLayoutResId = 0;
             P.mViewSpacingSpecified = true;
             P.mViewSpacingLeft = viewSpacingLeft;
             P.mViewSpacingTop = viewSpacingTop;
@@ -917,6 +977,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
                 dialog.setCanceledOnTouchOutside(true);
             }
             dialog.setOnCancelListener(P.mOnCancelListener);
+            dialog.setOnDismissListener(P.mOnDismissListener);
             if (P.mOnKeyListener != null) {
                 dialog.setOnKeyListener(P.mOnKeyListener);
             }

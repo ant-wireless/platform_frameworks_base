@@ -95,19 +95,101 @@ public final class Formatter {
     }
 
     /**
-     * Returns a string in the canonical IP format ###.###.###.### from a packed integer containing
-     * the IP address.  The IP address is expected to be in little-endian format (LSB first). That
-     * is, 0x01020304 will return "4.3.2.1".
+     * Returns a string in the canonical IPv4 format ###.###.###.### from a packed integer
+     * containing the IP address. The IPv4 address is expected to be in little-endian
+     * format (LSB first). That is, 0x01020304 will return "4.3.2.1".
      *
-     * @param ipv4Address the IP address as a packed integer with LSB first.
-     * @return string with canonical IP address format.
-     *
-     * @deprecated this method doesn't support IPv6 addresses. Prefer {@link
-     *     java.net.InetAddress#getHostAddress()}, which supports both IPv4 and
-     *     IPv6 addresses.
+     * @deprecated Use {@link java.net.InetAddress#getHostAddress()}, which supports both IPv4 and
+     *     IPv6 addresses. This method does not support IPv6 addresses.
      */
     @Deprecated
     public static String formatIpAddress(int ipv4Address) {
         return NetworkUtils.intToInetAddress(ipv4Address).getHostAddress();
+    }
+
+    private static final int SECONDS_PER_MINUTE = 60;
+    private static final int SECONDS_PER_HOUR = 60 * 60;
+    private static final int SECONDS_PER_DAY = 24 * 60 * 60;
+    private static final int MILLIS_PER_MINUTE = 1000 * 60;
+
+    /**
+     * Returns elapsed time for the given millis, in the following format:
+     * 1 day 5 hrs; will include at most two units, can go down to seconds precision.
+     * @param context the application context
+     * @param millis the elapsed time in milli seconds
+     * @return the formatted elapsed time
+     * @hide
+     */
+    public static String formatShortElapsedTime(Context context, long millis) {
+        long secondsLong = millis / 1000;
+
+        int days = 0, hours = 0, minutes = 0;
+        if (secondsLong >= SECONDS_PER_DAY) {
+            days = (int)(secondsLong / SECONDS_PER_DAY);
+            secondsLong -= days * SECONDS_PER_DAY;
+        }
+        if (secondsLong >= SECONDS_PER_HOUR) {
+            hours = (int)(secondsLong / SECONDS_PER_HOUR);
+            secondsLong -= hours * SECONDS_PER_HOUR;
+        }
+        if (secondsLong >= SECONDS_PER_MINUTE) {
+            minutes = (int)(secondsLong / SECONDS_PER_MINUTE);
+            secondsLong -= minutes * SECONDS_PER_MINUTE;
+        }
+        int seconds = (int)secondsLong;
+
+        if (days >= 2) {
+            days += (hours+12)/24;
+            return context.getString(com.android.internal.R.string.durationDays, days);
+        } else if (days > 0) {
+            if (hours == 1) {
+                return context.getString(com.android.internal.R.string.durationDayHour, days, hours);
+            }
+            return context.getString(com.android.internal.R.string.durationDayHours, days, hours);
+        } else if (hours >= 2) {
+            hours += (minutes+30)/60;
+            return context.getString(com.android.internal.R.string.durationHours, hours);
+        } else if (hours > 0) {
+            if (minutes == 1) {
+                return context.getString(com.android.internal.R.string.durationHourMinute, hours,
+                        minutes);
+            }
+            return context.getString(com.android.internal.R.string.durationHourMinutes, hours,
+                    minutes);
+        } else if (minutes >= 2) {
+            minutes += (seconds+30)/60;
+            return context.getString(com.android.internal.R.string.durationMinutes, minutes);
+        } else if (minutes > 0) {
+            if (seconds == 1) {
+                return context.getString(com.android.internal.R.string.durationMinuteSecond, minutes,
+                        seconds);
+            }
+            return context.getString(com.android.internal.R.string.durationMinuteSeconds, minutes,
+                    seconds);
+        } else if (seconds == 1) {
+            return context.getString(com.android.internal.R.string.durationSecond, seconds);
+        } else {
+            return context.getString(com.android.internal.R.string.durationSeconds, seconds);
+        }
+    }
+
+    /**
+     * Returns elapsed time for the given millis, in the following format:
+     * 1 day 5 hrs; will include at most two units, can go down to minutes precision.
+     * @param context the application context
+     * @param millis the elapsed time in milli seconds
+     * @return the formatted elapsed time
+     * @hide
+     */
+    public static String formatShortElapsedTimeRoundingUpToMinutes(Context context, long millis) {
+        long minutesRoundedUp = (millis + MILLIS_PER_MINUTE - 1) / MILLIS_PER_MINUTE;
+
+        if (minutesRoundedUp == 0) {
+            return context.getString(com.android.internal.R.string.durationMinutes, 0);
+        } else if (minutesRoundedUp == 1) {
+            return context.getString(com.android.internal.R.string.durationMinute, 1);
+        }
+
+        return formatShortElapsedTime(context, minutesRoundedUp * MILLIS_PER_MINUTE);
     }
 }

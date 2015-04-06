@@ -16,19 +16,27 @@
 
 package android.view;
 
+import android.animation.AnimatorInflater;
+import android.animation.StateListAnimator;
+import android.annotation.IntDef;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.ClipData;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Bitmap;
-import android.graphics.Camera;
 import android.graphics.Canvas;
 import android.graphics.Insets;
 import android.graphics.Interpolator;
 import android.graphics.LinearGradient;
 import android.graphics.Matrix;
+import android.graphics.Outline;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PathMeasure;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.graphics.PorterDuff;
@@ -39,6 +47,7 @@ import android.graphics.Region;
 import android.graphics.Shader;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.hardware.display.DisplayManagerGlobal;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -47,16 +56,17 @@ import android.os.Parcelable;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.Trace;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.FloatProperty;
-import android.util.LocaleUtil;
+import android.util.LayoutDirection;
 import android.util.Log;
-import android.util.Pool;
-import android.util.Poolable;
-import android.util.PoolableManager;
-import android.util.Pools;
+import android.util.LongSparseLongArray;
+import android.util.Pools.SynchronizedPool;
 import android.util.Property;
 import android.util.SparseArray;
+import android.util.SuperNotCalledException;
 import android.util.TypedValue;
 import android.view.ContextMenu.ContextMenuInfo;
 import android.view.AccessibilityIterators.TextSegmentIterator;
@@ -82,14 +92,25 @@ import static java.lang.Math.max;
 import com.android.internal.R;
 import com.android.internal.util.Predicate;
 import com.android.internal.view.menu.MenuBuilder;
+import com.google.android.collect.Lists;
+import com.google.android.collect.Maps;
 
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * <p>
@@ -343,9 +364,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Padding can be used to offset the content of the view by a specific amount of
  * pixels. For instance, a left padding of 2 will push the view's content by
  * 2 pixels to the right of the left edge. Padding can be set using the
- * {@link #setPadding(int, int, int, int)} method and queried by calling
- * {@link #getPaddingLeft()}, {@link #getPaddingTop()}, {@link #getPaddingRight()},
- * {@link #getPaddingBottom()}.
+ * {@link #setPadding(int, int, int, int)} or {@link #setPaddingRelative(int, int, int, int)}
+ * method and queried by calling {@link #getPaddingLeft()}, {@link #getPaddingTop()},
+ * {@link #getPaddingRight()}, {@link #getPaddingBottom()}, {@link #getPaddingStart()},
+ * {@link #getPaddingEnd()}.
  * </p>
  *
  * <p>
@@ -411,7 +433,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * child. The child must use this size, and guarantee that all of its
  * descendants will fit within this size.
  * <li>AT_MOST: This is used by the parent to impose a maximum size on the
- * child. The child must gurantee that it and all of its descendants will fit
+ * child. The child must guarantee that it and all of its descendants will fit
  * within this size.
  * </ul>
  * </p>
@@ -425,16 +447,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <a name="Drawing"></a>
  * <h3>Drawing</h3>
  * <p>
- * Drawing is handled by walking the tree and rendering each view that
- * intersects the invalid region. Because the tree is traversed in-order,
- * this means that parents will draw before (i.e., behind) their children, with
- * siblings drawn in the order they appear in the tree.
- * If you set a background drawable for a View, then the View will draw it for you
- * before calling back to its <code>onDraw()</code> method.
+ * Drawing is handled by walking the tree and recording the drawing commands of
+ * any View that needs to update. After this, the drawing commands of the
+ * entire tree are issued to screen, clipped to the newly damaged area.
  * </p>
  *
  * <p>
- * Note that the framework will not draw views that are not in the invalid region.
+ * The tree is largely recorded and drawn in order, with parents drawn before
+ * (i.e., behind) their children, with siblings drawn in the order they appear
+ * in the tree. If you set a background drawable for a View, then the View will
+ * draw it before calling back to its <code>onDraw()</code> method. The child
+ * drawing order can be overridden with
+ * {@link ViewGroup#setChildrenDrawingOrderEnabled(boolean) custom child drawing order}
+ * in a ViewGroup, and with {@link #setZ(float)} custom Z values} set on Views.
  * </p>
  *
  * <p>
@@ -614,6 +639,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * @attr ref android.R.styleable#View_hapticFeedbackEnabled
  * @attr ref android.R.styleable#View_keepScreenOn
  * @attr ref android.R.styleable#View_layerType
+ * @attr ref android.R.styleable#View_layoutDirection
  * @attr ref android.R.styleable#View_longClickable
  * @attr ref android.R.styleable#View_minHeight
  * @attr ref android.R.styleable#View_minWidth
@@ -627,6 +653,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * @attr ref android.R.styleable#View_paddingLeft
  * @attr ref android.R.styleable#View_paddingRight
  * @attr ref android.R.styleable#View_paddingTop
+ * @attr ref android.R.styleable#View_paddingStart
+ * @attr ref android.R.styleable#View_paddingEnd
  * @attr ref android.R.styleable#View_saveEnabled
  * @attr ref android.R.styleable#View_rotation
  * @attr ref android.R.styleable#View_rotationX
@@ -646,17 +674,22 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * @attr ref android.R.styleable#View_scrollbarTrackVertical
  * @attr ref android.R.styleable#View_scrollbarAlwaysDrawHorizontalTrack
  * @attr ref android.R.styleable#View_scrollbarAlwaysDrawVerticalTrack
+ * @attr ref android.R.styleable#View_stateListAnimator
+ * @attr ref android.R.styleable#View_transitionName
  * @attr ref android.R.styleable#View_soundEffectsEnabled
  * @attr ref android.R.styleable#View_tag
+ * @attr ref android.R.styleable#View_textAlignment
+ * @attr ref android.R.styleable#View_textDirection
  * @attr ref android.R.styleable#View_transformPivotX
  * @attr ref android.R.styleable#View_transformPivotY
  * @attr ref android.R.styleable#View_translationX
  * @attr ref android.R.styleable#View_translationY
+ * @attr ref android.R.styleable#View_translationZ
  * @attr ref android.R.styleable#View_visibility
  *
  * @see android.view.ViewGroup
  */
-public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Callback,
+public class View implements Drawable.Callback, KeyEvent.Callback,
         AccessibilityEventSource {
     private static final boolean DBG = false;
 
@@ -673,9 +706,32 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public static final String DEBUG_LAYOUT_PROPERTY = "debug.layout";
 
     /**
+     * When set to true, this view will save its attribute data.
+     *
+     * @hide
+     */
+    public static boolean mDebugViewAttributes = false;
+
+    /**
      * Used to mark a View that has no ID.
      */
     public static final int NO_ID = -1;
+
+    /**
+     * Signals that compatibility booleans have been initialized according to
+     * target SDK versions.
+     */
+    private static boolean sCompatibilityDone = false;
+
+    /**
+     * Use the old (broken) way of building MeasureSpecs.
+     */
+    private static boolean sUseBrokenMakeMeasureSpec = false;
+
+    /**
+     * Ignore any optimizations using the measure cache.
+     */
+    private static boolean sIgnoreMeasureCache = false;
 
     /**
      * This view does not want keystrokes. Use with TAKES_FOCUS_MASK when
@@ -698,6 +754,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * This view will adjust its padding to fit sytem windows (e.g. status bar)
      */
     private static final int FITS_SYSTEM_WINDOWS = 0x00000002;
+
+    /** @hide */
+    @IntDef({VISIBLE, INVISIBLE, GONE})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface Visibility {}
 
     /**
      * This view is visible.
@@ -866,6 +927,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     static final int FOCUSABLE_IN_TOUCH_MODE = 0x00040000;
 
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef({DRAWING_CACHE_QUALITY_LOW, DRAWING_CACHE_QUALITY_HIGH, DRAWING_CACHE_QUALITY_AUTO})
+    public @interface DrawingCacheQuality {}
+
     /**
      * <p>Enables low quality mode for the drawing cache.</p>
      */
@@ -909,6 +975,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     static final int DUPLICATE_PARENT_STATE = 0x00400000;
+
+    /** @hide */
+    @IntDef({
+        SCROLLBARS_INSIDE_OVERLAY,
+        SCROLLBARS_INSIDE_INSET,
+        SCROLLBARS_OUTSIDE_OVERLAY,
+        SCROLLBARS_OUTSIDE_INSET
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface ScrollBarStyle {}
 
     /**
      * The scrollbar style to display the scrollbars inside the content area,
@@ -990,6 +1066,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     static final int PARENT_SAVE_DISABLED_MASK = 0x20000000;
 
+    /** @hide */
+    @IntDef(flag = true,
+            value = {
+                FOCUSABLES_ALL,
+                FOCUSABLES_TOUCH_MODE
+            })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface FocusableMode {}
+
     /**
      * View flag indicating whether {@link #addFocusables(ArrayList, int, int)}
      * should add all focusable Views regardless if they are focusable in touch mode.
@@ -1002,13 +1087,27 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public static final int FOCUSABLES_TOUCH_MODE = 0x00000001;
 
-    /**
-     * View flag indicating whether {@link #addFocusables(ArrayList, int, int)}
-     * should add only accessibility focusable Views.
-     *
-     * @hide
-     */
-    public static final int FOCUSABLES_ACCESSIBILITY = 0x00000002;
+    /** @hide */
+    @IntDef({
+            FOCUS_BACKWARD,
+            FOCUS_FORWARD,
+            FOCUS_LEFT,
+            FOCUS_UP,
+            FOCUS_RIGHT,
+            FOCUS_DOWN
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface FocusDirection {}
+
+    /** @hide */
+    @IntDef({
+            FOCUS_LEFT,
+            FOCUS_UP,
+            FOCUS_RIGHT,
+            FOCUS_DOWN
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface FocusRealDirection {} // Like @FocusDirection, but without forward/backward
 
     /**
      * Use with {@link #focusSearch(int)}. Move focus to the previous selectable
@@ -1041,58 +1140,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Use with {@link #focusSearch(int)}. Move focus down.
      */
     public static final int FOCUS_DOWN = 0x00000082;
-
-    // Accessibility focus directions.
-
-    /**
-     * The accessibility focus which is the current user position when
-     * interacting with the accessibility framework.
-     *
-     * @hide
-     */
-    public static final int FOCUS_ACCESSIBILITY =  0x00001000;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus left.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_LEFT = FOCUS_LEFT | FOCUS_ACCESSIBILITY;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus up.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_UP = FOCUS_UP | FOCUS_ACCESSIBILITY;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus right.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_RIGHT = FOCUS_RIGHT | FOCUS_ACCESSIBILITY;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus down.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_DOWN = FOCUS_DOWN | FOCUS_ACCESSIBILITY;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus forward.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_FORWARD = FOCUS_FORWARD | FOCUS_ACCESSIBILITY;
-
-    /**
-     * Use with {@link #focusSearch(int)}. Move acessibility focus backward.
-     *
-     * @hide
-     */
-    public static final int ACCESSIBILITY_FOCUS_BACKWARD = FOCUS_BACKWARD | FOCUS_ACCESSIBILITY;
 
     /**
      * Bits of {@link #getMeasuredWidthAndState()} and
@@ -1168,7 +1215,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @see android.graphics.drawable.Drawable
      * @see #getDrawableState()
-     * @hide
      */
     protected static final int[] PRESSED_STATE_SET;
     /**
@@ -1557,7 +1603,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     private SparseArray<Object> mKeyedTags;
 
     /**
-     * The next available accessiiblity id.
+     * The next available accessibility id.
      */
     private static int sNextAccessibilityViewId;
 
@@ -1607,10 +1653,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     int mAccessibilityViewId = NO_ID;
 
-    /**
-     * @hide
-     */
     private int mAccessibilityCursorPosition = ACCESSIBILITY_CURSOR_POSITION_UNDEFINED;
+
+    SendViewStateChangedAccessibilityEvent mSendViewStateChangedAccessibilityEvent;
 
     /**
      * The view's tag.
@@ -1619,21 +1664,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #setTag(Object)
      * @see #getTag()
      */
-    protected Object mTag;
+    protected Object mTag = null;
 
     // for mPrivateFlags:
     /** {@hide} */
-    static final int WANTS_FOCUS                    = 0x00000001;
+    static final int PFLAG_WANTS_FOCUS                 = 0x00000001;
     /** {@hide} */
-    static final int FOCUSED                        = 0x00000002;
+    static final int PFLAG_FOCUSED                     = 0x00000002;
     /** {@hide} */
-    static final int SELECTED                       = 0x00000004;
+    static final int PFLAG_SELECTED                    = 0x00000004;
     /** {@hide} */
-    static final int IS_ROOT_NAMESPACE              = 0x00000008;
+    static final int PFLAG_IS_ROOT_NAMESPACE           = 0x00000008;
     /** {@hide} */
-    static final int HAS_BOUNDS                     = 0x00000010;
+    static final int PFLAG_HAS_BOUNDS                  = 0x00000010;
     /** {@hide} */
-    static final int DRAWN                          = 0x00000020;
+    static final int PFLAG_DRAWN                       = 0x00000020;
     /**
      * When this flag is set, this view is running an animation on behalf of its
      * children and should therefore not cancel invalidate requests, even if they
@@ -1641,58 +1686,58 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * {@hide}
      */
-    static final int DRAW_ANIMATION                 = 0x00000040;
+    static final int PFLAG_DRAW_ANIMATION              = 0x00000040;
     /** {@hide} */
-    static final int SKIP_DRAW                      = 0x00000080;
+    static final int PFLAG_SKIP_DRAW                   = 0x00000080;
     /** {@hide} */
-    static final int ONLY_DRAWS_BACKGROUND          = 0x00000100;
+    static final int PFLAG_ONLY_DRAWS_BACKGROUND       = 0x00000100;
     /** {@hide} */
-    static final int REQUEST_TRANSPARENT_REGIONS    = 0x00000200;
+    static final int PFLAG_REQUEST_TRANSPARENT_REGIONS = 0x00000200;
     /** {@hide} */
-    static final int DRAWABLE_STATE_DIRTY           = 0x00000400;
+    static final int PFLAG_DRAWABLE_STATE_DIRTY        = 0x00000400;
     /** {@hide} */
-    static final int MEASURED_DIMENSION_SET         = 0x00000800;
+    static final int PFLAG_MEASURED_DIMENSION_SET      = 0x00000800;
     /** {@hide} */
-    static final int FORCE_LAYOUT                   = 0x00001000;
+    static final int PFLAG_FORCE_LAYOUT                = 0x00001000;
     /** {@hide} */
-    static final int LAYOUT_REQUIRED                = 0x00002000;
+    static final int PFLAG_LAYOUT_REQUIRED             = 0x00002000;
 
-    private static final int PRESSED                = 0x00004000;
+    private static final int PFLAG_PRESSED             = 0x00004000;
 
     /** {@hide} */
-    static final int DRAWING_CACHE_VALID            = 0x00008000;
+    static final int PFLAG_DRAWING_CACHE_VALID         = 0x00008000;
     /**
      * Flag used to indicate that this view should be drawn once more (and only once
      * more) after its animation has completed.
      * {@hide}
      */
-    static final int ANIMATION_STARTED              = 0x00010000;
+    static final int PFLAG_ANIMATION_STARTED           = 0x00010000;
 
-    private static final int SAVE_STATE_CALLED      = 0x00020000;
+    private static final int PFLAG_SAVE_STATE_CALLED   = 0x00020000;
 
     /**
      * Indicates that the View returned true when onSetAlpha() was called and that
      * the alpha must be restored.
      * {@hide}
      */
-    static final int ALPHA_SET                      = 0x00040000;
+    static final int PFLAG_ALPHA_SET                   = 0x00040000;
 
     /**
      * Set by {@link #setScrollContainer(boolean)}.
      */
-    static final int SCROLL_CONTAINER               = 0x00080000;
+    static final int PFLAG_SCROLL_CONTAINER            = 0x00080000;
 
     /**
      * Set by {@link #setScrollContainer(boolean)}.
      */
-    static final int SCROLL_CONTAINER_ADDED         = 0x00100000;
+    static final int PFLAG_SCROLL_CONTAINER_ADDED      = 0x00100000;
 
     /**
      * View flag indicating whether this view was invalidated (fully or partially.)
      *
      * @hide
      */
-    static final int DIRTY                          = 0x00200000;
+    static final int PFLAG_DIRTY                       = 0x00200000;
 
     /**
      * View flag indicating whether this view was invalidated by an opaque
@@ -1700,35 +1745,35 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @hide
      */
-    static final int DIRTY_OPAQUE                   = 0x00400000;
+    static final int PFLAG_DIRTY_OPAQUE                = 0x00400000;
 
     /**
-     * Mask for {@link #DIRTY} and {@link #DIRTY_OPAQUE}.
+     * Mask for {@link #PFLAG_DIRTY} and {@link #PFLAG_DIRTY_OPAQUE}.
      *
      * @hide
      */
-    static final int DIRTY_MASK                     = 0x00600000;
+    static final int PFLAG_DIRTY_MASK                  = 0x00600000;
 
     /**
      * Indicates whether the background is opaque.
      *
      * @hide
      */
-    static final int OPAQUE_BACKGROUND              = 0x00800000;
+    static final int PFLAG_OPAQUE_BACKGROUND           = 0x00800000;
 
     /**
      * Indicates whether the scrollbars are opaque.
      *
      * @hide
      */
-    static final int OPAQUE_SCROLLBARS              = 0x01000000;
+    static final int PFLAG_OPAQUE_SCROLLBARS           = 0x01000000;
 
     /**
      * Indicates whether the view is opaque.
      *
      * @hide
      */
-    static final int OPAQUE_MASK                    = 0x01800000;
+    static final int PFLAG_OPAQUE_MASK                 = 0x01800000;
 
     /**
      * Indicates a prepressed state;
@@ -1738,38 +1783,35 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @hide
      */
-    private static final int PREPRESSED             = 0x02000000;
+    private static final int PFLAG_PREPRESSED          = 0x02000000;
 
     /**
      * Indicates whether the view is temporarily detached.
      *
      * @hide
      */
-    static final int CANCEL_NEXT_UP_EVENT = 0x04000000;
+    static final int PFLAG_CANCEL_NEXT_UP_EVENT        = 0x04000000;
 
     /**
      * Indicates that we should awaken scroll bars once attached
      *
      * @hide
      */
-    private static final int AWAKEN_SCROLL_BARS_ON_ATTACH = 0x08000000;
+    private static final int PFLAG_AWAKEN_SCROLL_BARS_ON_ATTACH = 0x08000000;
 
     /**
      * Indicates that the view has received HOVER_ENTER.  Cleared on HOVER_EXIT.
      * @hide
      */
-    private static final int HOVERED              = 0x10000000;
+    private static final int PFLAG_HOVERED             = 0x10000000;
 
     /**
-     * Indicates that pivotX or pivotY were explicitly set and we should not assume the center
-     * for transform operations
-     *
-     * @hide
+     * no longer needed, should be reused
      */
-    private static final int PIVOT_EXPLICITLY_SET = 0x20000000;
+    private static final int PFLAG_DOES_NOTHING_REUSE_PLEASE = 0x20000000;
 
     /** {@hide} */
-    static final int ACTIVATED                    = 0x40000000;
+    static final int PFLAG_ACTIVATED                   = 0x40000000;
 
     /**
      * Indicates that this view was specifically invalidated, not just dirtied because some
@@ -1779,16 +1821,54 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @hide
      */
-    static final int INVALIDATED                  = 0x80000000;
+    static final int PFLAG_INVALIDATED                 = 0x80000000;
 
-    /* Masks for mPrivateFlags2 */
+    /**
+     * Masks for mPrivateFlags2, as generated by dumpFlags():
+     *
+     * |-------|-------|-------|-------|
+     *                                 1 PFLAG2_DRAG_CAN_ACCEPT
+     *                                1  PFLAG2_DRAG_HOVERED
+     *                              11   PFLAG2_LAYOUT_DIRECTION_MASK
+     *                             1     PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL
+     *                            1      PFLAG2_LAYOUT_DIRECTION_RESOLVED
+     *                            11     PFLAG2_LAYOUT_DIRECTION_RESOLVED_MASK
+     *                           1       PFLAG2_TEXT_DIRECTION_FLAGS[1]
+     *                          1        PFLAG2_TEXT_DIRECTION_FLAGS[2]
+     *                          11       PFLAG2_TEXT_DIRECTION_FLAGS[3]
+     *                         1         PFLAG2_TEXT_DIRECTION_FLAGS[4]
+     *                         1 1       PFLAG2_TEXT_DIRECTION_FLAGS[5]
+     *                         111       PFLAG2_TEXT_DIRECTION_MASK
+     *                        1          PFLAG2_TEXT_DIRECTION_RESOLVED
+     *                       1           PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT
+     *                     111           PFLAG2_TEXT_DIRECTION_RESOLVED_MASK
+     *                    1              PFLAG2_TEXT_ALIGNMENT_FLAGS[1]
+     *                   1               PFLAG2_TEXT_ALIGNMENT_FLAGS[2]
+     *                   11              PFLAG2_TEXT_ALIGNMENT_FLAGS[3]
+     *                  1                PFLAG2_TEXT_ALIGNMENT_FLAGS[4]
+     *                  1 1              PFLAG2_TEXT_ALIGNMENT_FLAGS[5]
+     *                  11               PFLAG2_TEXT_ALIGNMENT_FLAGS[6]
+     *                  111              PFLAG2_TEXT_ALIGNMENT_MASK
+     *                 1                 PFLAG2_TEXT_ALIGNMENT_RESOLVED
+     *                1                  PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT
+     *              111                  PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK
+     *           111                     PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK
+     *         11                        PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK
+     *       1                           PFLAG2_ACCESSIBILITY_FOCUSED
+     *      1                            PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED
+     *     1                             PFLAG2_VIEW_QUICK_REJECTED
+     *    1                              PFLAG2_PADDING_RESOLVED
+     *   1                               PFLAG2_DRAWABLE_RESOLVED
+     *  1                                PFLAG2_HAS_TRANSIENT_STATE
+     * |-------|-------|-------|-------|
+     */
 
     /**
      * Indicates that this view has reported that it can accept the current drag's content.
      * Cleared when the drag operation concludes.
      * @hide
      */
-    static final int DRAG_CAN_ACCEPT              = 0x00000001;
+    static final int PFLAG2_DRAG_CAN_ACCEPT            = 0x00000001;
 
     /**
      * Indicates that this view is currently directly under the drag location in a
@@ -1796,66 +1876,82 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * the drag exits the view, or when the drag operation concludes.
      * @hide
      */
-    static final int DRAG_HOVERED                 = 0x00000002;
+    static final int PFLAG2_DRAG_HOVERED               = 0x00000002;
+
+    /** @hide */
+    @IntDef({
+        LAYOUT_DIRECTION_LTR,
+        LAYOUT_DIRECTION_RTL,
+        LAYOUT_DIRECTION_INHERIT,
+        LAYOUT_DIRECTION_LOCALE
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    // Not called LayoutDirection to avoid conflict with android.util.LayoutDirection
+    public @interface LayoutDir {}
+
+    /** @hide */
+    @IntDef({
+        LAYOUT_DIRECTION_LTR,
+        LAYOUT_DIRECTION_RTL
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface ResolvedLayoutDir {}
 
     /**
      * Horizontal layout direction of this view is from Left to Right.
      * Use with {@link #setLayoutDirection}.
-     * @hide
      */
-    public static final int LAYOUT_DIRECTION_LTR = 0;
+    public static final int LAYOUT_DIRECTION_LTR = LayoutDirection.LTR;
 
     /**
      * Horizontal layout direction of this view is from Right to Left.
      * Use with {@link #setLayoutDirection}.
-     * @hide
      */
-    public static final int LAYOUT_DIRECTION_RTL = 1;
+    public static final int LAYOUT_DIRECTION_RTL = LayoutDirection.RTL;
 
     /**
      * Horizontal layout direction of this view is inherited from its parent.
      * Use with {@link #setLayoutDirection}.
-     * @hide
      */
-    public static final int LAYOUT_DIRECTION_INHERIT = 2;
+    public static final int LAYOUT_DIRECTION_INHERIT = LayoutDirection.INHERIT;
 
     /**
      * Horizontal layout direction of this view is from deduced from the default language
      * script for the locale. Use with {@link #setLayoutDirection}.
-     * @hide
      */
-    public static final int LAYOUT_DIRECTION_LOCALE = 3;
+    public static final int LAYOUT_DIRECTION_LOCALE = LayoutDirection.LOCALE;
 
     /**
      * Bit shift to get the horizontal layout direction. (bits after DRAG_HOVERED)
      * @hide
      */
-    static final int LAYOUT_DIRECTION_MASK_SHIFT = 2;
+    static final int PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT = 2;
 
     /**
      * Mask for use with private flags indicating bits used for horizontal layout direction.
      * @hide
      */
-    static final int LAYOUT_DIRECTION_MASK = 0x00000003 << LAYOUT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_LAYOUT_DIRECTION_MASK = 0x00000003 << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT;
 
     /**
      * Indicates whether the view horizontal layout direction has been resolved and drawn to the
      * right-to-left direction.
      * @hide
      */
-    static final int LAYOUT_DIRECTION_RESOLVED_RTL = 4 << LAYOUT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL = 4 << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT;
 
     /**
      * Indicates whether the view horizontal layout direction has been resolved.
      * @hide
      */
-    static final int LAYOUT_DIRECTION_RESOLVED = 8 << LAYOUT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_LAYOUT_DIRECTION_RESOLVED = 8 << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT;
 
     /**
      * Mask for use with private flags indicating bits used for resolved horizontal layout direction.
      * @hide
      */
-    static final int LAYOUT_DIRECTION_RESOLVED_MASK = 0x0000000C << LAYOUT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_LAYOUT_DIRECTION_RESOLVED_MASK = 0x0000000C
+            << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT;
 
     /*
      * Array of horizontal layout direction flags for mapping attribute "layoutDirection" to correct
@@ -1871,23 +1967,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * Default horizontal layout direction.
-     * @hide
      */
     private static final int LAYOUT_DIRECTION_DEFAULT = LAYOUT_DIRECTION_INHERIT;
 
     /**
-     * Indicates that the view is tracking some sort of transient state
-     * that the app should not need to be aware of, but that the framework
-     * should take special care to preserve.
-     *
+     * Default horizontal layout direction.
      * @hide
      */
-    static final int HAS_TRANSIENT_STATE = 0x00000100;
-
+    static final int LAYOUT_DIRECTION_RESOLVED_DEFAULT = LAYOUT_DIRECTION_LTR;
 
     /**
      * Text direction is inherited thru {@link ViewGroup}
-     * @hide
      */
     public static final int TEXT_DIRECTION_INHERIT = 0;
 
@@ -1895,7 +1985,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Text direction is using "first strong algorithm". The first strong directional character
      * determines the paragraph direction. If there is no strong directional character, the
      * paragraph direction is the view's resolved layout direction.
-     * @hide
      */
     public static final int TEXT_DIRECTION_FIRST_STRONG = 1;
 
@@ -1903,89 +1992,105 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Text direction is using "any-RTL" algorithm. The paragraph direction is RTL if it contains
      * any strong RTL character, otherwise it is LTR if it contains any strong LTR characters.
      * If there are neither, the paragraph direction is the view's resolved layout direction.
-     * @hide
      */
     public static final int TEXT_DIRECTION_ANY_RTL = 2;
 
     /**
      * Text direction is forced to LTR.
-     * @hide
      */
     public static final int TEXT_DIRECTION_LTR = 3;
 
     /**
      * Text direction is forced to RTL.
-     * @hide
      */
     public static final int TEXT_DIRECTION_RTL = 4;
 
     /**
      * Text direction is coming from the system Locale.
-     * @hide
      */
     public static final int TEXT_DIRECTION_LOCALE = 5;
 
     /**
      * Default text direction is inherited
+     */
+    private static final int TEXT_DIRECTION_DEFAULT = TEXT_DIRECTION_INHERIT;
+
+    /**
+     * Default resolved text direction
      * @hide
      */
-    protected static int TEXT_DIRECTION_DEFAULT = TEXT_DIRECTION_INHERIT;
+    static final int TEXT_DIRECTION_RESOLVED_DEFAULT = TEXT_DIRECTION_FIRST_STRONG;
 
     /**
      * Bit shift to get the horizontal layout direction. (bits after LAYOUT_DIRECTION_RESOLVED)
      * @hide
      */
-    static final int TEXT_DIRECTION_MASK_SHIFT = 6;
+    static final int PFLAG2_TEXT_DIRECTION_MASK_SHIFT = 6;
 
     /**
      * Mask for use with private flags indicating bits used for text direction.
      * @hide
      */
-    static final int TEXT_DIRECTION_MASK = 0x00000007 << TEXT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_TEXT_DIRECTION_MASK = 0x00000007
+            << PFLAG2_TEXT_DIRECTION_MASK_SHIFT;
 
     /**
      * Array of text direction flags for mapping attribute "textDirection" to correct
      * flag value.
      * @hide
      */
-    private static final int[] TEXT_DIRECTION_FLAGS = {
-            TEXT_DIRECTION_INHERIT << TEXT_DIRECTION_MASK_SHIFT,
-            TEXT_DIRECTION_FIRST_STRONG << TEXT_DIRECTION_MASK_SHIFT,
-            TEXT_DIRECTION_ANY_RTL << TEXT_DIRECTION_MASK_SHIFT,
-            TEXT_DIRECTION_LTR << TEXT_DIRECTION_MASK_SHIFT,
-            TEXT_DIRECTION_RTL << TEXT_DIRECTION_MASK_SHIFT,
-            TEXT_DIRECTION_LOCALE << TEXT_DIRECTION_MASK_SHIFT
+    private static final int[] PFLAG2_TEXT_DIRECTION_FLAGS = {
+            TEXT_DIRECTION_INHERIT << PFLAG2_TEXT_DIRECTION_MASK_SHIFT,
+            TEXT_DIRECTION_FIRST_STRONG << PFLAG2_TEXT_DIRECTION_MASK_SHIFT,
+            TEXT_DIRECTION_ANY_RTL << PFLAG2_TEXT_DIRECTION_MASK_SHIFT,
+            TEXT_DIRECTION_LTR << PFLAG2_TEXT_DIRECTION_MASK_SHIFT,
+            TEXT_DIRECTION_RTL << PFLAG2_TEXT_DIRECTION_MASK_SHIFT,
+            TEXT_DIRECTION_LOCALE << PFLAG2_TEXT_DIRECTION_MASK_SHIFT
     };
 
     /**
      * Indicates whether the view text direction has been resolved.
      * @hide
      */
-    static final int TEXT_DIRECTION_RESOLVED = 0x00000008 << TEXT_DIRECTION_MASK_SHIFT;
+    static final int PFLAG2_TEXT_DIRECTION_RESOLVED = 0x00000008
+            << PFLAG2_TEXT_DIRECTION_MASK_SHIFT;
 
     /**
      * Bit shift to get the horizontal layout direction. (bits after DRAG_HOVERED)
      * @hide
      */
-    static final int TEXT_DIRECTION_RESOLVED_MASK_SHIFT = 10;
+    static final int PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT = 10;
 
     /**
      * Mask for use with private flags indicating bits used for resolved text direction.
      * @hide
      */
-    static final int TEXT_DIRECTION_RESOLVED_MASK = 0x00000007 << TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
+    static final int PFLAG2_TEXT_DIRECTION_RESOLVED_MASK = 0x00000007
+            << PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
 
     /**
      * Indicates whether the view text direction has been resolved to the "first strong" heuristic.
      * @hide
      */
-    static final int TEXT_DIRECTION_RESOLVED_DEFAULT =
-            TEXT_DIRECTION_FIRST_STRONG << TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
+    static final int PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT =
+            TEXT_DIRECTION_RESOLVED_DEFAULT << PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
 
-    /*
+    /** @hide */
+    @IntDef({
+        TEXT_ALIGNMENT_INHERIT,
+        TEXT_ALIGNMENT_GRAVITY,
+        TEXT_ALIGNMENT_CENTER,
+        TEXT_ALIGNMENT_TEXT_START,
+        TEXT_ALIGNMENT_TEXT_END,
+        TEXT_ALIGNMENT_VIEW_START,
+        TEXT_ALIGNMENT_VIEW_END
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface TextAlignment {}
+
+    /**
      * Default text alignment. The text alignment of this View is inherited from its parent.
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_INHERIT = 0;
 
@@ -1994,7 +2099,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * ALIGN_CENTER, or ALIGN_OPPOSITE, which are relative to each paragraph’s text direction.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_GRAVITY = 1;
 
@@ -2002,7 +2106,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Align to the start of the paragraph, e.g. ALIGN_NORMAL.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_TEXT_START = 2;
 
@@ -2010,7 +2113,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Align to the end of the paragraph, e.g. ALIGN_OPPOSITE.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_TEXT_END = 3;
 
@@ -2018,7 +2120,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Center the paragraph, e.g. ALIGN_CENTER.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_CENTER = 4;
 
@@ -2027,7 +2128,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * layoutDirection is LTR, and ALIGN_RIGHT otherwise.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_VIEW_START = 5;
 
@@ -2036,66 +2136,71 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * layoutDirection is LTR, and ALIGN_LEFT otherwise.
      *
      * Use with {@link #setTextAlignment(int)}
-     * @hide
      */
     public static final int TEXT_ALIGNMENT_VIEW_END = 6;
 
     /**
      * Default text alignment is inherited
+     */
+    private static final int TEXT_ALIGNMENT_DEFAULT = TEXT_ALIGNMENT_GRAVITY;
+
+    /**
+     * Default resolved text alignment
      * @hide
      */
-    protected static int TEXT_ALIGNMENT_DEFAULT = TEXT_ALIGNMENT_GRAVITY;
+    static final int TEXT_ALIGNMENT_RESOLVED_DEFAULT = TEXT_ALIGNMENT_GRAVITY;
 
     /**
       * Bit shift to get the horizontal layout direction. (bits after DRAG_HOVERED)
       * @hide
       */
-    static final int TEXT_ALIGNMENT_MASK_SHIFT = 13;
+    static final int PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT = 13;
 
     /**
       * Mask for use with private flags indicating bits used for text alignment.
       * @hide
       */
-    static final int TEXT_ALIGNMENT_MASK = 0x00000007 << TEXT_ALIGNMENT_MASK_SHIFT;
+    static final int PFLAG2_TEXT_ALIGNMENT_MASK = 0x00000007 << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT;
 
     /**
      * Array of text direction flags for mapping attribute "textAlignment" to correct
      * flag value.
      * @hide
      */
-    private static final int[] TEXT_ALIGNMENT_FLAGS = {
-            TEXT_ALIGNMENT_INHERIT << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_GRAVITY << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_TEXT_START << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_TEXT_END << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_CENTER << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_VIEW_START << TEXT_ALIGNMENT_MASK_SHIFT,
-            TEXT_ALIGNMENT_VIEW_END << TEXT_ALIGNMENT_MASK_SHIFT
+    private static final int[] PFLAG2_TEXT_ALIGNMENT_FLAGS = {
+            TEXT_ALIGNMENT_INHERIT << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_GRAVITY << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_TEXT_START << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_TEXT_END << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_CENTER << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_VIEW_START << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT,
+            TEXT_ALIGNMENT_VIEW_END << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT
     };
 
     /**
      * Indicates whether the view text alignment has been resolved.
      * @hide
      */
-    static final int TEXT_ALIGNMENT_RESOLVED = 0x00000008 << TEXT_ALIGNMENT_MASK_SHIFT;
+    static final int PFLAG2_TEXT_ALIGNMENT_RESOLVED = 0x00000008 << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT;
 
     /**
      * Bit shift to get the resolved text alignment.
      * @hide
      */
-    static final int TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT = 17;
+    static final int PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT = 17;
 
     /**
      * Mask for use with private flags indicating bits used for text alignment.
      * @hide
      */
-    static final int TEXT_ALIGNMENT_RESOLVED_MASK = 0x00000007 << TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
+    static final int PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK = 0x00000007
+            << PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
 
     /**
      * Indicates whether if the view text alignment has been resolved to gravity
      */
-    public static final int TEXT_ALIGNMENT_RESOLVED_DEFAULT =
-            TEXT_ALIGNMENT_GRAVITY << TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
+    private static final int PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT =
+            TEXT_ALIGNMENT_RESOLVED_DEFAULT << PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
 
     // Accessiblity constants for mPrivateFlags2
 
@@ -2103,7 +2208,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Shift for the bits in {@link #mPrivateFlags2} related to the
      * "importantForAccessibility" attribute.
      */
-    static final int IMPORTANT_FOR_ACCESSIBILITY_SHIFT = 20;
+    static final int PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT = 20;
 
     /**
      * Automatically determine whether a view is important for accessibility.
@@ -2121,7 +2226,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public static final int IMPORTANT_FOR_ACCESSIBILITY_NO = 0x00000002;
 
     /**
-     * The default whether the view is important for accessiblity.
+     * The view is not important for accessibility, nor are any of its
+     * descendant views.
+     */
+    public static final int IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS = 0x00000004;
+
+    /**
+     * The default whether the view is important for accessibility.
      */
     static final int IMPORTANT_FOR_ACCESSIBILITY_DEFAULT = IMPORTANT_FOR_ACCESSIBILITY_AUTO;
 
@@ -2129,115 +2240,170 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Mask for obtainig the bits which specify how to determine
      * whether a view is important for accessibility.
      */
-    static final int IMPORTANT_FOR_ACCESSIBILITY_MASK = (IMPORTANT_FOR_ACCESSIBILITY_AUTO
-        | IMPORTANT_FOR_ACCESSIBILITY_YES | IMPORTANT_FOR_ACCESSIBILITY_NO)
-        << IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+    static final int PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK = (IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        | IMPORTANT_FOR_ACCESSIBILITY_YES | IMPORTANT_FOR_ACCESSIBILITY_NO
+        | IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+        << PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+
+    /**
+     * Shift for the bits in {@link #mPrivateFlags2} related to the
+     * "accessibilityLiveRegion" attribute.
+     */
+    static final int PFLAG2_ACCESSIBILITY_LIVE_REGION_SHIFT = 23;
+
+    /**
+     * Live region mode specifying that accessibility services should not
+     * automatically announce changes to this view. This is the default live
+     * region mode for most views.
+     * <p>
+     * Use with {@link #setAccessibilityLiveRegion(int)}.
+     */
+    public static final int ACCESSIBILITY_LIVE_REGION_NONE = 0x00000000;
+
+    /**
+     * Live region mode specifying that accessibility services should announce
+     * changes to this view.
+     * <p>
+     * Use with {@link #setAccessibilityLiveRegion(int)}.
+     */
+    public static final int ACCESSIBILITY_LIVE_REGION_POLITE = 0x00000001;
+
+    /**
+     * Live region mode specifying that accessibility services should interrupt
+     * ongoing speech to immediately announce changes to this view.
+     * <p>
+     * Use with {@link #setAccessibilityLiveRegion(int)}.
+     */
+    public static final int ACCESSIBILITY_LIVE_REGION_ASSERTIVE = 0x00000002;
+
+    /**
+     * The default whether the view is important for accessibility.
+     */
+    static final int ACCESSIBILITY_LIVE_REGION_DEFAULT = ACCESSIBILITY_LIVE_REGION_NONE;
+
+    /**
+     * Mask for obtaining the bits which specify a view's accessibility live
+     * region mode.
+     */
+    static final int PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK = (ACCESSIBILITY_LIVE_REGION_NONE
+            | ACCESSIBILITY_LIVE_REGION_POLITE | ACCESSIBILITY_LIVE_REGION_ASSERTIVE)
+            << PFLAG2_ACCESSIBILITY_LIVE_REGION_SHIFT;
 
     /**
      * Flag indicating whether a view has accessibility focus.
      */
-    static final int ACCESSIBILITY_FOCUSED = 0x00000040 << IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+    static final int PFLAG2_ACCESSIBILITY_FOCUSED = 0x04000000;
 
     /**
-     * Flag indicating whether a view state for accessibility has changed.
+     * Flag whether the accessibility state of the subtree rooted at this view changed.
      */
-    static final int ACCESSIBILITY_STATE_CHANGED = 0x00000080 << IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+    static final int PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED = 0x08000000;
 
     /**
      * Flag indicating whether a view failed the quickReject() check in draw(). This condition
      * is used to check whether later changes to the view's transform should invalidate the
      * view to force the quickReject test to run again.
      */
-    static final int VIEW_QUICK_REJECTED = 0x10000000;
-
-    // Accessiblity constants for mPrivateFlags2
+    static final int PFLAG2_VIEW_QUICK_REJECTED = 0x10000000;
 
     /**
-     * Shift for the bits in {@link #mPrivateFlags2} related to the
-     * "accessibilityFocusable" attribute.
+     * Flag indicating that start/end padding has been resolved into left/right padding
+     * for use in measurement, layout, drawing, etc. This is set by {@link #resolvePadding()}
+     * and checked by {@link #measure(int, int)} to determine if padding needs to be resolved
+     * during measurement. In some special cases this is required such as when an adapter-based
+     * view measures prospective children without attaching them to a window.
      */
-    static final int ACCESSIBILITY_FOCUSABLE_SHIFT = 29;
+    static final int PFLAG2_PADDING_RESOLVED = 0x20000000;
 
     /**
-     * The system determines whether the view can take accessibility focus - default (recommended).
-     * <p>
-     * Such a view is consideted by the focus search if it is:
-     * <ul>
-     * <li>
-     * Important for accessibility and actionable (clickable, long clickable, focusable)
-     * </li>
-     * <li>
-     * Important for accessibility, not actionable (clickable, long clickable, focusable),
-     * and does not have an actionable predecessor.
-     * </li>
-     * </ul>
-     * An accessibility srvice can request putting accessibility focus on such a view.
-     * </p>
-     *
-     * @hide
+     * Flag indicating that the start/end drawables has been resolved into left/right ones.
      */
-    public static final int ACCESSIBILITY_FOCUSABLE_AUTO = 0x00000000;
+    static final int PFLAG2_DRAWABLE_RESOLVED = 0x40000000;
 
     /**
-     * The view can take accessibility focus.
-     * <p>
-     * A view that can take accessibility focus is always considered during focus
-     * search and an accessibility service can request putting accessibility focus
-     * on it.
-     * </p>
-     *
-     * @hide
+     * Indicates that the view is tracking some sort of transient state
+     * that the app should not need to be aware of, but that the framework
+     * should take special care to preserve.
      */
-    public static final int ACCESSIBILITY_FOCUSABLE_YES = 0x00000001;
+    static final int PFLAG2_HAS_TRANSIENT_STATE = 0x80000000;
 
     /**
-     * The view can not take accessibility focus.
-     * <p>
-     * A view that can not take accessibility focus is never considered during focus
-     * search and an accessibility service can not request putting accessibility focus
-     * on it.
-     * </p>
-     *
-     * @hide
+     * Group of bits indicating that RTL properties resolution is done.
      */
-    public static final int ACCESSIBILITY_FOCUSABLE_NO = 0x00000002;
+    static final int ALL_RTL_PROPERTIES_RESOLVED = PFLAG2_LAYOUT_DIRECTION_RESOLVED |
+            PFLAG2_TEXT_DIRECTION_RESOLVED |
+            PFLAG2_TEXT_ALIGNMENT_RESOLVED |
+            PFLAG2_PADDING_RESOLVED |
+            PFLAG2_DRAWABLE_RESOLVED;
 
-    /**
-     * The default whether the view is accessiblity focusable.
-     */
-    static final int ACCESSIBILITY_FOCUSABLE_DEFAULT = ACCESSIBILITY_FOCUSABLE_AUTO;
-
-    /**
-     * Mask for obtainig the bits which specifies how to determine
-     * whether a view is accessibility focusable.
-     */
-    static final int ACCESSIBILITY_FOCUSABLE_MASK = (ACCESSIBILITY_FOCUSABLE_AUTO
-        | ACCESSIBILITY_FOCUSABLE_YES | ACCESSIBILITY_FOCUSABLE_NO)
-        << ACCESSIBILITY_FOCUSABLE_SHIFT;
-
+    // There are a couple of flags left in mPrivateFlags2
 
     /* End of masks for mPrivateFlags2 */
 
-    /* Masks for mPrivateFlags3 */
+    /**
+     * Masks for mPrivateFlags3, as generated by dumpFlags():
+     *
+     * |-------|-------|-------|-------|
+     *                                 1 PFLAG3_VIEW_IS_ANIMATING_TRANSFORM
+     *                                1  PFLAG3_VIEW_IS_ANIMATING_ALPHA
+     *                               1   PFLAG3_IS_LAID_OUT
+     *                              1    PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT
+     *                             1     PFLAG3_CALLED_SUPER
+     * |-------|-------|-------|-------|
+     */
 
     /**
      * Flag indicating that view has a transform animation set on it. This is used to track whether
      * an animation is cleared between successive frames, in order to tell the associated
      * DisplayList to clear its animation matrix.
      */
-    static final int VIEW_IS_ANIMATING_TRANSFORM = 0x1;
+    static final int PFLAG3_VIEW_IS_ANIMATING_TRANSFORM = 0x1;
 
     /**
      * Flag indicating that view has an alpha animation set on it. This is used to track whether an
      * animation is cleared between successive frames, in order to tell the associated
      * DisplayList to restore its alpha value.
      */
-    static final int VIEW_IS_ANIMATING_ALPHA = 0x2;
+    static final int PFLAG3_VIEW_IS_ANIMATING_ALPHA = 0x2;
 
+    /**
+     * Flag indicating that the view has been through at least one layout since it
+     * was last attached to a window.
+     */
+    static final int PFLAG3_IS_LAID_OUT = 0x4;
+
+    /**
+     * Flag indicating that a call to measure() was skipped and should be done
+     * instead when layout() is invoked.
+     */
+    static final int PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT = 0x8;
+
+    /**
+     * Flag indicating that an overridden method correctly called down to
+     * the superclass implementation as required by the API spec.
+     */
+    static final int PFLAG3_CALLED_SUPER = 0x10;
+
+    /**
+     * Flag indicating that we're in the process of applying window insets.
+     */
+    static final int PFLAG3_APPLYING_INSETS = 0x20;
+
+    /**
+     * Flag indicating that we're in the process of fitting system windows using the old method.
+     */
+    static final int PFLAG3_FITTING_SYSTEM_WINDOWS = 0x40;
+
+    /**
+     * Flag indicating that nested scrolling is enabled for this view.
+     * The view will optionally cooperate with views up its parent chain to allow for
+     * integrated nested scrolling along the same axis.
+     */
+    static final int PFLAG3_NESTED_SCROLLING_ENABLED = 0x80;
 
     /* End of masks for mPrivateFlags3 */
 
-    static final int DRAG_MASK = DRAG_CAN_ACCEPT | DRAG_HOVERED;
+    static final int DRAG_MASK = PFLAG2_DRAG_CAN_ACCEPT | PFLAG2_DRAG_HOVERED;
 
     /**
      * Always allow a user to over-scroll this view, provided it is a
@@ -2384,7 +2550,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * allows it to avoid artifacts when switching in and out of that mode, at
      * the expense that some of its user interface may be covered by screen
      * decorations when they are shown.  You can perform layout of your inner
-     * UI elements to account for the navagation system UI through the
+     * UI elements to account for the navigation system UI through the
      * {@link #fitSystemWindows(Rect)} method.
      */
     public static final int SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION = 0x00000200;
@@ -2400,6 +2566,34 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #fitSystemWindows(Rect)} method.
      */
     public static final int SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN = 0x00000400;
+
+    /**
+     * Flag for {@link #setSystemUiVisibility(int)}: View would like to remain interactive when
+     * hiding the navigation bar with {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}.  If this flag is
+     * not set, {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION} will be force cleared by the system on any
+     * user interaction.
+     * <p>Since this flag is a modifier for {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}, it only
+     * has an effect when used in combination with that flag.</p>
+     */
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE = 0x00000800;
+
+    /**
+     * Flag for {@link #setSystemUiVisibility(int)}: View would like to remain interactive when
+     * hiding the status bar with {@link #SYSTEM_UI_FLAG_FULLSCREEN} and/or hiding the navigation
+     * bar with {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}.  Use this flag to create an immersive
+     * experience while also hiding the system bars.  If this flag is not set,
+     * {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION} will be force cleared by the system on any user
+     * interaction, and {@link #SYSTEM_UI_FLAG_FULLSCREEN} will be force-cleared by the system
+     * if the user swipes from the top of the screen.
+     * <p>When system bars are hidden in immersive mode, they can be revealed temporarily with
+     * system gestures, such as swiping from the top of the screen.  These transient system bars
+     * will overlay app’s content, may have some degree of transparency, and will automatically
+     * hide after a short timeout.
+     * </p><p>Since this flag is a modifier for {@link #SYSTEM_UI_FLAG_FULLSCREEN} and
+     * {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}, it only has an effect when used in combination
+     * with one or both of those flags.</p>
+     */
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE_STICKY = 0x00001000;
 
     /**
      * @deprecated Use {@link #SYSTEM_UI_FLAG_LOW_PROFILE} instead.
@@ -2511,8 +2705,93 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to disable the global search gesture. Don't use this
+     * unless you're a special part of the system UI (i.e., setup wizard, keyguard).
      */
-    public static final int PUBLIC_STATUS_BAR_VISIBILITY_MASK = 0x0000FFFF;
+    public static final int STATUS_BAR_DISABLE_SEARCH = 0x02000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the status bar is displayed in transient mode.
+     */
+    public static final int STATUS_BAR_TRANSIENT = 0x04000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the navigation bar is displayed in transient mode.
+     */
+    public static final int NAVIGATION_BAR_TRANSIENT = 0x08000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the hidden status bar would like to be shown.
+     */
+    public static final int STATUS_BAR_UNHIDE = 0x10000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the hidden navigation bar would like to be shown.
+     */
+    public static final int NAVIGATION_BAR_UNHIDE = 0x20000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the status bar is displayed in translucent mode.
+     */
+    public static final int STATUS_BAR_TRANSLUCENT = 0x40000000;
+
+    /**
+     * @hide
+     *
+     * NOTE: This flag may only be used in subtreeSystemUiVisibility. It is masked
+     * out of the public fields to keep the undefined bits out of the developer's way.
+     *
+     * Flag to specify that the navigation bar is displayed in translucent mode.
+     */
+    public static final int NAVIGATION_BAR_TRANSLUCENT = 0x80000000;
+
+    /**
+     * @hide
+     *
+     * Whether Recents is visible or not.
+     */
+    public static final int RECENT_APPS_VISIBLE = 0x00004000;
+
+    /**
+     * @hide
+     *
+     * Makes system ui transparent.
+     */
+    public static final int SYSTEM_UI_TRANSPARENT = 0x00008000;
+
+    /**
+     * @hide
+     */
+    public static final int PUBLIC_STATUS_BAR_VISIBILITY_MASK = 0x00003FFF;
 
     /**
      * These are the system UI flags that can be cleared by events outside
@@ -2530,6 +2809,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public static final int SYSTEM_UI_LAYOUT_FLAGS =
             SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
             | SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+
+    /** @hide */
+    @IntDef(flag = true,
+            value = { FIND_VIEWS_WITH_TEXT, FIND_VIEWS_WITH_CONTENT_DESCRIPTION })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface FindViewFlags {}
 
     /**
      * Find views that render the specified text.
@@ -2552,7 +2837,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * added and it is a responsibility of the client to call the APIs of
      * the provider to determine whether the virtual tree rooted at this View
      * contains the text, i.e. getting the list of {@link AccessibilityNodeInfo}s
-     * represeting the virtual views with this text.
+     * representing the virtual views with this text.
      *
      * @see #findViewsWithText(ArrayList, CharSequence, int)
      *
@@ -2562,8 +2847,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * The undefined cursor position.
+     *
+     * @hide
      */
-    private static final int ACCESSIBILITY_CURSOR_POSITION_UNDEFINED = -1;
+    public static final int ACCESSIBILITY_CURSOR_POSITION_UNDEFINED = -1;
 
     /**
      * Indicates that the screen has changed state and is now off.
@@ -2578,6 +2865,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #onScreenStateChanged(int)
      */
     public static final int SCREEN_STATE_ON = 0x1;
+
+    /**
+     * Indicates no axis of view scrolling.
+     */
+    public static final int SCROLL_AXIS_NONE = 0;
+
+    /**
+     * Indicates scrolling along the horizontal axis.
+     */
+    public static final int SCROLL_AXIS_HORIZONTAL = 1 << 0;
+
+    /**
+     * Indicates scrolling along the vertical axis.
+     */
+    public static final int SCROLL_AXIS_VERTICAL = 1 << 1;
 
     /**
      * Controls the over-scroll mode for this view.
@@ -2604,17 +2906,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@hide}
      */
     @ViewDebug.ExportedProperty(flagMapping = {
-        @ViewDebug.FlagToString(mask = FORCE_LAYOUT, equals = FORCE_LAYOUT,
+        @ViewDebug.FlagToString(mask = PFLAG_FORCE_LAYOUT, equals = PFLAG_FORCE_LAYOUT,
                 name = "FORCE_LAYOUT"),
-        @ViewDebug.FlagToString(mask = LAYOUT_REQUIRED, equals = LAYOUT_REQUIRED,
+        @ViewDebug.FlagToString(mask = PFLAG_LAYOUT_REQUIRED, equals = PFLAG_LAYOUT_REQUIRED,
                 name = "LAYOUT_REQUIRED"),
-        @ViewDebug.FlagToString(mask = DRAWING_CACHE_VALID, equals = DRAWING_CACHE_VALID,
+        @ViewDebug.FlagToString(mask = PFLAG_DRAWING_CACHE_VALID, equals = PFLAG_DRAWING_CACHE_VALID,
             name = "DRAWING_CACHE_INVALID", outputIf = false),
-        @ViewDebug.FlagToString(mask = DRAWN, equals = DRAWN, name = "DRAWN", outputIf = true),
-        @ViewDebug.FlagToString(mask = DRAWN, equals = DRAWN, name = "NOT_DRAWN", outputIf = false),
-        @ViewDebug.FlagToString(mask = DIRTY_MASK, equals = DIRTY_OPAQUE, name = "DIRTY_OPAQUE"),
-        @ViewDebug.FlagToString(mask = DIRTY_MASK, equals = DIRTY, name = "DIRTY")
-    })
+        @ViewDebug.FlagToString(mask = PFLAG_DRAWN, equals = PFLAG_DRAWN, name = "DRAWN", outputIf = true),
+        @ViewDebug.FlagToString(mask = PFLAG_DRAWN, equals = PFLAG_DRAWN, name = "NOT_DRAWN", outputIf = false),
+        @ViewDebug.FlagToString(mask = PFLAG_DIRTY_MASK, equals = PFLAG_DIRTY_OPAQUE, name = "DIRTY_OPAQUE"),
+        @ViewDebug.FlagToString(mask = PFLAG_DIRTY_MASK, equals = PFLAG_DIRTY, name = "DIRTY")
+    }, formatToHexString = true)
     int mPrivateFlags;
     int mPrivateFlags2;
     int mPrivateFlags3;
@@ -2633,7 +2935,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         @ViewDebug.FlagToString(mask = PUBLIC_STATUS_BAR_VISIBILITY_MASK,
                                 equals = SYSTEM_UI_FLAG_VISIBLE,
                                 name = "SYSTEM_UI_FLAG_VISIBLE", outputIf = true)
-    })
+    }, formatToHexString = true)
     int mSystemUiVisibility;
 
     /**
@@ -2659,124 +2961,27 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * The view flags hold various views states.
      * {@hide}
      */
-    @ViewDebug.ExportedProperty
+    @ViewDebug.ExportedProperty(formatToHexString = true)
     int mViewFlags;
 
     static class TransformationInfo {
         /**
          * The transform matrix for the View. This transform is calculated internally
-         * based on the rotation, scaleX, and scaleY properties. The identity matrix
-         * is used by default. Do *not* use this variable directly; instead call
-         * getMatrix(), which will automatically recalculate the matrix if necessary
-         * to get the correct matrix based on the latest rotation and scale properties.
+         * based on the translation, rotation, and scale properties.
+         *
+         * Do *not* use this variable directly; instead call getMatrix(), which will
+         * load the value from the View's RenderNode.
          */
         private final Matrix mMatrix = new Matrix();
 
         /**
-         * The transform matrix for the View. This transform is calculated internally
-         * based on the rotation, scaleX, and scaleY properties. The identity matrix
-         * is used by default. Do *not* use this variable directly; instead call
-         * getInverseMatrix(), which will automatically recalculate the matrix if necessary
-         * to get the correct matrix based on the latest rotation and scale properties.
+         * The inverse transform matrix for the View. This transform is calculated
+         * internally based on the translation, rotation, and scale properties.
+         *
+         * Do *not* use this variable directly; instead call getInverseMatrix(),
+         * which will load the value from the View's RenderNode.
          */
         private Matrix mInverseMatrix;
-
-        /**
-         * An internal variable that tracks whether we need to recalculate the
-         * transform matrix, based on whether the rotation or scaleX/Y properties
-         * have changed since the matrix was last calculated.
-         */
-        boolean mMatrixDirty = false;
-
-        /**
-         * An internal variable that tracks whether we need to recalculate the
-         * transform matrix, based on whether the rotation or scaleX/Y properties
-         * have changed since the matrix was last calculated.
-         */
-        private boolean mInverseMatrixDirty = true;
-
-        /**
-         * A variable that tracks whether we need to recalculate the
-         * transform matrix, based on whether the rotation or scaleX/Y properties
-         * have changed since the matrix was last calculated. This variable
-         * is only valid after a call to updateMatrix() or to a function that
-         * calls it such as getMatrix(), hasIdentityMatrix() and getInverseMatrix().
-         */
-        private boolean mMatrixIsIdentity = true;
-
-        /**
-         * The Camera object is used to compute a 3D matrix when rotationX or rotationY are set.
-         */
-        private Camera mCamera = null;
-
-        /**
-         * This matrix is used when computing the matrix for 3D rotations.
-         */
-        private Matrix matrix3D = null;
-
-        /**
-         * These prev values are used to recalculate a centered pivot point when necessary. The
-         * pivot point is only used in matrix operations (when rotation, scale, or translation are
-         * set), so thes values are only used then as well.
-         */
-        private int mPrevWidth = -1;
-        private int mPrevHeight = -1;
-
-        /**
-         * The degrees rotation around the vertical axis through the pivot point.
-         */
-        @ViewDebug.ExportedProperty
-        float mRotationY = 0f;
-
-        /**
-         * The degrees rotation around the horizontal axis through the pivot point.
-         */
-        @ViewDebug.ExportedProperty
-        float mRotationX = 0f;
-
-        /**
-         * The degrees rotation around the pivot point.
-         */
-        @ViewDebug.ExportedProperty
-        float mRotation = 0f;
-
-        /**
-         * The amount of translation of the object away from its left property (post-layout).
-         */
-        @ViewDebug.ExportedProperty
-        float mTranslationX = 0f;
-
-        /**
-         * The amount of translation of the object away from its top property (post-layout).
-         */
-        @ViewDebug.ExportedProperty
-        float mTranslationY = 0f;
-
-        /**
-         * The amount of scale in the x direction around the pivot point. A
-         * value of 1 means no scaling is applied.
-         */
-        @ViewDebug.ExportedProperty
-        float mScaleX = 1f;
-
-        /**
-         * The amount of scale in the y direction around the pivot point. A
-         * value of 1 means no scaling is applied.
-         */
-        @ViewDebug.ExportedProperty
-        float mScaleY = 1f;
-
-        /**
-         * The x location of the point around which the view is rotated and scaled.
-         */
-        @ViewDebug.ExportedProperty
-        float mPivotX = 0f;
-
-        /**
-         * The y location of the point around which the view is rotated and scaled.
-         */
-        @ViewDebug.ExportedProperty
-        float mPivotY = 0f;
 
         /**
          * The opacity of the View. This is a value from 0 to 1, where 0 means
@@ -2784,17 +2989,23 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          */
         @ViewDebug.ExportedProperty
         float mAlpha = 1f;
+
+        /**
+         * The opacity of the view as manipulated by the Fade transition. This is a hidden
+         * property only used by transitions, which is composited with the other alpha
+         * values to calculate the final visual alpha value.
+         */
+        float mTransitionAlpha = 1f;
     }
 
     TransformationInfo mTransformationInfo;
 
-    private boolean mLastIsOpaque;
-
     /**
-     * Convenience value to check for float values that are close enough to zero to be considered
-     * zero.
+     * Current clip bounds. to which all drawing of this view are constrained.
      */
-    private static final float NONZERO_EPSILON = .001f;
+    Rect mClipBounds = null;
+
+    private boolean mLastIsOpaque;
 
     /**
      * The distance in pixels from the left edge of this view's parent
@@ -2846,14 +3057,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@hide}
      */
     @ViewDebug.ExportedProperty(category = "padding")
-    protected int mPaddingLeft;
+    protected int mPaddingLeft = 0;
     /**
      * The right padding in pixels, that is the distance in pixels between the
      * right edge of this view and the right edge of its content.
      * {@hide}
      */
     @ViewDebug.ExportedProperty(category = "padding")
-    protected int mPaddingRight;
+    protected int mPaddingRight = 0;
     /**
      * The top padding in pixels, that is the distance in pixels between the
      * top edge of this view and the top edge of its content.
@@ -2881,6 +3092,33 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     private CharSequence mContentDescription;
 
     /**
+     * Specifies the id of a view for which this view serves as a label for
+     * accessibility purposes.
+     */
+    private int mLabelForId = View.NO_ID;
+
+    /**
+     * Predicate for matching labeled view id with its label for
+     * accessibility purposes.
+     */
+    private MatchLabelForPredicate mMatchLabelForPredicate;
+
+    /**
+     * Specifies a view before which this one is visited in accessibility traversal.
+     */
+    private int mAccessibilityTraversalBeforeId = NO_ID;
+
+    /**
+     * Specifies a view after which this one is visited in accessibility traversal.
+     */
+    private int mAccessibilityTraversalAfterId = NO_ID;
+
+    /**
+     * Predicate for matching a view by its id.
+     */
+    private MatchIdPredicate mMatchIdPredicate;
+
+    /**
      * Cache the paddingRight set by the user to append to the scrollbar's size.
      *
      * @hide
@@ -2905,13 +3143,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     protected int mUserPaddingLeft;
 
     /**
-     * Cache if the user padding is relative.
-     *
-     */
-    @ViewDebug.ExportedProperty(category = "padding")
-    boolean mUserPaddingRelative;
-
-    /**
      * Cache the paddingStart set by the user to append to the scrollbar's size.
      *
      */
@@ -2926,6 +3157,35 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     int mUserPaddingEnd;
 
     /**
+     * Cache initial left padding.
+     *
+     * @hide
+     */
+    int mUserPaddingLeftInitial;
+
+    /**
+     * Cache initial right padding.
+     *
+     * @hide
+     */
+    int mUserPaddingRightInitial;
+
+    /**
+     * Default undefined padding
+     */
+    private static final int UNDEFINED_PADDING = Integer.MIN_VALUE;
+
+    /**
+     * Cache if a left padding has been defined
+     */
+    private boolean mLeftPaddingDefined = false;
+
+    /**
+     * Cache if a right padding has been defined
+     */
+    private boolean mRightPaddingDefined = false;
+
+    /**
      * @hide
      */
     int mOldWidthMeasureSpec = Integer.MIN_VALUE;
@@ -2934,10 +3194,32 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     int mOldHeightMeasureSpec = Integer.MIN_VALUE;
 
+    private LongSparseLongArray mMeasureCache;
+
+    @ViewDebug.ExportedProperty(deepExport = true, prefix = "bg_")
     private Drawable mBackground;
+    private TintInfo mBackgroundTint;
+
+    /**
+     * RenderNode used for backgrounds.
+     * <p>
+     * When non-null and valid, this is expected to contain an up-to-date copy
+     * of the background drawable. It is cleared on temporary detach, and reset
+     * on cleanup.
+     */
+    private RenderNode mBackgroundRenderNode;
 
     private int mBackgroundResource;
     private boolean mBackgroundSizeChanged;
+
+    private String mTransitionName;
+
+    private static class TintInfo {
+        ColorStateList mTintList;
+        PorterDuff.Mode mTintMode;
+        boolean mHasTintMode;
+        boolean mHasTintList;
+    }
 
     static class ListenerInfo {
         /**
@@ -2951,6 +3233,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          * Listeners for layout change events.
          */
         private ArrayList<OnLayoutChangeListener> mOnLayoutChangeListeners;
+
+        protected OnScrollChangeListener mOnScrollChangeListener;
 
         /**
          * Listeners for attach events.
@@ -2989,6 +3273,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         private OnDragListener mOnDragListener;
 
         private OnSystemUiVisibilityChangeListener mOnSystemUiVisibilityChangeListener;
+
+        OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
     }
 
     ListenerInfo mListenerInfo;
@@ -2998,6 +3284,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * This field should be made private, so it is hidden from the SDK.
      * {@hide}
      */
+    @ViewDebug.ExportedProperty(deepExport = true)
     protected Context mContext;
 
     private final Resources mResources;
@@ -3006,17 +3293,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     private int[] mDrawableState = null;
 
-    /**
-     * Set to true when drawing cache is enabled and cannot be created.
-     *
-     * @hide
-     */
-    public boolean mCachingFailed;
+    ViewOutlineProvider mOutlineProvider = ViewOutlineProvider.BACKGROUND;
 
-    private Bitmap mDrawingCache;
-    private Bitmap mUnscaledDrawingCache;
-    private HardwareLayer mHardwareLayer;
-    DisplayList mDisplayList;
+    /**
+     * Animator that automatically runs based on state changes.
+     */
+    private StateListAnimator mStateListAnimator;
 
     /**
      * When this view has focus and the next focus is {@link #FOCUS_LEFT},
@@ -3209,13 +3491,80 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     })
     int mLayerType = LAYER_TYPE_NONE;
     Paint mLayerPaint;
-    Rect mLocalDirtyRect;
+
+    /**
+     * Set to true when drawing cache is enabled and cannot be created.
+     *
+     * @hide
+     */
+    public boolean mCachingFailed;
+    private Bitmap mDrawingCache;
+    private Bitmap mUnscaledDrawingCache;
+
+    /**
+     * RenderNode holding View properties, potentially holding a DisplayList of View content.
+     * <p>
+     * When non-null and valid, this is expected to contain an up-to-date copy
+     * of the View content. Its DisplayList content is cleared on temporary detach and reset on
+     * cleanup.
+     */
+    final RenderNode mRenderNode;
 
     /**
      * Set to true when the view is sending hover accessibility events because it
      * is the innermost hovered view.
      */
     private boolean mSendingHoverAccessibilityEvents;
+
+    /**
+     * Delegate for injecting accessibility functionality.
+     */
+    AccessibilityDelegate mAccessibilityDelegate;
+
+    /**
+     * The view's overlay layer. Developers get a reference to the overlay via getOverlay()
+     * and add/remove objects to/from the overlay directly through the Overlay methods.
+     */
+    ViewOverlay mOverlay;
+
+    /**
+     * The currently active parent view for receiving delegated nested scrolling events.
+     * This is set by {@link #startNestedScroll(int)} during a touch interaction and cleared
+     * by {@link #stopNestedScroll()} at the same point where we clear
+     * requestDisallowInterceptTouchEvent.
+     */
+    private ViewParent mNestedScrollingParent;
+
+    /**
+     * Consistency verifier for debugging purposes.
+     * @hide
+     */
+    protected final InputEventConsistencyVerifier mInputEventConsistencyVerifier =
+            InputEventConsistencyVerifier.isInstrumentationEnabled() ?
+                    new InputEventConsistencyVerifier(this, 0) : null;
+
+    private static final AtomicInteger sNextGeneratedId = new AtomicInteger(1);
+
+    private int[] mTempNestedScrollConsumed;
+
+    /**
+     * An overlay is going to draw this View instead of being drawn as part of this
+     * View's parent. mGhostView is the View in the Overlay that must be invalidated
+     * when this view is invalidated.
+     */
+    GhostView mGhostView;
+
+    /**
+     * Holds pairs of adjacent attribute data: attribute name followed by its value.
+     * @hide
+     */
+    @ViewDebug.ExportedProperty(category = "attributes", hasAdjacentMapping = true)
+    public String[] mAttributes;
+
+    /**
+     * Maps a Resource id to its name.
+     */
+    private static SparseArray<String> mAttributeMap;
 
     /**
      * Simple constructor to use when creating a view from code.
@@ -3227,31 +3576,33 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         mContext = context;
         mResources = context != null ? context.getResources() : null;
         mViewFlags = SOUND_EFFECTS_ENABLED | HAPTIC_FEEDBACK_ENABLED;
-        // Set layout and text direction defaults
-        mPrivateFlags2 = (LAYOUT_DIRECTION_DEFAULT << LAYOUT_DIRECTION_MASK_SHIFT) |
-                (TEXT_DIRECTION_DEFAULT << TEXT_DIRECTION_MASK_SHIFT) |
-                (TEXT_ALIGNMENT_DEFAULT << TEXT_ALIGNMENT_MASK_SHIFT) |
-                (IMPORTANT_FOR_ACCESSIBILITY_DEFAULT << IMPORTANT_FOR_ACCESSIBILITY_SHIFT) |
-                (ACCESSIBILITY_FOCUSABLE_DEFAULT << ACCESSIBILITY_FOCUSABLE_SHIFT);
+        // Set some flags defaults
+        mPrivateFlags2 =
+                (LAYOUT_DIRECTION_DEFAULT << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT) |
+                (TEXT_DIRECTION_DEFAULT << PFLAG2_TEXT_DIRECTION_MASK_SHIFT) |
+                (PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT) |
+                (TEXT_ALIGNMENT_DEFAULT << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT) |
+                (PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT) |
+                (IMPORTANT_FOR_ACCESSIBILITY_DEFAULT << PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT);
         mTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         setOverScrollMode(OVER_SCROLL_IF_CONTENT_SCROLLS);
-        mUserPaddingStart = -1;
-        mUserPaddingEnd = -1;
-        mUserPaddingRelative = false;
+        mUserPaddingStart = UNDEFINED_PADDING;
+        mUserPaddingEnd = UNDEFINED_PADDING;
+        mRenderNode = RenderNode.create(getClass().getName(), this);
+
+        if (!sCompatibilityDone && context != null) {
+            final int targetSdkVersion = context.getApplicationInfo().targetSdkVersion;
+
+            // Older apps may need this compatibility hack for measurement.
+            sUseBrokenMakeMeasureSpec = targetSdkVersion <= JELLY_BEAN_MR1;
+
+            // Older apps expect onMeasure() to always be called on a layout pass, regardless
+            // of whether a layout was requested on that View.
+            sIgnoreMeasureCache = targetSdkVersion < KITKAT;
+
+            sCompatibilityDone = true;
+        }
     }
-
-    /**
-     * Delegate for injecting accessiblity functionality.
-     */
-    AccessibilityDelegate mAccessibilityDelegate;
-
-    /**
-     * Consistency verifier for debugging purposes.
-     * @hide
-     */
-    protected final InputEventConsistencyVerifier mInputEventConsistencyVerifier =
-            InputEventConsistencyVerifier.isInstrumentationEnabled() ?
-                    new InputEventConsistencyVerifier(this, 0) : null;
 
     /**
      * Constructor that is called when inflating a view from XML. This is called
@@ -3274,28 +3625,68 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Perform inflation from XML and apply a class-specific base style. This
-     * constructor of View allows subclasses to use their own base style when
-     * they are inflating. For example, a Button class's constructor would call
-     * this version of the super class constructor and supply
-     * <code>R.attr.buttonStyle</code> for <var>defStyle</var>; this allows
-     * the theme's button style to modify all of the base view attributes (in
-     * particular its background) as well as the Button class's attributes.
+     * Perform inflation from XML and apply a class-specific base style from a
+     * theme attribute. This constructor of View allows subclasses to use their
+     * own base style when they are inflating. For example, a Button class's
+     * constructor would call this version of the super class constructor and
+     * supply <code>R.attr.buttonStyle</code> for <var>defStyleAttr</var>; this
+     * allows the theme's button style to modify all of the base view attributes
+     * (in particular its background) as well as the Button class's attributes.
      *
      * @param context The Context the view is running in, through which it can
      *        access the current theme, resources, etc.
      * @param attrs The attributes of the XML tag that is inflating the view.
-     * @param defStyle The default style to apply to this view. If 0, no style
-     *        will be applied (beyond what is included in the theme). This may
-     *        either be an attribute resource, whose value will be retrieved
-     *        from the current theme, or an explicit style resource.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
      * @see #View(Context, AttributeSet)
      */
-    public View(Context context, AttributeSet attrs, int defStyle) {
+    public View(Context context, AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    /**
+     * Perform inflation from XML and apply a class-specific base style from a
+     * theme attribute or style resource. This constructor of View allows
+     * subclasses to use their own base style when they are inflating.
+     * <p>
+     * When determining the final value of a particular attribute, there are
+     * four inputs that come into play:
+     * <ol>
+     * <li>Any attribute values in the given AttributeSet.
+     * <li>The style resource specified in the AttributeSet (named "style").
+     * <li>The default style specified by <var>defStyleAttr</var>.
+     * <li>The default style specified by <var>defStyleRes</var>.
+     * <li>The base values in this theme.
+     * </ol>
+     * <p>
+     * Each of these inputs is considered in-order, with the first listed taking
+     * precedence over the following ones. In other words, if in the
+     * AttributeSet you have supplied <code>&lt;Button * textColor="#ff000000"&gt;</code>
+     * , then the button's text will <em>always</em> be black, regardless of
+     * what is specified in any of the styles.
+     *
+     * @param context The Context the view is running in, through which it can
+     *        access the current theme, resources, etc.
+     * @param attrs The attributes of the XML tag that is inflating the view.
+     * @param defStyleAttr An attribute in the current theme that contains a
+     *        reference to a style resource that supplies default values for
+     *        the view. Can be 0 to not look for defaults.
+     * @param defStyleRes A resource identifier of a style resource that
+     *        supplies default values for the view, used only if
+     *        defStyleAttr is 0 or can not be found in the theme. Can be 0
+     *        to not look for defaults.
+     * @see #View(Context, AttributeSet, int)
+     */
+    public View(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         this(context);
 
-        TypedArray a = context.obtainStyledAttributes(attrs, com.android.internal.R.styleable.View,
-                defStyle, 0);
+        final TypedArray a = context.obtainStyledAttributes(
+                attrs, com.android.internal.R.styleable.View, defStyleAttr, defStyleRes);
+
+        if (mDebugViewAttributes) {
+            saveAttributeData(attrs, a);
+        }
 
         Drawable background = null;
 
@@ -3303,8 +3694,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         int topPadding = -1;
         int rightPadding = -1;
         int bottomPadding = -1;
-        int startPadding = -1;
-        int endPadding = -1;
+        int startPadding = UNDEFINED_PADDING;
+        int endPadding = UNDEFINED_PADDING;
 
         int padding = -1;
 
@@ -3318,6 +3709,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         float tx = 0;
         float ty = 0;
+        float tz = 0;
+        float elevation = 0;
         float rotation = 0;
         float rotationX = 0;
         float rotationY = 0;
@@ -3326,8 +3719,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         boolean transformSet = false;
 
         int scrollbarStyle = SCROLLBARS_INSIDE_OVERLAY;
-
         int overScrollMode = mOverScrollMode;
+        boolean initializeScrollbars = false;
+
+        boolean startPaddingDefined = false;
+        boolean endPaddingDefined = false;
+        boolean leftPaddingDefined = false;
+        boolean rightPaddingDefined = false;
+
+        final int targetSdkVersion = context.getApplicationInfo().targetSdkVersion;
+
         final int N = a.getIndexCount();
         for (int i = 0; i < N; i++) {
             int attr = a.getIndex(i);
@@ -3337,24 +3738,34 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     break;
                 case com.android.internal.R.styleable.View_padding:
                     padding = a.getDimensionPixelSize(attr, -1);
+                    mUserPaddingLeftInitial = padding;
+                    mUserPaddingRightInitial = padding;
+                    leftPaddingDefined = true;
+                    rightPaddingDefined = true;
                     break;
                  case com.android.internal.R.styleable.View_paddingLeft:
                     leftPadding = a.getDimensionPixelSize(attr, -1);
+                    mUserPaddingLeftInitial = leftPadding;
+                    leftPaddingDefined = true;
                     break;
                 case com.android.internal.R.styleable.View_paddingTop:
                     topPadding = a.getDimensionPixelSize(attr, -1);
                     break;
                 case com.android.internal.R.styleable.View_paddingRight:
                     rightPadding = a.getDimensionPixelSize(attr, -1);
+                    mUserPaddingRightInitial = rightPadding;
+                    rightPaddingDefined = true;
                     break;
                 case com.android.internal.R.styleable.View_paddingBottom:
                     bottomPadding = a.getDimensionPixelSize(attr, -1);
                     break;
                 case com.android.internal.R.styleable.View_paddingStart:
-                    startPadding = a.getDimensionPixelSize(attr, -1);
+                    startPadding = a.getDimensionPixelSize(attr, UNDEFINED_PADDING);
+                    startPaddingDefined = (startPadding != UNDEFINED_PADDING);
                     break;
                 case com.android.internal.R.styleable.View_paddingEnd:
-                    endPadding = a.getDimensionPixelSize(attr, -1);
+                    endPadding = a.getDimensionPixelSize(attr, UNDEFINED_PADDING);
+                    endPaddingDefined = (endPadding != UNDEFINED_PADDING);
                     break;
                 case com.android.internal.R.styleable.View_scrollX:
                     x = a.getDimensionPixelOffset(attr, 0);
@@ -3377,6 +3788,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     break;
                 case com.android.internal.R.styleable.View_translationY:
                     ty = a.getDimensionPixelOffset(attr, 0);
+                    transformSet = true;
+                    break;
+                case com.android.internal.R.styleable.View_translationZ:
+                    tz = a.getDimensionPixelOffset(attr, 0);
+                    transformSet = true;
+                    break;
+                case com.android.internal.R.styleable.View_elevation:
+                    elevation = a.getDimensionPixelOffset(attr, 0);
                     transformSet = true;
                     break;
                 case com.android.internal.R.styleable.View_rotation:
@@ -3456,12 +3875,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     break;
                 case com.android.internal.R.styleable.View_layoutDirection:
                     // Clear any layout direction flags (included resolved bits) already set
-                    mPrivateFlags2 &= ~(LAYOUT_DIRECTION_MASK | LAYOUT_DIRECTION_RESOLVED_MASK);
+                    mPrivateFlags2 &=
+                            ~(PFLAG2_LAYOUT_DIRECTION_MASK | PFLAG2_LAYOUT_DIRECTION_RESOLVED_MASK);
                     // Set the layout direction flags depending on the value of the attribute
                     final int layoutDirection = a.getInt(attr, -1);
                     final int value = (layoutDirection != -1) ?
                             LAYOUT_DIRECTION_FLAGS[layoutDirection] : LAYOUT_DIRECTION_DEFAULT;
-                    mPrivateFlags2 |= (value << LAYOUT_DIRECTION_MASK_SHIFT);
+                    mPrivateFlags2 |= (value << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT);
                     break;
                 case com.android.internal.R.styleable.View_drawingCacheQuality:
                     final int cacheQuality = a.getInt(attr, 0);
@@ -3472,6 +3892,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     break;
                 case com.android.internal.R.styleable.View_contentDescription:
                     setContentDescription(a.getString(attr));
+                    break;
+                case com.android.internal.R.styleable.View_accessibilityTraversalBefore:
+                    setAccessibilityTraversalBefore(a.getResourceId(attr, NO_ID));
+                    break;
+                case com.android.internal.R.styleable.View_accessibilityTraversalAfter:
+                    setAccessibilityTraversalAfter(a.getResourceId(attr, NO_ID));
+                    break;
+                case com.android.internal.R.styleable.View_labelFor:
+                    setLabelFor(a.getResourceId(attr, NO_ID));
                     break;
                 case com.android.internal.R.styleable.View_soundEffectsEnabled:
                     if (!a.getBoolean(attr, true)) {
@@ -3490,12 +3919,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     if (scrollbars != SCROLLBARS_NONE) {
                         viewFlagValues |= scrollbars;
                         viewFlagMasks |= SCROLLBARS_MASK;
-                        initializeScrollbars(a);
+                        initializeScrollbars = true;
                     }
                     break;
                 //noinspection deprecation
                 case R.styleable.View_fadingEdge:
-                    if (context.getApplicationInfo().targetSdkVersion >= ICE_CREAM_SANDWICH) {
+                    if (targetSdkVersion >= ICE_CREAM_SANDWICH) {
                         // Ignore the attribute starting with ICS
                         break;
                     }
@@ -3505,7 +3934,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     if (fadingEdge != FADING_EDGE_NONE) {
                         viewFlagValues |= fadingEdge;
                         viewFlagMasks |= FADING_EDGE_MASK;
-                        initializeFadingEdge(a);
+                        initializeFadingEdgeInternal(a);
                     }
                     break;
                 case R.styleable.View_scrollbarStyle:
@@ -3606,61 +4035,135 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     break;
                 case R.styleable.View_textDirection:
                     // Clear any text direction flag already set
-                    mPrivateFlags2 &= ~TEXT_DIRECTION_MASK;
+                    mPrivateFlags2 &= ~PFLAG2_TEXT_DIRECTION_MASK;
                     // Set the text direction flags depending on the value of the attribute
                     final int textDirection = a.getInt(attr, -1);
                     if (textDirection != -1) {
-                        mPrivateFlags2 |= TEXT_DIRECTION_FLAGS[textDirection];
+                        mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_FLAGS[textDirection];
                     }
                     break;
                 case R.styleable.View_textAlignment:
                     // Clear any text alignment flag already set
-                    mPrivateFlags2 &= ~TEXT_ALIGNMENT_MASK;
+                    mPrivateFlags2 &= ~PFLAG2_TEXT_ALIGNMENT_MASK;
                     // Set the text alignment flag depending on the value of the attribute
                     final int textAlignment = a.getInt(attr, TEXT_ALIGNMENT_DEFAULT);
-                    mPrivateFlags2 |= TEXT_ALIGNMENT_FLAGS[textAlignment];
+                    mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_FLAGS[textAlignment];
                     break;
                 case R.styleable.View_importantForAccessibility:
                     setImportantForAccessibility(a.getInt(attr,
                             IMPORTANT_FOR_ACCESSIBILITY_DEFAULT));
                     break;
+                case R.styleable.View_accessibilityLiveRegion:
+                    setAccessibilityLiveRegion(a.getInt(attr, ACCESSIBILITY_LIVE_REGION_DEFAULT));
+                    break;
+                case R.styleable.View_transitionName:
+                    setTransitionName(a.getString(attr));
+                    break;
+                case R.styleable.View_nestedScrollingEnabled:
+                    setNestedScrollingEnabled(a.getBoolean(attr, false));
+                    break;
+                case R.styleable.View_stateListAnimator:
+                    setStateListAnimator(AnimatorInflater.loadStateListAnimator(context,
+                            a.getResourceId(attr, 0)));
+                    break;
+                case R.styleable.View_backgroundTint:
+                    // This will get applied later during setBackground().
+                    if (mBackgroundTint == null) {
+                        mBackgroundTint = new TintInfo();
+                    }
+                    mBackgroundTint.mTintList = a.getColorStateList(
+                            R.styleable.View_backgroundTint);
+                    mBackgroundTint.mHasTintList = true;
+                    break;
+                case R.styleable.View_backgroundTintMode:
+                    // This will get applied later during setBackground().
+                    if (mBackgroundTint == null) {
+                        mBackgroundTint = new TintInfo();
+                    }
+                    mBackgroundTint.mTintMode = Drawable.parseTintMode(a.getInt(
+                            R.styleable.View_backgroundTintMode, -1), null);
+                    mBackgroundTint.mHasTintMode = true;
+                    break;
+                case R.styleable.View_outlineProvider:
+                    setOutlineProviderFromAttribute(a.getInt(R.styleable.View_outlineProvider,
+                            PROVIDER_BACKGROUND));
+                    break;
             }
         }
 
-        a.recycle();
-
         setOverScrollMode(overScrollMode);
+
+        // Cache start/end user padding as we cannot fully resolve padding here (we dont have yet
+        // the resolved layout direction). Those cached values will be used later during padding
+        // resolution.
+        mUserPaddingStart = startPadding;
+        mUserPaddingEnd = endPadding;
 
         if (background != null) {
             setBackground(background);
         }
 
-        // Cache user padding as we cannot fully resolve padding here (we dont have yet the resolved
-        // layout direction). Those cached values will be used later during padding resolution.
-        mUserPaddingStart = startPadding;
-        mUserPaddingEnd = endPadding;
-
-        updateUserPaddingRelative();
+        // setBackground above will record that padding is currently provided by the background.
+        // If we have padding specified via xml, record that here instead and use it.
+        mLeftPaddingDefined = leftPaddingDefined;
+        mRightPaddingDefined = rightPaddingDefined;
 
         if (padding >= 0) {
             leftPadding = padding;
             topPadding = padding;
             rightPadding = padding;
             bottomPadding = padding;
+            mUserPaddingLeftInitial = padding;
+            mUserPaddingRightInitial = padding;
         }
 
-        // If the user specified the padding (either with android:padding or
-        // android:paddingLeft/Top/Right/Bottom), use this padding, otherwise
-        // use the default padding or the padding from the background drawable
-        // (stored at this point in mPadding*)
-        setPadding(leftPadding >= 0 ? leftPadding : mPaddingLeft,
+        if (isRtlCompatibilityMode()) {
+            // RTL compatibility mode: pre Jelly Bean MR1 case OR no RTL support case.
+            // left / right padding are used if defined (meaning here nothing to do). If they are not
+            // defined and start / end padding are defined (e.g. in Frameworks resources), then we use
+            // start / end and resolve them as left / right (layout direction is not taken into account).
+            // Padding from the background drawable is stored at this point in mUserPaddingLeftInitial
+            // and mUserPaddingRightInitial) so drawable padding will be used as ultimate default if
+            // defined.
+            if (!mLeftPaddingDefined && startPaddingDefined) {
+                leftPadding = startPadding;
+            }
+            mUserPaddingLeftInitial = (leftPadding >= 0) ? leftPadding : mUserPaddingLeftInitial;
+            if (!mRightPaddingDefined && endPaddingDefined) {
+                rightPadding = endPadding;
+            }
+            mUserPaddingRightInitial = (rightPadding >= 0) ? rightPadding : mUserPaddingRightInitial;
+        } else {
+            // Jelly Bean MR1 and after case: if start/end defined, they will override any left/right
+            // values defined. Otherwise, left /right values are used.
+            // Padding from the background drawable is stored at this point in mUserPaddingLeftInitial
+            // and mUserPaddingRightInitial) so drawable padding will be used as ultimate default if
+            // defined.
+            final boolean hasRelativePadding = startPaddingDefined || endPaddingDefined;
+
+            if (mLeftPaddingDefined && !hasRelativePadding) {
+                mUserPaddingLeftInitial = leftPadding;
+            }
+            if (mRightPaddingDefined && !hasRelativePadding) {
+                mUserPaddingRightInitial = rightPadding;
+            }
+        }
+
+        internalSetPadding(
+                mUserPaddingLeftInitial,
                 topPadding >= 0 ? topPadding : mPaddingTop,
-                rightPadding >= 0 ? rightPadding : mPaddingRight,
+                mUserPaddingRightInitial,
                 bottomPadding >= 0 ? bottomPadding : mPaddingBottom);
 
         if (viewFlagMasks != 0) {
             setFlags(viewFlagValues, viewFlagMasks);
         }
+
+        if (initializeScrollbars) {
+            initializeScrollbarsInternal(a);
+        }
+
+        a.recycle();
 
         // Needs to be called after mViewFlags is set
         if (scrollbarStyle != SCROLLBARS_INSIDE_OVERLAY) {
@@ -3674,6 +4177,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (transformSet) {
             setTranslationX(tx);
             setTranslationY(ty);
+            setTranslationZ(tz);
+            setElevation(elevation);
             setRotation(rotation);
             setRotationX(rotationX);
             setRotationY(rotationY);
@@ -3688,15 +4193,132 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         computeOpaqueFlags();
     }
 
-    private void updateUserPaddingRelative() {
-        mUserPaddingRelative = (mUserPaddingStart >= 0 || mUserPaddingEnd >= 0);
-    }
-
     /**
      * Non-public constructor for use in testing
      */
     View() {
         mResources = null;
+        mRenderNode = RenderNode.create(getClass().getName(), this);
+    }
+
+    private static SparseArray<String> getAttributeMap() {
+        if (mAttributeMap == null) {
+            mAttributeMap = new SparseArray<String>();
+        }
+        return mAttributeMap;
+    }
+
+    private void saveAttributeData(AttributeSet attrs, TypedArray a) {
+        int length = ((attrs == null ? 0 : attrs.getAttributeCount()) + a.getIndexCount()) * 2;
+        mAttributes = new String[length];
+
+        int i = 0;
+        if (attrs != null) {
+            for (i = 0; i < attrs.getAttributeCount(); i += 2) {
+                mAttributes[i] = attrs.getAttributeName(i);
+                mAttributes[i + 1] = attrs.getAttributeValue(i);
+            }
+
+        }
+
+        SparseArray<String> attributeMap = getAttributeMap();
+        for (int j = 0; j < a.length(); ++j) {
+            if (a.hasValue(j)) {
+                try {
+                    int resourceId = a.getResourceId(j, 0);
+                    if (resourceId == 0) {
+                        continue;
+                    }
+
+                    String resourceName = attributeMap.get(resourceId);
+                    if (resourceName == null) {
+                        resourceName = a.getResources().getResourceName(resourceId);
+                        attributeMap.put(resourceId, resourceName);
+                    }
+
+                    mAttributes[i] = resourceName;
+                    mAttributes[i + 1] = a.getText(j).toString();
+                    i += 2;
+                } catch (Resources.NotFoundException e) {
+                    // if we can't get the resource name, we just ignore it
+                }
+            }
+        }
+    }
+
+    public String toString() {
+        StringBuilder out = new StringBuilder(128);
+        out.append(getClass().getName());
+        out.append('{');
+        out.append(Integer.toHexString(System.identityHashCode(this)));
+        out.append(' ');
+        switch (mViewFlags&VISIBILITY_MASK) {
+            case VISIBLE: out.append('V'); break;
+            case INVISIBLE: out.append('I'); break;
+            case GONE: out.append('G'); break;
+            default: out.append('.'); break;
+        }
+        out.append((mViewFlags&FOCUSABLE_MASK) == FOCUSABLE ? 'F' : '.');
+        out.append((mViewFlags&ENABLED_MASK) == ENABLED ? 'E' : '.');
+        out.append((mViewFlags&DRAW_MASK) == WILL_NOT_DRAW ? '.' : 'D');
+        out.append((mViewFlags&SCROLLBARS_HORIZONTAL) != 0 ? 'H' : '.');
+        out.append((mViewFlags&SCROLLBARS_VERTICAL) != 0 ? 'V' : '.');
+        out.append((mViewFlags&CLICKABLE) != 0 ? 'C' : '.');
+        out.append((mViewFlags&LONG_CLICKABLE) != 0 ? 'L' : '.');
+        out.append(' ');
+        out.append((mPrivateFlags&PFLAG_IS_ROOT_NAMESPACE) != 0 ? 'R' : '.');
+        out.append((mPrivateFlags&PFLAG_FOCUSED) != 0 ? 'F' : '.');
+        out.append((mPrivateFlags&PFLAG_SELECTED) != 0 ? 'S' : '.');
+        if ((mPrivateFlags&PFLAG_PREPRESSED) != 0) {
+            out.append('p');
+        } else {
+            out.append((mPrivateFlags&PFLAG_PRESSED) != 0 ? 'P' : '.');
+        }
+        out.append((mPrivateFlags&PFLAG_HOVERED) != 0 ? 'H' : '.');
+        out.append((mPrivateFlags&PFLAG_ACTIVATED) != 0 ? 'A' : '.');
+        out.append((mPrivateFlags&PFLAG_INVALIDATED) != 0 ? 'I' : '.');
+        out.append((mPrivateFlags&PFLAG_DIRTY_MASK) != 0 ? 'D' : '.');
+        out.append(' ');
+        out.append(mLeft);
+        out.append(',');
+        out.append(mTop);
+        out.append('-');
+        out.append(mRight);
+        out.append(',');
+        out.append(mBottom);
+        final int id = getId();
+        if (id != NO_ID) {
+            out.append(" #");
+            out.append(Integer.toHexString(id));
+            final Resources r = mResources;
+            if (Resources.resourceHasPackage(id) && r != null) {
+                try {
+                    String pkgname;
+                    switch (id&0xff000000) {
+                        case 0x7f000000:
+                            pkgname="app";
+                            break;
+                        case 0x01000000:
+                            pkgname="android";
+                            break;
+                        default:
+                            pkgname = r.getResourcePackageName(id);
+                            break;
+                    }
+                    String typename = r.getResourceTypeName(id);
+                    String entryname = r.getResourceEntryName(id);
+                    out.append(" ");
+                    out.append(pkgname);
+                    out.append(":");
+                    out.append(typename);
+                    out.append("/");
+                    out.append(entryname);
+                } catch (Resources.NotFoundException e) {
+                }
+            }
+        }
+        out.append("}");
+        return out.toString();
     }
 
     /**
@@ -3709,8 +4331,36 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * </p>
      *
      * @param a the styled attributes set to initialize the fading edges from
+     *
+     * @removed
      */
     protected void initializeFadingEdge(TypedArray a) {
+        // This method probably shouldn't have been included in the SDK to begin with.
+        // It relies on 'a' having been initialized using an attribute filter array that is
+        // not publicly available to the SDK. The old method has been renamed
+        // to initializeFadingEdgeInternal and hidden for framework use only;
+        // this one initializes using defaults to make it safe to call for apps.
+
+        TypedArray arr = mContext.obtainStyledAttributes(com.android.internal.R.styleable.View);
+
+        initializeFadingEdgeInternal(arr);
+
+        arr.recycle();
+    }
+
+    /**
+     * <p>
+     * Initializes the fading edges from a given set of styled attributes. This
+     * method should be called by subclasses that need fading edges and when an
+     * instance of these subclasses is created programmatically rather than
+     * being inflated from XML. This method is automatically called when the XML
+     * is inflated.
+     * </p>
+     *
+     * @param a the styled attributes set to initialize the fading edges from
+     * @hide This is the real method; the public one is shimmed to be safe to call from apps.
+     */
+    protected void initializeFadingEdgeInternal(TypedArray a) {
         initScrollCache();
 
         mScrollCache.fadingEdgeLength = a.getDimensionPixelSize(
@@ -3823,8 +4473,35 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * </p>
      *
      * @param a the styled attributes set to initialize the scrollbars from
+     *
+     * @removed
      */
     protected void initializeScrollbars(TypedArray a) {
+        // It's not safe to use this method from apps. The parameter 'a' must have been obtained
+        // using the View filter array which is not available to the SDK. As such, internal
+        // framework usage now uses initializeScrollbarsInternal and we grab a default
+        // TypedArray with the right filter instead here.
+        TypedArray arr = mContext.obtainStyledAttributes(com.android.internal.R.styleable.View);
+
+        initializeScrollbarsInternal(arr);
+
+        // We ignored the method parameter. Recycle the one we actually did use.
+        arr.recycle();
+    }
+
+    /**
+     * <p>
+     * Initializes the scrollbars from a given set of styled attributes. This
+     * method should be called by subclasses that need scrollbars and when an
+     * instance of these subclasses is created programmatically rather than
+     * being inflated from XML. This method is automatically called when the XML
+     * is inflated.
+     * </p>
+     *
+     * @param a the styled attributes set to initialize the scrollbars from
+     * @hide
+     */
+    protected void initializeScrollbarsInternal(TypedArray a) {
         initScrollCache();
 
         final ScrollabilityCache scrollabilityCache = mScrollCache;
@@ -3881,6 +4558,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             scrollabilityCache.scrollBar.setAlwaysDrawVerticalTrack(true);
         }
 
+        // Apply layout direction to the new Drawables if needed
+        final int layoutDirection = getLayoutDirection();
+        if (track != null) {
+            track.setLayoutDirection(layoutDirection);
+        }
+        if (thumb != null) {
+            thumb.setLayoutDirection(layoutDirection);
+        }
+
         // Re-apply user/background padding so that scrollbar(s) get added
         resolvePadding();
     }
@@ -3930,6 +4616,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
         mListenerInfo = new ListenerInfo();
         return mListenerInfo;
+    }
+
+    /**
+     * Register a callback to be invoked when the scroll position of this view
+     * changed.
+     *
+     * @param l The callback that will run.
+     * @hide Only used internally.
+     */
+    public void setOnScrollChangeListener(OnScrollChangeListener l) {
+        getListenerInfo().mOnScrollChangeListener = l;
     }
 
     /**
@@ -4076,16 +4773,18 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *         otherwise is returned.
      */
     public boolean performClick() {
-        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED);
-
-        ListenerInfo li = mListenerInfo;
+        final boolean result;
+        final ListenerInfo li = mListenerInfo;
         if (li != null && li.mOnClickListener != null) {
             playSoundEffect(SoundEffectConstants.CLICK);
             li.mOnClickListener.onClick(this);
-            return true;
+            result = true;
+        } else {
+            result = false;
         }
 
-        return false;
+        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_CLICKED);
+        return result;
     }
 
     /**
@@ -4242,24 +4941,42 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param previouslyFocusedRect The rectangle of the view that had focus
      *        prior in this View's coordinate system.
      */
-    void handleFocusGainInternal(int direction, Rect previouslyFocusedRect) {
+    void handleFocusGainInternal(@FocusRealDirection int direction, Rect previouslyFocusedRect) {
         if (DBG) {
             System.out.println(this + " requestFocus()");
         }
 
-        if ((mPrivateFlags & FOCUSED) == 0) {
-            mPrivateFlags |= FOCUSED;
+        if ((mPrivateFlags & PFLAG_FOCUSED) == 0) {
+            mPrivateFlags |= PFLAG_FOCUSED;
+
+            View oldFocus = (mAttachInfo != null) ? getRootView().findFocus() : null;
 
             if (mParent != null) {
                 mParent.requestChildFocus(this, this);
             }
 
+            if (mAttachInfo != null) {
+                mAttachInfo.mTreeObserver.dispatchOnGlobalFocusChange(oldFocus, this);
+            }
+
             onFocusChanged(true, direction, previouslyFocusedRect);
             refreshDrawableState();
+        }
+    }
 
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                notifyAccessibilityStateChanged();
-            }
+    /**
+     * Populates <code>outRect</code> with the hotspot bounds. By default,
+     * the hotspot bounds are identical to the screen bounds.
+     *
+     * @param outRect rect to populate with hotspot bounds
+     * @hide Only for internal use by views and widgets.
+     */
+    public void getHotspotBounds(Rect outRect) {
+        final Drawable background = getBackground();
+        if (background != null) {
+            background.getHotspotBounds(outRect);
+        } else {
+            getBoundsOnScreen(outRect);
         }
     }
 
@@ -4294,25 +5011,42 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return Whether any parent scrolled.
      */
     public boolean requestRectangleOnScreen(Rect rectangle, boolean immediate) {
+        if (mParent == null) {
+            return false;
+        }
+
         View child = this;
+
+        RectF position = (mAttachInfo != null) ? mAttachInfo.mTmpTransformRect : new RectF();
+        position.set(rectangle);
+
         ViewParent parent = mParent;
         boolean scrolled = false;
         while (parent != null) {
+            rectangle.set((int) position.left, (int) position.top,
+                    (int) position.right, (int) position.bottom);
+
             scrolled |= parent.requestChildRectangleOnScreen(child,
                     rectangle, immediate);
 
-            // offset rect so next call has the rectangle in the
-            // coordinate system of its direct child.
-            rectangle.offset(child.getLeft(), child.getTop());
-            rectangle.offset(-child.getScrollX(), -child.getScrollY());
+            if (!child.hasIdentityMatrix()) {
+                child.getMatrix().mapRect(position);
+            }
+
+            position.offset(child.mLeft, child.mTop);
 
             if (!(parent instanceof View)) {
                 break;
             }
 
-            child = (View) parent;
+            View parentView = (View) parent;
+
+            position.offset(-parentView.getScrollX(), -parentView.getScrollY());
+
+            child = parentView;
             parent = child.getParent();
         }
+
         return scrolled;
     }
 
@@ -4323,7 +5057,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * <strong>Note:</strong> When a View clears focus the framework is trying
      * to give focus to the first focusable View from the top. Hence, if this
      * View is the first from the top that can take focus, then all callbacks
-     * related to clearing focus will be invoked after wich the framework will
+     * related to clearing focus will be invoked after which the framework will
      * give focus to this view.
      * </p>
      */
@@ -4332,51 +5066,60 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             System.out.println(this + " clearFocus()");
         }
 
-        if ((mPrivateFlags & FOCUSED) != 0) {
-            mPrivateFlags &= ~FOCUSED;
+        clearFocusInternal(null, true, true);
+    }
 
-            if (mParent != null) {
+    /**
+     * Clears focus from the view, optionally propagating the change up through
+     * the parent hierarchy and requesting that the root view place new focus.
+     *
+     * @param propagate whether to propagate the change up through the parent
+     *            hierarchy
+     * @param refocus when propagate is true, specifies whether to request the
+     *            root view place new focus
+     */
+    void clearFocusInternal(View focused, boolean propagate, boolean refocus) {
+        if ((mPrivateFlags & PFLAG_FOCUSED) != 0) {
+            mPrivateFlags &= ~PFLAG_FOCUSED;
+
+            if (propagate && mParent != null) {
                 mParent.clearChildFocus(this);
             }
 
             onFocusChanged(false, 0, null);
-
             refreshDrawableState();
 
-            ensureInputFocusOnFirstFocusable();
-
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                notifyAccessibilityStateChanged();
+            if (propagate && (!refocus || !rootViewRequestFocus())) {
+                notifyGlobalFocusCleared(this);
             }
         }
     }
 
-    void ensureInputFocusOnFirstFocusable() {
-        View root = getRootView();
-        if (root != null) {
-            root.requestFocus();
+    void notifyGlobalFocusCleared(View oldFocus) {
+        if (oldFocus != null && mAttachInfo != null) {
+            mAttachInfo.mTreeObserver.dispatchOnGlobalFocusChange(oldFocus, null);
         }
+    }
+
+    boolean rootViewRequestFocus() {
+        final View root = getRootView();
+        return root != null && root.requestFocus();
     }
 
     /**
      * Called internally by the view system when a new view is getting focus.
      * This is what clears the old focus.
+     * <p>
+     * <b>NOTE:</b> The parent view's focused child must be updated manually
+     * after calling this method. Otherwise, the view hierarchy may be left in
+     * an inconstent state.
      */
-    void unFocus() {
+    void unFocus(View focused) {
         if (DBG) {
             System.out.println(this + " unFocus()");
         }
 
-        if ((mPrivateFlags & FOCUSED) != 0) {
-            mPrivateFlags &= ~FOCUSED;
-
-            onFocusChanged(false, 0, null);
-            refreshDrawableState();
-
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                notifyAccessibilityStateChanged();
-            }
-        }
+        clearFocusInternal(focused, false, false);
     }
 
     /**
@@ -4387,7 +5130,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "focus")
     public boolean hasFocus() {
-        return (mPrivateFlags & FOCUSED) != 0;
+        return (mPrivateFlags & PFLAG_FOCUSED) != 0;
     }
 
     /**
@@ -4401,8 +5144,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *         View, false otherwise.
      *
      * @see ViewGroup#FOCUS_BLOCK_DESCENDANTS
+     * @see ViewGroup#getTouchscreenBlocksFocus()
      */
     public boolean hasFocusable() {
+        if (!isFocusableInTouchMode()) {
+            for (ViewParent p = mParent; p instanceof ViewGroup; p = p.getParent()) {
+                final ViewGroup g = (ViewGroup) p;
+                if (g.shouldBlockFocusForTouchscreen()) {
+                    return false;
+                }
+            }
+        }
         return (mViewFlags & VISIBILITY_MASK) == VISIBLE && isFocusable();
     }
 
@@ -4424,11 +5176,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *        passed in as finer grained information about where the focus is coming
      *        from (in addition to direction).  Will be <code>null</code> otherwise.
      */
-    protected void onFocusChanged(boolean gainFocus, int direction, Rect previouslyFocusedRect) {
+    protected void onFocusChanged(boolean gainFocus, @FocusDirection int direction,
+            @Nullable Rect previouslyFocusedRect) {
         if (gainFocus) {
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_FOCUSED);
-            }
+            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_FOCUSED);
+        } else {
+            notifyViewAccessibilityStateChangedIfNeeded(
+                    AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
         }
 
         InputMethodManager imm = InputMethodManager.peekInstance();
@@ -4458,7 +5212,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Sends an accessibility event of the given type. If accessiiblity is
+     * Sends an accessibility event of the given type. If accessibility is
      * not enabled this method has no effect. The default implementation calls
      * {@link #onInitializeAccessibilityEvent(AccessibilityEvent)} first
      * to populate information about the event source (this View), then calls
@@ -4502,11 +5256,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param text The announcement text.
      */
     public void announceForAccessibility(CharSequence text) {
-        if (AccessibilityManager.getInstance(mContext).isEnabled()) {
+        if (AccessibilityManager.getInstance(mContext).isEnabled() && mParent != null) {
             AccessibilityEvent event = AccessibilityEvent.obtain(
                     AccessibilityEvent.TYPE_ANNOUNCEMENT);
+            onInitializeAccessibilityEvent(event);
             event.getText().add(text);
-            sendAccessibilityEventUnchecked(event);
+            event.setContentDescription(null);
+            mParent.requestSendAccessibilityEvent(this, event);
         }
     }
 
@@ -4650,7 +5406,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Note: Called from the default {@link AccessibilityDelegate}.
      */
     void onPopulateAccessibilityEventInternal(AccessibilityEvent event) {
-
     }
 
     /**
@@ -4699,13 +5454,25 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         event.setEnabled(isEnabled());
         event.setContentDescription(mContentDescription);
 
-        if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED && mAttachInfo != null) {
-            ArrayList<View> focusablesTempList = mAttachInfo.mTempArrayList;
-            getRootView().addFocusables(focusablesTempList, View.FOCUS_FORWARD,
-                    FOCUSABLES_ALL);
-            event.setItemCount(focusablesTempList.size());
-            event.setCurrentItemIndex(focusablesTempList.indexOf(this));
-            focusablesTempList.clear();
+        switch (event.getEventType()) {
+            case AccessibilityEvent.TYPE_VIEW_FOCUSED: {
+                ArrayList<View> focusablesTempList = (mAttachInfo != null)
+                        ? mAttachInfo.mTempArrayList : new ArrayList<View>();
+                getRootView().addFocusables(focusablesTempList, View.FOCUS_FORWARD, FOCUSABLES_ALL);
+                event.setItemCount(focusablesTempList.size());
+                event.setCurrentItemIndex(focusablesTempList.indexOf(this));
+                if (mAttachInfo != null) {
+                    focusablesTempList.clear();
+                }
+            } break;
+            case AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED: {
+                CharSequence text = getIterableTextForAccessibility();
+                if (text != null && text.length() > 0) {
+                    event.setFromIndex(getAccessibilitySelectionStart());
+                    event.setToIndex(getAccessibilitySelectionEnd());
+                    event.setItemCount(text.length());
+                }
+            } break;
         }
     }
 
@@ -4726,6 +5493,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see AccessibilityNodeInfo
      */
     public AccessibilityNodeInfo createAccessibilityNodeInfo() {
+        if (mAccessibilityDelegate != null) {
+            return mAccessibilityDelegate.createAccessibilityNodeInfo(this);
+        } else {
+            return createAccessibilityNodeInfoInternal();
+        }
+    }
+
+    /**
+     * @see #createAccessibilityNodeInfo()
+     */
+    AccessibilityNodeInfo createAccessibilityNodeInfoInternal() {
         AccessibilityNodeProvider provider = getAccessibilityNodeProvider();
         if (provider != null) {
             return provider.createAccessibilityNodeInfo(View.NO_ID);
@@ -4775,11 +5553,23 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Gets the location of this view in screen coordintates.
+     * Gets the location of this view in screen coordinates.
      *
      * @param outRect The output location
+     * @hide
      */
-    private void getBoundsOnScreen(Rect outRect) {
+    public void getBoundsOnScreen(Rect outRect) {
+        getBoundsOnScreen(outRect, false);
+    }
+
+    /**
+     * Gets the location of this view in screen coordinates.
+     *
+     * @param outRect The output location
+     * @param clipToParent Whether to clip child bounds to the parent ones.
+     * @hide
+     */
+    public void getBoundsOnScreen(Rect outRect, boolean clipToParent) {
         if (mAttachInfo == null) {
             return;
         }
@@ -4798,6 +5588,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             View parentView = (View) parent;
 
             position.offset(-parentView.mScrollX, -parentView.mScrollY);
+
+            if (clipToParent) {
+                position.left = Math.max(position.left, 0);
+                position.top = Math.max(position.top, 0);
+                position.right = Math.min(position.right, parentView.getWidth());
+                position.bottom = Math.min(position.bottom, parentView.getHeight());
+            }
 
             if (!parentView.hasIdentityMatrix()) {
                 parentView.getMatrix().mapRect(position);
@@ -4826,15 +5623,74 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     void onInitializeAccessibilityNodeInfoInternal(AccessibilityNodeInfo info) {
         Rect bounds = mAttachInfo.mTmpInvalRect;
+
         getDrawingRect(bounds);
         info.setBoundsInParent(bounds);
 
-        getBoundsOnScreen(bounds);
+        getBoundsOnScreen(bounds, true);
         info.setBoundsInScreen(bounds);
 
         ViewParent parent = getParentForAccessibility();
         if (parent instanceof View) {
             info.setParent((View) parent);
+        }
+
+        if (mID != View.NO_ID) {
+            View rootView = getRootView();
+            if (rootView == null) {
+                rootView = this;
+            }
+
+            View label = rootView.findLabelForView(this, mID);
+            if (label != null) {
+                info.setLabeledBy(label);
+            }
+
+            if ((mAttachInfo.mAccessibilityFetchFlags
+                    & AccessibilityNodeInfo.FLAG_REPORT_VIEW_IDS) != 0
+                    && Resources.resourceHasPackage(mID)) {
+                try {
+                    String viewId = getResources().getResourceName(mID);
+                    info.setViewIdResourceName(viewId);
+                } catch (Resources.NotFoundException nfe) {
+                    /* ignore */
+                }
+            }
+        }
+
+        if (mLabelForId != View.NO_ID) {
+            View rootView = getRootView();
+            if (rootView == null) {
+                rootView = this;
+            }
+            View labeled = rootView.findViewInsideOutShouldExist(this, mLabelForId);
+            if (labeled != null) {
+                info.setLabelFor(labeled);
+            }
+        }
+
+        if (mAccessibilityTraversalBeforeId != View.NO_ID) {
+            View rootView = getRootView();
+            if (rootView == null) {
+                rootView = this;
+            }
+            View next = rootView.findViewInsideOutShouldExist(this,
+                    mAccessibilityTraversalBeforeId);
+            if (next != null) {
+                info.setTraversalBefore(next);
+            }
+        }
+
+        if (mAccessibilityTraversalAfterId != View.NO_ID) {
+            View rootView = getRootView();
+            if (rootView == null) {
+                rootView = this;
+            }
+            View next = rootView.findViewInsideOutShouldExist(this,
+                    mAccessibilityTraversalAfterId);
+            if (next != null) {
+                info.setTraversalAfter(next);
+            }
         }
 
         info.setVisibleToUser(isVisibleToUser());
@@ -4850,9 +5706,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         info.setAccessibilityFocused(isAccessibilityFocused());
         info.setSelected(isSelected());
         info.setLongClickable(isLongClickable());
+        info.setLiveRegion(getAccessibilityLiveRegion());
 
         // TODO: These make sense only if we are in an AdapterView but all
-        // views can be selected. Maybe from accessiiblity perspective
+        // views can be selected. Maybe from accessibility perspective
         // we should report as selectable view in an AdapterView.
         info.addAction(AccessibilityNodeInfo.ACTION_SELECT);
         info.addAction(AccessibilityNodeInfo.ACTION_CLEAR_SELECTION);
@@ -4866,10 +5723,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         if (!isAccessibilityFocused()) {
-            final int mode = getAccessibilityFocusable();
-            if (mode == ACCESSIBILITY_FOCUSABLE_YES || mode == ACCESSIBILITY_FOCUSABLE_AUTO) {
-                info.addAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
-            }
+            info.addAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
         } else {
             info.addAction(AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
         }
@@ -4882,7 +5736,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             info.addAction(AccessibilityNodeInfo.ACTION_LONG_CLICK);
         }
 
-        if (mContentDescription != null && mContentDescription.length() > 0) {
+        CharSequence text = getIterableTextForAccessibility();
+        if (text != null && text.length() > 0) {
+            info.setTextSelection(getAccessibilitySelectionStart(), getAccessibilitySelectionEnd());
+
+            info.addAction(AccessibilityNodeInfo.ACTION_SET_SELECTION);
             info.addAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY);
             info.addAction(AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY);
             info.setMovementGranularities(AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER
@@ -4891,28 +5749,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
     }
 
-    /**
-     * Returns the delta between the actual and last reported window left.
-     *
-     * @hide
-     */
-    public int getActualAndReportedWindowLeftDelta() {
-        if (mAttachInfo != null) {
-            return mAttachInfo.mActualWindowLeft - mAttachInfo.mWindowLeft; 
+    private View findLabelForView(View view, int labeledId) {
+        if (mMatchLabelForPredicate == null) {
+            mMatchLabelForPredicate = new MatchLabelForPredicate();
         }
-        return 0;
-    }
-
-    /**
-     * Returns the delta between the actual and last reported window top.
-     *
-     * @hide
-     */
-    public int getActualAndReportedWindowTopDelta() {
-        if (mAttachInfo != null) {
-            return mAttachInfo.mActualWindowTop - mAttachInfo.mWindowTop;
-        }
-        return 0;
+        mMatchLabelForPredicate.mLabeledId = labeledId;
+        return findViewByPredicateInsideOut(view, mMatchLabelForPredicate);
     }
 
     /**
@@ -4929,9 +5771,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Computes whether the given portion of this view is visible to the user. Such a view is
-     * attached, visible, all its predecessors are visible, has an alpha greater than zero, and
-     * the specified portion is not clipped entirely by its predecessors.
+     * Computes whether the given portion of this view is visible to the user.
+     * Such a view is attached, visible, all its predecessors are visible,
+     * has an alpha greater than zero, and the specified portion is not
+     * clipped entirely by its predecessors.
      *
      * @param boundInView the portion of the view to test; coordinates should be relative; may be
      *                    <code>null</code>, and the entire view will be tested in this case.
@@ -4945,26 +5788,54 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     protected boolean isVisibleToUser(Rect boundInView) {
-        Rect visibleRect = mAttachInfo.mTmpInvalRect;
-        Point offset = mAttachInfo.mPoint;
-        // The first two checks are made also made by isShown() which
-        // however traverses the tree up to the parent to catch that.
-        // Therefore, we do some fail fast check to minimize the up
-        // tree traversal.
-        boolean isVisible = mAttachInfo != null
-            && mAttachInfo.mWindowVisibility == View.VISIBLE
-            && getAlpha() > 0
-            && isShown()
-            && getGlobalVisibleRect(visibleRect, offset);
-            if (isVisible && boundInView != null) {
-                visibleRect.offset(-offset.x, -offset.y);
-                isVisible &= boundInView.intersect(visibleRect);
+        if (mAttachInfo != null) {
+            // Attached to invisible window means this view is not visible.
+            if (mAttachInfo.mWindowVisibility != View.VISIBLE) {
+                return false;
             }
-            return isVisible;
+            // An invisible predecessor or one with alpha zero means
+            // that this view is not visible to the user.
+            Object current = this;
+            while (current instanceof View) {
+                View view = (View) current;
+                // We have attach info so this view is attached and there is no
+                // need to check whether we reach to ViewRootImpl on the way up.
+                if (view.getAlpha() <= 0 || view.getTransitionAlpha() <= 0 ||
+                        view.getVisibility() != VISIBLE) {
+                    return false;
+                }
+                current = view.mParent;
+            }
+            // Check if the view is entirely covered by its predecessors.
+            Rect visibleRect = mAttachInfo.mTmpInvalRect;
+            Point offset = mAttachInfo.mPoint;
+            if (!getGlobalVisibleRect(visibleRect, offset)) {
+                return false;
+            }
+            // Check if the visible portion intersects the rectangle of interest.
+            if (boundInView != null) {
+                visibleRect.offset(-offset.x, -offset.y);
+                return boundInView.intersect(visibleRect);
+            }
+            return true;
+        }
+        return false;
     }
 
     /**
-     * Sets a delegate for implementing accessibility support via compositon as
+     * Returns the delegate for implementing accessibility support via
+     * composition. For more details see {@link AccessibilityDelegate}.
+     *
+     * @return The delegate, or null if none set.
+     *
+     * @hide
+     */
+    public AccessibilityDelegate getAccessibilityDelegate() {
+        return mAccessibilityDelegate;
+    }
+
+    /**
+     * Sets a delegate for implementing accessibility support via composition as
      * opposed to inheritance. The delegate's primary use is for implementing
      * backwards compatible widgets. For more details see {@link AccessibilityDelegate}.
      *
@@ -5029,7 +5900,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     public int getAccessibilityWindowId() {
-        return mAttachInfo != null ? mAttachInfo.mAccessibilityWindowId : NO_ID;
+        return mAttachInfo != null ? mAttachInfo.mAccessibilityWindowId
+                : AccessibilityNodeInfo.UNDEFINED_ITEM_ID;
     }
 
     /**
@@ -5061,11 +5933,141 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @RemotableViewMethod
     public void setContentDescription(CharSequence contentDescription) {
+        if (mContentDescription == null) {
+            if (contentDescription == null) {
+                return;
+            }
+        } else if (mContentDescription.equals(contentDescription)) {
+            return;
+        }
         mContentDescription = contentDescription;
         final boolean nonEmptyDesc = contentDescription != null && contentDescription.length() > 0;
         if (nonEmptyDesc && getImportantForAccessibility() == IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
-             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+            notifySubtreeAccessibilityStateChangedIfNeeded();
+        } else {
+            notifyViewAccessibilityStateChangedIfNeeded(
+                    AccessibilityEvent.CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION);
         }
+    }
+
+    /**
+     * Sets the id of a view before which this one is visited in accessibility traversal.
+     * A screen-reader must visit the content of this view before the content of the one
+     * it precedes. For example, if view B is set to be before view A, then a screen-reader
+     * will traverse the entire content of B before traversing the entire content of A,
+     * regardles of what traversal strategy it is using.
+     * <p>
+     * Views that do not have specified before/after relationships are traversed in order
+     * determined by the screen-reader.
+     * </p>
+     * <p>
+     * Setting that this view is before a view that is not important for accessibility
+     * or if this view is not important for accessibility will have no effect as the
+     * screen-reader is not aware of unimportant views.
+     * </p>
+     *
+     * @param beforeId The id of a view this one precedes in accessibility traversal.
+     *
+     * @attr ref android.R.styleable#View_accessibilityTraversalBefore
+     *
+     * @see #setImportantForAccessibility(int)
+     */
+    @RemotableViewMethod
+    public void setAccessibilityTraversalBefore(int beforeId) {
+        if (mAccessibilityTraversalBeforeId == beforeId) {
+            return;
+        }
+        mAccessibilityTraversalBeforeId = beforeId;
+        notifyViewAccessibilityStateChangedIfNeeded(
+                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+    }
+
+    /**
+     * Gets the id of a view before which this one is visited in accessibility traversal.
+     *
+     * @return The id of a view this one precedes in accessibility traversal if
+     *         specified, otherwise {@link #NO_ID}.
+     *
+     * @see #setAccessibilityTraversalBefore(int)
+     */
+    public int getAccessibilityTraversalBefore() {
+        return mAccessibilityTraversalBeforeId;
+    }
+
+    /**
+     * Sets the id of a view after which this one is visited in accessibility traversal.
+     * A screen-reader must visit the content of the other view before the content of this
+     * one. For example, if view B is set to be after view A, then a screen-reader
+     * will traverse the entire content of A before traversing the entire content of B,
+     * regardles of what traversal strategy it is using.
+     * <p>
+     * Views that do not have specified before/after relationships are traversed in order
+     * determined by the screen-reader.
+     * </p>
+     * <p>
+     * Setting that this view is after a view that is not important for accessibility
+     * or if this view is not important for accessibility will have no effect as the
+     * screen-reader is not aware of unimportant views.
+     * </p>
+     *
+     * @param afterId The id of a view this one succedees in accessibility traversal.
+     *
+     * @attr ref android.R.styleable#View_accessibilityTraversalAfter
+     *
+     * @see #setImportantForAccessibility(int)
+     */
+    @RemotableViewMethod
+    public void setAccessibilityTraversalAfter(int afterId) {
+        if (mAccessibilityTraversalAfterId == afterId) {
+            return;
+        }
+        mAccessibilityTraversalAfterId = afterId;
+        notifyViewAccessibilityStateChangedIfNeeded(
+                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+    }
+
+    /**
+     * Gets the id of a view after which this one is visited in accessibility traversal.
+     *
+     * @return The id of a view this one succeedes in accessibility traversal if
+     *         specified, otherwise {@link #NO_ID}.
+     *
+     * @see #setAccessibilityTraversalAfter(int)
+     */
+    public int getAccessibilityTraversalAfter() {
+        return mAccessibilityTraversalAfterId;
+    }
+
+    /**
+     * Gets the id of a view for which this view serves as a label for
+     * accessibility purposes.
+     *
+     * @return The labeled view id.
+     */
+    @ViewDebug.ExportedProperty(category = "accessibility")
+    public int getLabelFor() {
+        return mLabelForId;
+    }
+
+    /**
+     * Sets the id of a view for which this view serves as a label for
+     * accessibility purposes.
+     *
+     * @param id The labeled view id.
+     */
+    @RemotableViewMethod
+    public void setLabelFor(int id) {
+        if (mLabelForId == id) {
+            return;
+        }
+        mLabelForId = id;
+        if (mLabelForId != View.NO_ID
+                && mID == View.NO_ID) {
+            mID = generateViewId();
+        }
+        notifyViewAccessibilityStateChangedIfNeeded(
+                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
     }
 
     /**
@@ -5106,7 +6108,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "focus")
     public boolean isFocused() {
-        return (mPrivateFlags & FOCUSED) != 0;
+        return (mPrivateFlags & PFLAG_FOCUSED) != 0;
     }
 
     /**
@@ -5117,7 +6119,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *         be found.
      */
     public View findFocus() {
-        return (mPrivateFlags & FOCUSED) != 0 ? this : null;
+        return (mPrivateFlags & PFLAG_FOCUSED) != 0 ? this : null;
     }
 
     /**
@@ -5130,7 +6132,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_isScrollContainer
      */
     public boolean isScrollContainer() {
-        return (mPrivateFlags & SCROLL_CONTAINER_ADDED) != 0;
+        return (mPrivateFlags & PFLAG_SCROLL_CONTAINER_ADDED) != 0;
     }
 
     /**
@@ -5144,16 +6146,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void setScrollContainer(boolean isScrollContainer) {
         if (isScrollContainer) {
-            if (mAttachInfo != null && (mPrivateFlags&SCROLL_CONTAINER_ADDED) == 0) {
+            if (mAttachInfo != null && (mPrivateFlags&PFLAG_SCROLL_CONTAINER_ADDED) == 0) {
                 mAttachInfo.mScrollContainers.add(this);
-                mPrivateFlags |= SCROLL_CONTAINER_ADDED;
+                mPrivateFlags |= PFLAG_SCROLL_CONTAINER_ADDED;
             }
-            mPrivateFlags |= SCROLL_CONTAINER;
+            mPrivateFlags |= PFLAG_SCROLL_CONTAINER;
         } else {
-            if ((mPrivateFlags&SCROLL_CONTAINER_ADDED) != 0) {
+            if ((mPrivateFlags&PFLAG_SCROLL_CONTAINER_ADDED) != 0) {
                 mAttachInfo.mScrollContainers.remove(this);
             }
-            mPrivateFlags &= ~(SCROLL_CONTAINER|SCROLL_CONTAINER_ADDED);
+            mPrivateFlags &= ~(PFLAG_SCROLL_CONTAINER|PFLAG_SCROLL_CONTAINER_ADDED);
         }
     }
 
@@ -5169,6 +6171,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @attr ref android.R.styleable#View_drawingCacheQuality
      */
+    @DrawingCacheQuality
     public int getDrawingCacheQuality() {
         return mViewFlags & DRAWING_CACHE_QUALITY_MASK;
     }
@@ -5186,7 +6189,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @attr ref android.R.styleable#View_drawingCacheQuality
      */
-    public void setDrawingCacheQuality(int quality) {
+    public void setDrawingCacheQuality(@DrawingCacheQuality int quality) {
         setFlags(quality, DRAWING_CACHE_QUALITY_MASK);
     }
 
@@ -5363,7 +6366,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * which you would like to ensure are not being covered.
      *
      * <p>The default implementation of this method simply applies the content
-     * inset's to the view's padding, consuming that content (modifying the
+     * insets to the view's padding, consuming that content (modifying the
      * insets to be 0), and returning true.  This behavior is off by default, but can
      * be enabled through {@link #setFitsSystemWindows(boolean)}.
      *
@@ -5400,28 +6403,196 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link android.os.Build.VERSION_CODES#JELLY_BEAN} you must not modify
      * the insets or else you and Android will be unhappy.
      *
-     * @return Return true if this view applied the insets and it should not
-     * continue propagating further down the hierarchy, false otherwise.
+     * @return {@code true} if this view applied the insets and it should not
+     * continue propagating further down the hierarchy, {@code false} otherwise.
      * @see #getFitsSystemWindows()
-     * @see #setFitsSystemWindows()
+     * @see #setFitsSystemWindows(boolean)
      * @see #setSystemUiVisibility(int)
+     *
+     * @deprecated As of API 20 use {@link #dispatchApplyWindowInsets(WindowInsets)} to apply
+     * insets to views. Views should override {@link #onApplyWindowInsets(WindowInsets)} or use
+     * {@link #setOnApplyWindowInsetsListener(android.view.View.OnApplyWindowInsetsListener)}
+     * to implement handling their own insets.
      */
     protected boolean fitSystemWindows(Rect insets) {
-        if ((mViewFlags & FITS_SYSTEM_WINDOWS) == FITS_SYSTEM_WINDOWS) {
-            mUserPaddingStart = -1;
-            mUserPaddingEnd = -1;
-            mUserPaddingRelative = false;
-            if ((mViewFlags & OPTIONAL_FITS_SYSTEM_WINDOWS) == 0
-                    || mAttachInfo == null
-                    || (mAttachInfo.mSystemUiVisibility & SYSTEM_UI_LAYOUT_FLAGS) == 0) {
-                internalSetPadding(insets.left, insets.top, insets.right, insets.bottom);
-                return true;
-            } else {
-                internalSetPadding(0, 0, 0, 0);
+        if ((mPrivateFlags3 & PFLAG3_APPLYING_INSETS) == 0) {
+            if (insets == null) {
+                // Null insets by definition have already been consumed.
+                // This call cannot apply insets since there are none to apply,
+                // so return false.
                 return false;
             }
+            // If we're not in the process of dispatching the newer apply insets call,
+            // that means we're not in the compatibility path. Dispatch into the newer
+            // apply insets path and take things from there.
+            try {
+                mPrivateFlags3 |= PFLAG3_FITTING_SYSTEM_WINDOWS;
+                return dispatchApplyWindowInsets(new WindowInsets(insets)).isConsumed();
+            } finally {
+                mPrivateFlags3 &= ~PFLAG3_FITTING_SYSTEM_WINDOWS;
+            }
+        } else {
+            // We're being called from the newer apply insets path.
+            // Perform the standard fallback behavior.
+            return fitSystemWindowsInt(insets);
+        }
+    }
+
+    private boolean fitSystemWindowsInt(Rect insets) {
+        if ((mViewFlags & FITS_SYSTEM_WINDOWS) == FITS_SYSTEM_WINDOWS) {
+            mUserPaddingStart = UNDEFINED_PADDING;
+            mUserPaddingEnd = UNDEFINED_PADDING;
+            Rect localInsets = sThreadLocal.get();
+            if (localInsets == null) {
+                localInsets = new Rect();
+                sThreadLocal.set(localInsets);
+            }
+            boolean res = computeFitSystemWindows(insets, localInsets);
+            mUserPaddingLeftInitial = localInsets.left;
+            mUserPaddingRightInitial = localInsets.right;
+            internalSetPadding(localInsets.left, localInsets.top,
+                    localInsets.right, localInsets.bottom);
+            return res;
         }
         return false;
+    }
+
+    /**
+     * Called when the view should apply {@link WindowInsets} according to its internal policy.
+     *
+     * <p>This method should be overridden by views that wish to apply a policy different from or
+     * in addition to the default behavior. Clients that wish to force a view subtree
+     * to apply insets should call {@link #dispatchApplyWindowInsets(WindowInsets)}.</p>
+     *
+     * <p>Clients may supply an {@link OnApplyWindowInsetsListener} to a view. If one is set
+     * it will be called during dispatch instead of this method. The listener may optionally
+     * call this method from its own implementation if it wishes to apply the view's default
+     * insets policy in addition to its own.</p>
+     *
+     * <p>Implementations of this method should either return the insets parameter unchanged
+     * or a new {@link WindowInsets} cloned from the supplied insets with any insets consumed
+     * that this view applied itself. This allows new inset types added in future platform
+     * versions to pass through existing implementations unchanged without being erroneously
+     * consumed.</p>
+     *
+     * <p>By default if a view's {@link #setFitsSystemWindows(boolean) fitsSystemWindows}
+     * property is set then the view will consume the system window insets and apply them
+     * as padding for the view.</p>
+     *
+     * @param insets Insets to apply
+     * @return The supplied insets with any applied insets consumed
+     */
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        if ((mPrivateFlags3 & PFLAG3_FITTING_SYSTEM_WINDOWS) == 0) {
+            // We weren't called from within a direct call to fitSystemWindows,
+            // call into it as a fallback in case we're in a class that overrides it
+            // and has logic to perform.
+            if (fitSystemWindows(insets.getSystemWindowInsets())) {
+                return insets.consumeSystemWindowInsets();
+            }
+        } else {
+            // We were called from within a direct call to fitSystemWindows.
+            if (fitSystemWindowsInt(insets.getSystemWindowInsets())) {
+                return insets.consumeSystemWindowInsets();
+            }
+        }
+        return insets;
+    }
+
+    /**
+     * Set an {@link OnApplyWindowInsetsListener} to take over the policy for applying
+     * window insets to this view. The listener's
+     * {@link OnApplyWindowInsetsListener#onApplyWindowInsets(View, WindowInsets) onApplyWindowInsets}
+     * method will be called instead of the view's
+     * {@link #onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method.
+     *
+     * @param listener Listener to set
+     *
+     * @see #onApplyWindowInsets(WindowInsets)
+     */
+    public void setOnApplyWindowInsetsListener(OnApplyWindowInsetsListener listener) {
+        getListenerInfo().mOnApplyWindowInsetsListener = listener;
+    }
+
+    /**
+     * Request to apply the given window insets to this view or another view in its subtree.
+     *
+     * <p>This method should be called by clients wishing to apply insets corresponding to areas
+     * obscured by window decorations or overlays. This can include the status and navigation bars,
+     * action bars, input methods and more. New inset categories may be added in the future.
+     * The method returns the insets provided minus any that were applied by this view or its
+     * children.</p>
+     *
+     * <p>Clients wishing to provide custom behavior should override the
+     * {@link #onApplyWindowInsets(WindowInsets)} method or alternatively provide a
+     * {@link OnApplyWindowInsetsListener} via the
+     * {@link #setOnApplyWindowInsetsListener(View.OnApplyWindowInsetsListener) setOnApplyWindowInsetsListener}
+     * method.</p>
+     *
+     * <p>This method replaces the older {@link #fitSystemWindows(Rect) fitSystemWindows} method.
+     * </p>
+     *
+     * @param insets Insets to apply
+     * @return The provided insets minus the insets that were consumed
+     */
+    public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
+        try {
+            mPrivateFlags3 |= PFLAG3_APPLYING_INSETS;
+            if (mListenerInfo != null && mListenerInfo.mOnApplyWindowInsetsListener != null) {
+                return mListenerInfo.mOnApplyWindowInsetsListener.onApplyWindowInsets(this, insets);
+            } else {
+                return onApplyWindowInsets(insets);
+            }
+        } finally {
+            mPrivateFlags3 &= ~PFLAG3_APPLYING_INSETS;
+        }
+    }
+
+    /**
+     * @hide Compute the insets that should be consumed by this view and the ones
+     * that should propagate to those under it.
+     */
+    protected boolean computeFitSystemWindows(Rect inoutInsets, Rect outLocalInsets) {
+        if ((mViewFlags & OPTIONAL_FITS_SYSTEM_WINDOWS) == 0
+                || mAttachInfo == null
+                || ((mAttachInfo.mSystemUiVisibility & SYSTEM_UI_LAYOUT_FLAGS) == 0
+                        && !mAttachInfo.mOverscanRequested)) {
+            outLocalInsets.set(inoutInsets);
+            inoutInsets.set(0, 0, 0, 0);
+            return true;
+        } else {
+            // The application wants to take care of fitting system window for
+            // the content...  however we still need to take care of any overscan here.
+            final Rect overscan = mAttachInfo.mOverscanInsets;
+            outLocalInsets.set(overscan);
+            inoutInsets.left -= overscan.left;
+            inoutInsets.top -= overscan.top;
+            inoutInsets.right -= overscan.right;
+            inoutInsets.bottom -= overscan.bottom;
+            return false;
+        }
+    }
+
+    /**
+     * Compute insets that should be consumed by this view and the ones that should propagate
+     * to those under it.
+     *
+     * @param in Insets currently being processed by this View, likely received as a parameter
+     *           to {@link #onApplyWindowInsets(WindowInsets)}.
+     * @param outLocalInsets A Rect that will receive the insets that should be consumed
+     *                       by this view
+     * @return Insets that should be passed along to views under this one
+     */
+    public WindowInsets computeSystemWindowInsets(WindowInsets in, Rect outLocalInsets) {
+        if ((mViewFlags & OPTIONAL_FITS_SYSTEM_WINDOWS) == 0
+                || mAttachInfo == null
+                || (mAttachInfo.mSystemUiVisibility & SYSTEM_UI_LAYOUT_FLAGS) == 0) {
+            outLocalInsets.set(in.getSystemWindowInsets());
+            return in.consumeSystemWindowInsets();
+        } else {
+            outLocalInsets.set(0, 0, 0, 0);
+            return in;
+        }
     }
 
     /**
@@ -5448,18 +6619,19 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Check for state of {@link #setFitsSystemWindows(boolean). If this method
-     * returns true, the default implementation of {@link #fitSystemWindows(Rect)}
+     * Check for state of {@link #setFitsSystemWindows(boolean)}. If this method
+     * returns {@code true}, the default implementation of {@link #fitSystemWindows(Rect)}
      * will be executed.
      *
-     * @return Returns true if the default implementation of
+     * @return {@code true} if the default implementation of
      * {@link #fitSystemWindows(Rect)} will be executed.
      *
      * @attr ref android.R.styleable#View_fitsSystemWindows
-     * @see #setFitsSystemWindows()
+     * @see #setFitsSystemWindows(boolean)
      * @see #fitSystemWindows(Rect)
      * @see #setSystemUiVisibility(int)
      */
+    @ViewDebug.ExportedProperty
     public boolean getFitsSystemWindows() {
         return (mViewFlags & FITS_SYSTEM_WINDOWS) == FITS_SYSTEM_WINDOWS;
     }
@@ -5471,11 +6643,19 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * Ask that a new dispatch of {@link #fitSystemWindows(Rect)} be performed.
+     * @deprecated Use {@link #requestApplyInsets()} for newer platform versions.
      */
     public void requestFitSystemWindows() {
         if (mParent != null) {
             mParent.requestFitSystemWindows();
         }
+    }
+
+    /**
+     * Ask that a new dispatch of {@link #onApplyWindowInsets(WindowInsets)} be performed.
+     */
+    public void requestApplyInsets() {
+        requestFitSystemWindows();
     }
 
     /**
@@ -5497,6 +6677,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         @ViewDebug.IntToString(from = INVISIBLE, to = "INVISIBLE"),
         @ViewDebug.IntToString(from = GONE,      to = "GONE")
     })
+    @Visibility
     public int getVisibility() {
         return mViewFlags & VISIBILITY_MASK;
     }
@@ -5508,7 +6689,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_visibility
      */
     @RemotableViewMethod
-    public void setVisibility(int visibility) {
+    public void setVisibility(@Visibility int visibility) {
         setFlags(visibility, VISIBILITY_MASK);
         if (mBackground != null) mBackground.setVisible(visibility == VISIBLE, false);
     }
@@ -5545,6 +6726,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         // Invalidate too, since the default behavior for views is to be
         // be drawn at 50% alpha rather than to change the drawable.
         invalidate(true);
+
+        if (!enabled) {
+            cancelPendingInputEvents();
+        }
     }
 
     /**
@@ -5654,6 +6839,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *   {@link #LAYOUT_DIRECTION_LOCALE}.
      *
      * @attr ref android.R.styleable#View_layoutDirection
+     *
      * @hide
      */
     @ViewDebug.ExportedProperty(category = "layout", mapping = {
@@ -5662,32 +6848,41 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         @ViewDebug.IntToString(from = LAYOUT_DIRECTION_INHERIT, to = "INHERIT"),
         @ViewDebug.IntToString(from = LAYOUT_DIRECTION_LOCALE,  to = "LOCALE")
     })
-    public int getLayoutDirection() {
-        return (mPrivateFlags2 & LAYOUT_DIRECTION_MASK) >> LAYOUT_DIRECTION_MASK_SHIFT;
+    @LayoutDir
+    public int getRawLayoutDirection() {
+        return (mPrivateFlags2 & PFLAG2_LAYOUT_DIRECTION_MASK) >> PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT;
     }
 
     /**
      * Set the layout direction for this view. This will propagate a reset of layout direction
      * resolution to the view's children and resolve layout direction for this view.
      *
-     * @param layoutDirection One of {@link #LAYOUT_DIRECTION_LTR},
-     *   {@link #LAYOUT_DIRECTION_RTL},
-     *   {@link #LAYOUT_DIRECTION_INHERIT} or
-     *   {@link #LAYOUT_DIRECTION_LOCALE}.
+     * @param layoutDirection the layout direction to set. Should be one of:
+     *
+     * {@link #LAYOUT_DIRECTION_LTR},
+     * {@link #LAYOUT_DIRECTION_RTL},
+     * {@link #LAYOUT_DIRECTION_INHERIT},
+     * {@link #LAYOUT_DIRECTION_LOCALE}.
+     *
+     * Resolution will be done if the value is set to LAYOUT_DIRECTION_INHERIT. The resolution
+     * proceeds up the parent chain of the view to get the value. If there is no parent, then it
+     * will return the default {@link #LAYOUT_DIRECTION_LTR}.
      *
      * @attr ref android.R.styleable#View_layoutDirection
-     * @hide
      */
     @RemotableViewMethod
-    public void setLayoutDirection(int layoutDirection) {
-        if (getLayoutDirection() != layoutDirection) {
+    public void setLayoutDirection(@LayoutDir int layoutDirection) {
+        if (getRawLayoutDirection() != layoutDirection) {
             // Reset the current layout direction and the resolved one
-            mPrivateFlags2 &= ~LAYOUT_DIRECTION_MASK;
-            resetResolvedLayoutDirection();
-            // Set the new layout direction (filtered) and ask for a layout pass
+            mPrivateFlags2 &= ~PFLAG2_LAYOUT_DIRECTION_MASK;
+            resetRtlProperties();
+            // Set the new layout direction (filtered)
             mPrivateFlags2 |=
-                    ((layoutDirection << LAYOUT_DIRECTION_MASK_SHIFT) & LAYOUT_DIRECTION_MASK);
+                    ((layoutDirection << PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT) & PFLAG2_LAYOUT_DIRECTION_MASK);
+            // We need to resolve all RTL properties as they all depend on layout direction
+            resolveRtlPropertiesIfNeeded();
             requestLayout();
+            invalidate(true);
         }
     }
 
@@ -5696,19 +6891,25 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @return {@link #LAYOUT_DIRECTION_RTL} if the layout direction is RTL or returns
      * {@link #LAYOUT_DIRECTION_LTR} if the layout direction is not RTL.
-     * @hide
+     *
+     * For compatibility, this will return {@link #LAYOUT_DIRECTION_LTR} if API version
+     * is lower than {@link android.os.Build.VERSION_CODES#JELLY_BEAN_MR1}.
+     *
+     * @attr ref android.R.styleable#View_layoutDirection
      */
     @ViewDebug.ExportedProperty(category = "layout", mapping = {
         @ViewDebug.IntToString(from = LAYOUT_DIRECTION_LTR, to = "RESOLVED_DIRECTION_LTR"),
         @ViewDebug.IntToString(from = LAYOUT_DIRECTION_RTL, to = "RESOLVED_DIRECTION_RTL")
     })
-    public int getResolvedLayoutDirection() {
-        // The layout diretion will be resolved only if needed
-        if ((mPrivateFlags2 & LAYOUT_DIRECTION_RESOLVED) != LAYOUT_DIRECTION_RESOLVED) {
-            resolveLayoutDirection();
+    @ResolvedLayoutDir
+    public int getLayoutDirection() {
+        final int targetSdkVersion = getContext().getApplicationInfo().targetSdkVersion;
+        if (targetSdkVersion < JELLY_BEAN_MR1) {
+            mPrivateFlags2 |= PFLAG2_LAYOUT_DIRECTION_RESOLVED;
+            return LAYOUT_DIRECTION_RESOLVED_DEFAULT;
         }
-        return ((mPrivateFlags2 & LAYOUT_DIRECTION_RESOLVED_RTL) == LAYOUT_DIRECTION_RESOLVED_RTL) ?
-                LAYOUT_DIRECTION_RTL : LAYOUT_DIRECTION_LTR;
+        return ((mPrivateFlags2 & PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL) ==
+                PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL) ? LAYOUT_DIRECTION_RTL : LAYOUT_DIRECTION_LTR;
     }
 
     /**
@@ -5716,11 +6917,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * layout attribute and/or the inherited value from the parent
      *
      * @return true if the layout is right-to-left.
+     *
      * @hide
      */
     @ViewDebug.ExportedProperty(category = "layout")
     public boolean isLayoutRtl() {
-        return (getResolvedLayoutDirection() == LAYOUT_DIRECTION_RTL);
+        return (getLayoutDirection() == LAYOUT_DIRECTION_RTL);
     }
 
     /**
@@ -5737,7 +6939,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "layout")
     public boolean hasTransientState() {
-        return (mPrivateFlags2 & HAS_TRANSIENT_STATE) == HAS_TRANSIENT_STATE;
+        return (mPrivateFlags2 & PFLAG2_HAS_TRANSIENT_STATE) == PFLAG2_HAS_TRANSIENT_STATE;
     }
 
     /**
@@ -5760,12 +6962,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             mTransientStateCount = 0;
             Log.e(VIEW_LOG_TAG, "hasTransientState decremented below 0: " +
                     "unmatched pair of setHasTransientState calls");
-        }
-        if ((hasTransientState && mTransientStateCount == 1) ||
+        } else if ((hasTransientState && mTransientStateCount == 1) ||
                 (!hasTransientState && mTransientStateCount == 0)) {
             // update flag if we've just incremented up from 0 or decremented down to 0
-            mPrivateFlags2 = (mPrivateFlags2 & ~HAS_TRANSIENT_STATE) |
-                    (hasTransientState ? HAS_TRANSIENT_STATE : 0);
+            mPrivateFlags2 = (mPrivateFlags2 & ~PFLAG2_HAS_TRANSIENT_STATE) |
+                    (hasTransientState ? PFLAG2_HAS_TRANSIENT_STATE : 0);
             if (mParent != null) {
                 try {
                     mParent.childHasTransientStateChanged(this, hasTransientState);
@@ -5775,6 +6976,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
             }
         }
+    }
+
+    /**
+     * Returns true if this view is currently attached to a window.
+     */
+    public boolean isAttachedToWindow() {
+        return mAttachInfo != null;
+    }
+
+    /**
+     * Returns true if this view has been through at least one layout since it
+     * was last attached to or detached from a window.
+     */
+    public boolean isLaidOut() {
+        return (mPrivateFlags3 & PFLAG3_IS_LAID_OUT) == PFLAG3_IS_LAID_OUT;
     }
 
     /**
@@ -5879,6 +7095,24 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Sets the pressed state for this view and provides a touch coordinate for
+     * animation hinting.
+     *
+     * @param pressed Pass true to set the View's internal state to "pressed",
+     *            or false to reverts the View's internal state from a
+     *            previously set "pressed" state.
+     * @param x The x coordinate of the touch that caused the press
+     * @param y The y coordinate of the touch that caused the press
+     */
+    private void setPressed(boolean pressed, float x, float y) {
+        if (pressed) {
+            drawableHotspotChanged(x, y);
+        }
+
+        setPressed(pressed);
+    }
+
+    /**
      * Sets the pressed state for this view.
      *
      * @see #isClickable()
@@ -5888,12 +7122,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *        the View's internal state from a previously set "pressed" state.
      */
     public void setPressed(boolean pressed) {
-        final boolean needsRefresh = pressed != ((mPrivateFlags & PRESSED) == PRESSED);
+        final boolean needsRefresh = pressed != ((mPrivateFlags & PFLAG_PRESSED) == PFLAG_PRESSED);
 
         if (pressed) {
-            mPrivateFlags |= PRESSED;
+            mPrivateFlags |= PFLAG_PRESSED;
         } else {
-            mPrivateFlags &= ~PRESSED;
+            mPrivateFlags &= ~PFLAG_PRESSED;
         }
 
         if (needsRefresh) {
@@ -5923,8 +7157,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @return true if the view is currently pressed, false otherwise
      */
+    @ViewDebug.ExportedProperty
     public boolean isPressed() {
-        return (mPrivateFlags & PRESSED) == PRESSED;
+        return (mPrivateFlags & PFLAG_PRESSED) == PFLAG_PRESSED;
     }
 
     /**
@@ -5986,7 +7221,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_filterTouchesWhenObscured
      */
     public void setFilterTouchesWhenObscured(boolean enabled) {
-        setFlags(enabled ? 0 : FILTER_TOUCHES_WHEN_OBSCURED,
+        setFlags(enabled ? FILTER_TOUCHES_WHEN_OBSCURED : 0,
                 FILTER_TOUCHES_WHEN_OBSCURED);
     }
 
@@ -6055,7 +7290,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return The nearest focusable in the specified direction, or null if none
      *         can be found.
      */
-    public View focusSearch(int direction) {
+    public View focusSearch(@FocusRealDirection int direction) {
         if (mParent != null) {
             return mParent.focusSearch(this, direction);
         } else {
@@ -6074,7 +7309,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *        FOCUS_DOWN, FOCUS_LEFT, and FOCUS_RIGHT.
      * @return True if the this view consumed this unhandled move.
      */
-    public boolean dispatchUnhandledMove(View focused, int direction) {
+    public boolean dispatchUnhandledMove(View focused, @FocusRealDirection int direction) {
         return false;
     }
 
@@ -6086,7 +7321,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * or FOCUS_BACKWARD.
      * @return The user specified next view, or null if there is none.
      */
-    View findUserSetNextFocus(View root, int direction) {
+    View findUserSetNextFocus(View root, @FocusDirection int direction) {
         switch (direction) {
             case FOCUS_LEFT:
                 if (mNextFocusLeftId == View.NO_ID) return null;
@@ -6117,17 +7352,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         return null;
     }
 
-    private View findViewInsideOutShouldExist(View root, final int childViewId) {
-        View result = root.findViewByPredicateInsideOut(this, new Predicate<View>() {
-            @Override
-            public boolean apply(View t) {
-                return t.mID == childViewId;
-            }
-        });
-
+    private View findViewInsideOutShouldExist(View root, int id) {
+        if (mMatchIdPredicate == null) {
+            mMatchIdPredicate = new MatchIdPredicate();
+        }
+        mMatchIdPredicate.mId = id;
+        View result = root.findViewByPredicateInsideOut(this, mMatchIdPredicate);
         if (result == null) {
-            Log.w(VIEW_LOG_TAG, "couldn't find next focus view specified "
-                    + "by user for id " + childViewId);
+            Log.w(VIEW_LOG_TAG, "couldn't find view with id " + id);
         }
         return result;
     }
@@ -6139,7 +7371,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param direction The direction of the focus
      * @return A list of focusable views
      */
-    public ArrayList<View> getFocusables(int direction) {
+    public ArrayList<View> getFocusables(@FocusDirection int direction) {
         ArrayList<View> result = new ArrayList<View>(24);
         addFocusables(result, direction);
         return result;
@@ -6153,7 +7385,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param views Focusable views found so far
      * @param direction The direction of the focus
      */
-    public void addFocusables(ArrayList<View> views, int direction) {
+    public void addFocusables(ArrayList<View> views, @FocusDirection int direction) {
         addFocusables(views, direction, FOCUSABLES_TOUCH_MODE);
     }
 
@@ -6173,15 +7405,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #FOCUSABLES_ALL
      * @see #FOCUSABLES_TOUCH_MODE
      */
-    public void addFocusables(ArrayList<View> views, int direction, int focusableMode) {
+    public void addFocusables(ArrayList<View> views, @FocusDirection int direction,
+            @FocusableMode int focusableMode) {
         if (views == null) {
             return;
-        }
-        if ((focusableMode & FOCUSABLES_ACCESSIBILITY) == FOCUSABLES_ACCESSIBILITY) {
-            if (isAccessibilityFocusable()) {
-                views.add(this);
-                return;
-            }
         }
         if (!isFocusable()) {
             return;
@@ -6208,7 +7435,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #FIND_VIEWS_WITH_CONTENT_DESCRIPTION
      * @see #setContentDescription(CharSequence)
      */
-    public void findViewsWithText(ArrayList<View> outViews, CharSequence searched, int flags) {
+    public void findViewsWithText(ArrayList<View> outViews, CharSequence searched,
+            @FindViewFlags int flags) {
         if (getAccessibilityNodeProvider() != null) {
             if ((flags & FIND_VIEWS_WITH_ACCESSIBILITY_NODE_PROVIDERS) != 0) {
                 outViews.add(this);
@@ -6256,8 +7484,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @return True if this View is accessibility focused.
      */
-    boolean isAccessibilityFocused() {
-        return (mPrivateFlags2 & ACCESSIBILITY_FOCUSED) != 0;
+    public boolean isAccessibilityFocused() {
+        return (mPrivateFlags2 & PFLAG2_ACCESSIBILITY_FOCUSED) != 0;
     }
 
     /**
@@ -6282,15 +7510,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if ((mViewFlags & VISIBILITY_MASK) != VISIBLE) {
             return false;
         }
-        if ((mPrivateFlags2 & ACCESSIBILITY_FOCUSED) == 0) {
-            mPrivateFlags2 |= ACCESSIBILITY_FOCUSED;
+        if ((mPrivateFlags2 & PFLAG2_ACCESSIBILITY_FOCUSED) == 0) {
+            mPrivateFlags2 |= PFLAG2_ACCESSIBILITY_FOCUSED;
             ViewRootImpl viewRootImpl = getViewRootImpl();
             if (viewRootImpl != null) {
                 viewRootImpl.setAccessibilityFocus(this, null);
             }
             invalidate();
             sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
-            notifyAccessibilityStateChanged();
             return true;
         }
         return false;
@@ -6305,12 +7532,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     public void clearAccessibilityFocus() {
-        if ((mPrivateFlags2 & ACCESSIBILITY_FOCUSED) != 0) {
-            mPrivateFlags2 &= ~ACCESSIBILITY_FOCUSED;
-            invalidate();
-            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
-            notifyAccessibilityStateChanged();
-        }
+        clearAccessibilityFocusNoCallbacks();
         // Clear the global reference of accessibility focus if this
         // view or any of its descendants had accessibility focus.
         ViewRootImpl viewRootImpl = getViewRootImpl();
@@ -6347,29 +7569,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
     }
 
-    private void requestAccessibilityFocusFromHover() {
-        if (includeForAccessibility() && isActionableForAccessibility()) {
-            requestAccessibilityFocus();
-        } else {
-            if (mParent != null) {
-                View nextFocus = mParent.findViewToTakeAccessibilityFocusFromHover(this, this);
-                if (nextFocus != null) {
-                    nextFocus.requestAccessibilityFocus();
-                }
-            }
-        }
-    }
-
-    private boolean canTakeAccessibilityFocusFromHover() {
-        if (includeForAccessibility() && isActionableForAccessibility()) {
-            return true;
-        }
-        if (mParent != null) {
-            return (mParent.findViewToTakeAccessibilityFocusFromHover(this, this) == this);
-        }
-        return false;
-    }
-
     /**
      * Clears accessibility focus without calling any callback methods
      * normally invoked in {@link #clearAccessibilityFocus()}. This method
@@ -6377,9 +7576,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * another view.
      */
     void clearAccessibilityFocusNoCallbacks() {
-        if ((mPrivateFlags2 & ACCESSIBILITY_FOCUSED) != 0) {
-            mPrivateFlags2 &= ~ACCESSIBILITY_FOCUSED;
+        if ((mPrivateFlags2 & PFLAG2_ACCESSIBILITY_FOCUSED) != 0) {
+            mPrivateFlags2 &= ~PFLAG2_ACCESSIBILITY_FOCUSED;
             invalidate();
+            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
         }
     }
 
@@ -6504,10 +7704,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return Whether any ancestor of this view blocks descendant focus.
      */
     private boolean hasAncestorThatBlocksDescendantFocus() {
+        final boolean focusableInTouchMode = isFocusableInTouchMode();
         ViewParent ancestor = mParent;
         while (ancestor instanceof ViewGroup) {
             final ViewGroup vgAncestor = (ViewGroup) ancestor;
-            if (vgAncestor.getDescendantFocusability() == ViewGroup.FOCUS_BLOCK_DESCENDANTS) {
+            if (vgAncestor.getDescendantFocusability() == ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                    || (!focusableInTouchMode && vgAncestor.shouldBlockFocusForTouchscreen())) {
                 return true;
             } else {
                 ancestor = vgAncestor.getParent();
@@ -6527,16 +7729,71 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @see #IMPORTANT_FOR_ACCESSIBILITY_YES
      * @see #IMPORTANT_FOR_ACCESSIBILITY_NO
+     * @see #IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
      * @see #IMPORTANT_FOR_ACCESSIBILITY_AUTO
      */
     @ViewDebug.ExportedProperty(category = "accessibility", mapping = {
             @ViewDebug.IntToString(from = IMPORTANT_FOR_ACCESSIBILITY_AUTO, to = "auto"),
             @ViewDebug.IntToString(from = IMPORTANT_FOR_ACCESSIBILITY_YES, to = "yes"),
-            @ViewDebug.IntToString(from = IMPORTANT_FOR_ACCESSIBILITY_NO, to = "no")
+            @ViewDebug.IntToString(from = IMPORTANT_FOR_ACCESSIBILITY_NO, to = "no"),
+            @ViewDebug.IntToString(from = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
+                    to = "noHideDescendants")
         })
     public int getImportantForAccessibility() {
-        return (mPrivateFlags2 & IMPORTANT_FOR_ACCESSIBILITY_MASK)
-                >> IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+        return (mPrivateFlags2 & PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK)
+                >> PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+    }
+
+    /**
+     * Sets the live region mode for this view. This indicates to accessibility
+     * services whether they should automatically notify the user about changes
+     * to the view's content description or text, or to the content descriptions
+     * or text of the view's children (where applicable).
+     * <p>
+     * For example, in a login screen with a TextView that displays an "incorrect
+     * password" notification, that view should be marked as a live region with
+     * mode {@link #ACCESSIBILITY_LIVE_REGION_POLITE}.
+     * <p>
+     * To disable change notifications for this view, use
+     * {@link #ACCESSIBILITY_LIVE_REGION_NONE}. This is the default live region
+     * mode for most views.
+     * <p>
+     * To indicate that the user should be notified of changes, use
+     * {@link #ACCESSIBILITY_LIVE_REGION_POLITE}.
+     * <p>
+     * If the view's changes should interrupt ongoing speech and notify the user
+     * immediately, use {@link #ACCESSIBILITY_LIVE_REGION_ASSERTIVE}.
+     *
+     * @param mode The live region mode for this view, one of:
+     *        <ul>
+     *        <li>{@link #ACCESSIBILITY_LIVE_REGION_NONE}
+     *        <li>{@link #ACCESSIBILITY_LIVE_REGION_POLITE}
+     *        <li>{@link #ACCESSIBILITY_LIVE_REGION_ASSERTIVE}
+     *        </ul>
+     * @attr ref android.R.styleable#View_accessibilityLiveRegion
+     */
+    public void setAccessibilityLiveRegion(int mode) {
+        if (mode != getAccessibilityLiveRegion()) {
+            mPrivateFlags2 &= ~PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK;
+            mPrivateFlags2 |= (mode << PFLAG2_ACCESSIBILITY_LIVE_REGION_SHIFT)
+                    & PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK;
+            notifyViewAccessibilityStateChangedIfNeeded(
+                    AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+        }
+    }
+
+    /**
+     * Gets the live region mode for this View.
+     *
+     * @return The live region mode for the view.
+     *
+     * @attr ref android.R.styleable#View_accessibilityLiveRegion
+     *
+     * @see #setAccessibilityLiveRegion(int)
+     */
+    public int getAccessibilityLiveRegion() {
+        return (mPrivateFlags2 & PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK)
+                >> PFLAG2_ACCESSIBILITY_LIVE_REGION_SHIFT;
     }
 
     /**
@@ -6550,105 +7807,85 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @see #IMPORTANT_FOR_ACCESSIBILITY_YES
      * @see #IMPORTANT_FOR_ACCESSIBILITY_NO
+     * @see #IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
      * @see #IMPORTANT_FOR_ACCESSIBILITY_AUTO
      */
     public void setImportantForAccessibility(int mode) {
-        if (mode != getImportantForAccessibility()) {
-            mPrivateFlags2 &= ~IMPORTANT_FOR_ACCESSIBILITY_MASK;
-            mPrivateFlags2 |= (mode << IMPORTANT_FOR_ACCESSIBILITY_SHIFT)
-                    & IMPORTANT_FOR_ACCESSIBILITY_MASK;
-            notifyAccessibilityStateChanged();
+        final int oldMode = getImportantForAccessibility();
+        if (mode != oldMode) {
+            // If we're moving between AUTO and another state, we might not need
+            // to send a subtree changed notification. We'll store the computed
+            // importance, since we'll need to check it later to make sure.
+            final boolean maySkipNotify = oldMode == IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                    || mode == IMPORTANT_FOR_ACCESSIBILITY_AUTO;
+            final boolean oldIncludeForAccessibility = maySkipNotify && includeForAccessibility();
+            mPrivateFlags2 &= ~PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK;
+            mPrivateFlags2 |= (mode << PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT)
+                    & PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK;
+            if (!maySkipNotify || oldIncludeForAccessibility != includeForAccessibility()) {
+                notifySubtreeAccessibilityStateChangedIfNeeded();
+            } else {
+                notifyViewAccessibilityStateChangedIfNeeded(
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+            }
         }
     }
 
     /**
-     * Gets whether this view should be exposed for accessibility.
+     * Computes whether this view should be exposed for accessibility. In
+     * general, views that are interactive or provide information are exposed
+     * while views that serve only as containers are hidden.
+     * <p>
+     * If an ancestor of this view has importance
+     * {@link #IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS}, this method
+     * returns <code>false</code>.
+     * <p>
+     * Otherwise, the value is computed according to the view's
+     * {@link #getImportantForAccessibility()} value:
+     * <ol>
+     * <li>{@link #IMPORTANT_FOR_ACCESSIBILITY_NO} or
+     * {@link #IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS}, return <code>false
+     * </code>
+     * <li>{@link #IMPORTANT_FOR_ACCESSIBILITY_YES}, return <code>true</code>
+     * <li>{@link #IMPORTANT_FOR_ACCESSIBILITY_AUTO}, return <code>true</code> if
+     * view satisfies any of the following:
+     * <ul>
+     * <li>Is actionable, e.g. {@link #isClickable()},
+     * {@link #isLongClickable()}, or {@link #isFocusable()}
+     * <li>Has an {@link AccessibilityDelegate}
+     * <li>Has an interaction listener, e.g. {@link OnTouchListener},
+     * {@link OnKeyListener}, etc.
+     * <li>Is an accessibility live region, e.g.
+     * {@link #getAccessibilityLiveRegion()} is not
+     * {@link #ACCESSIBILITY_LIVE_REGION_NONE}.
+     * </ul>
+     * </ol>
      *
      * @return Whether the view is exposed for accessibility.
-     *
-     * @hide
+     * @see #setImportantForAccessibility(int)
+     * @see #getImportantForAccessibility()
      */
     public boolean isImportantForAccessibility() {
-        final int mode = (mPrivateFlags2 & IMPORTANT_FOR_ACCESSIBILITY_MASK)
-                >> IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
-        switch (mode) {
-            case IMPORTANT_FOR_ACCESSIBILITY_YES:
-                return true;
-            case IMPORTANT_FOR_ACCESSIBILITY_NO:
+        final int mode = (mPrivateFlags2 & PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK)
+                >> PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT;
+        if (mode == IMPORTANT_FOR_ACCESSIBILITY_NO
+                || mode == IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS) {
+            return false;
+        }
+
+        // Check parent mode to ensure we're not hidden.
+        ViewParent parent = mParent;
+        while (parent instanceof View) {
+            if (((View) parent).getImportantForAccessibility()
+                    == IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS) {
                 return false;
-            case IMPORTANT_FOR_ACCESSIBILITY_AUTO:
-                return isActionableForAccessibility() || hasListenersForAccessibility();
-            default:
-                throw new IllegalArgumentException("Unknow important for accessibility mode: "
-                        + mode);
+            }
+            parent = parent.getParent();
         }
-    }
 
-    /**
-     * Gets the mode for determining whether this View can take accessibility focus.
-     *
-     * @return The mode for determining whether a View can take accessibility focus.
-     *
-     * @attr ref android.R.styleable#View_accessibilityFocusable
-     *
-     * @see #ACCESSIBILITY_FOCUSABLE_YES
-     * @see #ACCESSIBILITY_FOCUSABLE_NO
-     * @see #ACCESSIBILITY_FOCUSABLE_AUTO
-     *
-     * @hide
-     */
-    @ViewDebug.ExportedProperty(category = "accessibility", mapping = {
-            @ViewDebug.IntToString(from = ACCESSIBILITY_FOCUSABLE_AUTO, to = "auto"),
-            @ViewDebug.IntToString(from = ACCESSIBILITY_FOCUSABLE_YES, to = "yes"),
-            @ViewDebug.IntToString(from = ACCESSIBILITY_FOCUSABLE_NO, to = "no")
-        })
-    public int getAccessibilityFocusable() {
-        return (mPrivateFlags2 & ACCESSIBILITY_FOCUSABLE_MASK) >>> ACCESSIBILITY_FOCUSABLE_SHIFT;
-    }
-
-    /**
-     * Sets how to determine whether this view can take accessibility focus.
-     *
-     * @param mode How to determine whether this view can take accessibility focus.
-     *
-     * @attr ref android.R.styleable#View_accessibilityFocusable
-     *
-     * @see #ACCESSIBILITY_FOCUSABLE_YES
-     * @see #ACCESSIBILITY_FOCUSABLE_NO
-     * @see #ACCESSIBILITY_FOCUSABLE_AUTO
-     *
-     * @hide
-     */
-    public void setAccessibilityFocusable(int mode) {
-        if (mode != getAccessibilityFocusable()) {
-            mPrivateFlags2 &= ~ACCESSIBILITY_FOCUSABLE_MASK;
-            mPrivateFlags2 |= (mode << ACCESSIBILITY_FOCUSABLE_SHIFT)
-                    & ACCESSIBILITY_FOCUSABLE_MASK;
-            notifyAccessibilityStateChanged();
-        }
-    }
-
-    /**
-     * Gets whether this view can take accessibility focus.
-     *
-     * @return Whether the view can take accessibility focus.
-     *
-     * @hide
-     */
-    public boolean isAccessibilityFocusable() {
-        final int mode = (mPrivateFlags2 & ACCESSIBILITY_FOCUSABLE_MASK)
-                >>> ACCESSIBILITY_FOCUSABLE_SHIFT;
-        switch (mode) {
-            case ACCESSIBILITY_FOCUSABLE_YES:
-                return true;
-            case ACCESSIBILITY_FOCUSABLE_NO:
-                return false;
-            case ACCESSIBILITY_FOCUSABLE_AUTO:
-                return canTakeAccessibilityFocusFromHover()
-                        || getAccessibilityNodeProvider() != null;
-            default:
-                throw new IllegalArgumentException("Unknow accessibility focusable mode: " + mode);
-        }
+        return mode == IMPORTANT_FOR_ACCESSIBILITY_YES || isActionableForAccessibility()
+                || hasListenersForAccessibility() || getAccessibilityNodeProvider() != null
+                || getAccessibilityLiveRegion() != ACCESSIBILITY_LIVE_REGION_NONE;
     }
 
     /**
@@ -6673,15 +7910,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Adds the children of a given View for accessibility. Since some Views are
      * not important for accessibility the children for accessibility are not
-     * necessarily direct children of the riew, rather they are the first level of
+     * necessarily direct children of the view, rather they are the first level of
      * descendants important for accessibility.
      *
      * @param children The list of children for accessibility.
      */
     public void addChildrenForAccessibility(ArrayList<View> children) {
-        if (includeForAccessibility()) {
-            children.add(this);
-        }
+
     }
 
     /**
@@ -6696,10 +7931,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public boolean includeForAccessibility() {
         if (mAttachInfo != null) {
-            if (!mAttachInfo.mIncludeNotImportantViews) {
-                return isImportantForAccessibility();
-            }
-            return true;
+            return (mAttachInfo.mAccessibilityFetchFlags
+                    & AccessibilityNodeInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS) != 0
+                    || isImportantForAccessibility();
         }
         return false;
     }
@@ -6707,7 +7941,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Returns whether the View is considered actionable from
      * accessibility perspective. Such view are important for
-     * accessiiblity.
+     * accessibility.
      *
      * @return True if the view is actionable for accessibility.
      *
@@ -6718,8 +7952,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Returns whether the View has registered callbacks wich makes it
-     * important for accessiiblity.
+     * Returns whether the View has registered callbacks which makes it
+     * important for accessibility.
      *
      * @return True if the view is actionable for accessibility.
      */
@@ -6731,50 +7965,106 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Notifies accessibility services that some view's important for
-     * accessibility state has changed. Note that such notifications
-     * are made at most once every
+     * Notifies that the accessibility state of this view changed. The change
+     * is local to this view and does not represent structural changes such
+     * as children and parent. For example, the view became focusable. The
+     * notification is at at most once every
      * {@link ViewConfiguration#getSendRecurringAccessibilityEventsInterval()}
-     * to avoid unnecessary load to the system. Also once a view has
-     * made a notifucation this method is a NOP until the notification has
-     * been sent to clients.
+     * to avoid unnecessary load to the system. Also once a view has a pending
+     * notification this method is a NOP until the notification has been sent.
      *
      * @hide
-     *
-     * TODO: Makse sure this method is called for any view state change
-     *       that is interesting for accessilility purposes.
      */
-    public void notifyAccessibilityStateChanged() {
+    public void notifyViewAccessibilityStateChangedIfNeeded(int changeType) {
         if (!AccessibilityManager.getInstance(mContext).isEnabled()) {
             return;
         }
-        if ((mPrivateFlags2 & ACCESSIBILITY_STATE_CHANGED) == 0) {
-            mPrivateFlags2 |= ACCESSIBILITY_STATE_CHANGED;
+        if (mSendViewStateChangedAccessibilityEvent == null) {
+            mSendViewStateChangedAccessibilityEvent =
+                    new SendViewStateChangedAccessibilityEvent();
+        }
+        mSendViewStateChangedAccessibilityEvent.runOrPost(changeType);
+    }
+
+    /**
+     * Notifies that the accessibility state of this view changed. The change
+     * is *not* local to this view and does represent structural changes such
+     * as children and parent. For example, the view size changed. The
+     * notification is at at most once every
+     * {@link ViewConfiguration#getSendRecurringAccessibilityEventsInterval()}
+     * to avoid unnecessary load to the system. Also once a view has a pending
+     * notification this method is a NOP until the notification has been sent.
+     *
+     * @hide
+     */
+    public void notifySubtreeAccessibilityStateChangedIfNeeded() {
+        if (!AccessibilityManager.getInstance(mContext).isEnabled()) {
+            return;
+        }
+        if ((mPrivateFlags2 & PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED) == 0) {
+            mPrivateFlags2 |= PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED;
             if (mParent != null) {
-                mParent.childAccessibilityStateChanged(this);
+                try {
+                    mParent.notifySubtreeAccessibilityStateChanged(
+                            this, this, AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+                } catch (AbstractMethodError e) {
+                    Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                            " does not fully implement ViewParent", e);
+                }
             }
         }
     }
 
     /**
-     * Reset the state indicating the this view has requested clients
-     * interested in its accessiblity state to be notified.
-     *
-     * @hide
+     * Reset the flag indicating the accessibility state of the subtree rooted
+     * at this view changed.
      */
-    public void resetAccessibilityStateChanged() {
-        mPrivateFlags2 &= ~ACCESSIBILITY_STATE_CHANGED;
+    void resetSubtreeAccessibilityStateChanged() {
+        mPrivateFlags2 &= ~PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED;
+    }
+
+    /**
+     * Report an accessibility action to this view's parents for delegated processing.
+     *
+     * <p>Implementations of {@link #performAccessibilityAction(int, Bundle)} may internally
+     * call this method to delegate an accessibility action to a supporting parent. If the parent
+     * returns true from its
+     * {@link ViewParent#onNestedPrePerformAccessibilityAction(View, int, android.os.Bundle)}
+     * method this method will return true to signify that the action was consumed.</p>
+     *
+     * <p>This method is useful for implementing nested scrolling child views. If
+     * {@link #isNestedScrollingEnabled()} returns true and the action is a scrolling action
+     * a custom view implementation may invoke this method to allow a parent to consume the
+     * scroll first. If this method returns true the custom view should skip its own scrolling
+     * behavior.</p>
+     *
+     * @param action Accessibility action to delegate
+     * @param arguments Optional action arguments
+     * @return true if the action was consumed by a parent
+     */
+    public boolean dispatchNestedPrePerformAccessibilityAction(int action, Bundle arguments) {
+        for (ViewParent p = getParent(); p != null; p = p.getParent()) {
+            if (p.onNestedPrePerformAccessibilityAction(this, action, arguments)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * Performs the specified accessibility action on the view. For
      * possible accessibility actions look at {@link AccessibilityNodeInfo}.
-    * <p>
-    * If an {@link AccessibilityDelegate} has been specified via calling
-    * {@link #setAccessibilityDelegate(AccessibilityDelegate)} its
-    * {@link AccessibilityDelegate#performAccessibilityAction(View, int, Bundle)}
-    * is responsible for handling this call.
-    * </p>
+     * <p>
+     * If an {@link AccessibilityDelegate} has been specified via calling
+     * {@link #setAccessibilityDelegate(AccessibilityDelegate)} its
+     * {@link AccessibilityDelegate#performAccessibilityAction(View, int, Bundle)}
+     * is responsible for handling this call.
+     * </p>
+     *
+     * <p>The default implementation will delegate
+     * {@link AccessibilityNodeInfo#ACTION_SCROLL_BACKWARD} and
+     * {@link AccessibilityNodeInfo#ACTION_SCROLL_FORWARD} to nested scrolling parents if
+     * {@link #isNestedScrollingEnabled() nested scrolling is enabled} on this view.</p>
      *
      * @param action The action to perform.
      * @param arguments Optional action arguments.
@@ -6792,17 +8082,29 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     * @see #performAccessibilityAction(int, Bundle)
     *
     * Note: Called from the default {@link AccessibilityDelegate}.
+    *
+    * @hide Until we've refactored all accessibility delegation methods.
     */
-    boolean performAccessibilityActionInternal(int action, Bundle arguments) {
+    public boolean performAccessibilityActionInternal(int action, Bundle arguments) {
+        if (isNestedScrollingEnabled()
+                && (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                || action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+            if (dispatchNestedPrePerformAccessibilityAction(action, arguments)) {
+                return true;
+            }
+        }
+
         switch (action) {
             case AccessibilityNodeInfo.ACTION_CLICK: {
                 if (isClickable()) {
-                    return performClick();
+                    performClick();
+                    return true;
                 }
             } break;
             case AccessibilityNodeInfo.ACTION_LONG_CLICK: {
                 if (isLongClickable()) {
-                    return performLongClick();
+                    performLongClick();
+                    return true;
                 }
             } break;
             case AccessibilityNodeInfo.ACTION_FOCUS: {
@@ -6832,10 +8134,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
             } break;
             case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS: {
-                final int mode = getAccessibilityFocusable();
-                if (!isAccessibilityFocused()
-                        && (mode == ACCESSIBILITY_FOCUSABLE_YES
-                                || mode == ACCESSIBILITY_FOCUSABLE_AUTO)) {
+                if (!isAccessibilityFocused()) {
                     return requestAccessibilityFocus();
                 }
             } break;
@@ -6849,21 +8148,45 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 if (arguments != null) {
                     final int granularity = arguments.getInt(
                             AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT);
-                    return nextAtGranularity(granularity);
+                    final boolean extendSelection = arguments.getBoolean(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN);
+                    return traverseAtGranularity(granularity, true, extendSelection);
                 }
             } break;
             case AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY: {
                 if (arguments != null) {
                     final int granularity = arguments.getInt(
                             AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT);
-                    return previousAtGranularity(granularity);
+                    final boolean extendSelection = arguments.getBoolean(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN);
+                    return traverseAtGranularity(granularity, false, extendSelection);
+                }
+            } break;
+            case AccessibilityNodeInfo.ACTION_SET_SELECTION: {
+                CharSequence text = getIterableTextForAccessibility();
+                if (text == null) {
+                    return false;
+                }
+                final int start = (arguments != null) ? arguments.getInt(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, -1) : -1;
+                final int end = (arguments != null) ? arguments.getInt(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, -1) : -1;
+                // Only cursor position can be specified (selection length == 0)
+                if ((getAccessibilitySelectionStart() != start
+                        || getAccessibilitySelectionEnd() != end)
+                        && (start == end)) {
+                    setAccessibilitySelection(start, end);
+                    notifyViewAccessibilityStateChangedIfNeeded(
+                            AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                    return true;
                 }
             } break;
         }
         return false;
     }
 
-    private boolean nextAtGranularity(int granularity) {
+    private boolean traverseAtGranularity(int granularity, boolean forward,
+            boolean extendSelection) {
         CharSequence text = getIterableTextForAccessibility();
         if (text == null || text.length() == 0) {
             return false;
@@ -6872,52 +8195,31 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (iterator == null) {
             return false;
         }
-        final int current = getAccessibilityCursorPosition();
-        final int[] range = iterator.following(current);
-        if (range == null) {
-            return false;
-        }
-        final int start = range[0];
-        final int end = range[1];
-        setAccessibilityCursorPosition(end);
-        sendViewTextTraversedAtGranularityEvent(
-                AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY,
-                granularity, start, end);
-        return true;
-    }
-
-    private boolean previousAtGranularity(int granularity) {
-        CharSequence text = getIterableTextForAccessibility();
-        if (text == null || text.length() == 0) {
-            return false;
-        }
-        TextSegmentIterator iterator = getIteratorForGranularity(granularity);
-        if (iterator == null) {
-            return false;
-        }
-        int current = getAccessibilityCursorPosition();
+        int current = getAccessibilitySelectionEnd();
         if (current == ACCESSIBILITY_CURSOR_POSITION_UNDEFINED) {
-            current = text.length();
-        } else if (granularity == AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER) {
-            // When traversing by character we always put the cursor after the character
-            // to ease edit and have to compensate before asking the for previous segment.
-            current--;
+            current = forward ? 0 : text.length();
         }
-        final int[] range = iterator.preceding(current);
+        final int[] range = forward ? iterator.following(current) : iterator.preceding(current);
         if (range == null) {
             return false;
         }
-        final int start = range[0];
-        final int end = range[1];
-        // Always put the cursor after the character to ease edit.
-        if (granularity == AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER) {
-            setAccessibilityCursorPosition(end);
+        final int segmentStart = range[0];
+        final int segmentEnd = range[1];
+        int selectionStart;
+        int selectionEnd;
+        if (extendSelection && isAccessibilitySelectionExtendable()) {
+            selectionStart = getAccessibilitySelectionStart();
+            if (selectionStart == ACCESSIBILITY_CURSOR_POSITION_UNDEFINED) {
+                selectionStart = forward ? segmentStart : segmentEnd;
+            }
+            selectionEnd = forward ? segmentEnd : segmentStart;
         } else {
-            setAccessibilityCursorPosition(start);
+            selectionStart = selectionEnd= forward ? segmentEnd : segmentStart;
         }
-        sendViewTextTraversedAtGranularityEvent(
-                AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY,
-                granularity, start, end);
+        setAccessibilitySelection(selectionStart, selectionEnd);
+        final int action = forward ? AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
+                : AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY;
+        sendViewTextTraversedAtGranularityEvent(action, granularity, segmentStart, segmentEnd);
         return true;
     }
 
@@ -6929,21 +8231,47 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     public CharSequence getIterableTextForAccessibility() {
-        return mContentDescription;
+        return getContentDescription();
+    }
+
+    /**
+     * Gets whether accessibility selection can be extended.
+     *
+     * @return If selection is extensible.
+     *
+     * @hide
+     */
+    public boolean isAccessibilitySelectionExtendable() {
+        return false;
     }
 
     /**
      * @hide
      */
-    public int getAccessibilityCursorPosition() {
+    public int getAccessibilitySelectionStart() {
         return mAccessibilityCursorPosition;
     }
 
     /**
      * @hide
      */
-    public void setAccessibilityCursorPosition(int position) {
-        mAccessibilityCursorPosition = position;
+    public int getAccessibilitySelectionEnd() {
+        return getAccessibilitySelectionStart();
+    }
+
+    /**
+     * @hide
+     */
+    public void setAccessibilitySelection(int start, int end) {
+        if (start ==  end && end == mAccessibilityCursorPosition) {
+            return;
+        }
+        if (start >= 0 && start == end && end <= getIterableTextForAccessibility().length()) {
+            mAccessibilityCursorPosition = start;
+        } else {
+            mAccessibilityCursorPosition = ACCESSIBILITY_CURSOR_POSITION_UNDEFINED;
+        }
+        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED);
     }
 
     private void sendViewTextTraversedAtGranularityEvent(int action, int granularity,
@@ -7004,9 +8332,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     public void dispatchStartTemporaryDetach() {
-        clearAccessibilityFocus();
-        clearDisplayList();
-
         onStartTemporaryDetach();
     }
 
@@ -7018,7 +8343,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void onStartTemporaryDetach() {
         removeUnsetPressCallback();
-        mPrivateFlags |= CANCEL_NEXT_UP_EVENT;
+        mPrivateFlags |= PFLAG_CANCEL_NEXT_UP_EVENT;
     }
 
     /**
@@ -7112,27 +8437,61 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return True if the event was handled by the view, false otherwise.
      */
     public boolean dispatchTouchEvent(MotionEvent event) {
+        // If the event should be handled by accessibility focus first.
+        if (event.isTargetAccessibilityFocus()) {
+            // We don't have focus or no virtual descendant has it, do not handle the event.
+            if (!isAccessibilityFocusedViewOrHost()) {
+                return false;
+            }
+            // We have focus and got the event, then use normal event dispatch.
+            event.setTargetAccessibilityFocus(false);
+        }
+
+        boolean result = false;
+
         if (mInputEventConsistencyVerifier != null) {
             mInputEventConsistencyVerifier.onTouchEvent(event, 0);
+        }
+
+        final int actionMasked = event.getActionMasked();
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            // Defensive cleanup for new gesture
+            stopNestedScroll();
         }
 
         if (onFilterTouchEventForSecurity(event)) {
             //noinspection SimplifiableIfStatement
             ListenerInfo li = mListenerInfo;
-            if (li != null && li.mOnTouchListener != null && (mViewFlags & ENABLED_MASK) == ENABLED
+            if (li != null && li.mOnTouchListener != null
+                    && (mViewFlags & ENABLED_MASK) == ENABLED
                     && li.mOnTouchListener.onTouch(this, event)) {
-                return true;
+                result = true;
             }
 
-            if (onTouchEvent(event)) {
-                return true;
+            if (!result && onTouchEvent(event)) {
+                result = true;
             }
         }
 
-        if (mInputEventConsistencyVerifier != null) {
+        if (!result && mInputEventConsistencyVerifier != null) {
             mInputEventConsistencyVerifier.onUnhandledEvent(event, 0);
         }
-        return false;
+
+        // Clean up after nested scrolls if this is the end of a gesture;
+        // also cancel it if we tried an ACTION_DOWN but we didn't want the rest
+        // of the gesture.
+        if (actionMasked == MotionEvent.ACTION_UP ||
+                actionMasked == MotionEvent.ACTION_CANCEL ||
+                (actionMasked == MotionEvent.ACTION_DOWN && !result)) {
+            stopNestedScroll();
+        }
+
+        return result;
+    }
+
+    boolean isAccessibilityFocusedViewOrHost() {
+        return isAccessibilityFocused() || (getViewRootImpl() != null && getViewRootImpl()
+                .getAccessibilityFocusedHost() == this);
     }
 
     /**
@@ -7240,8 +8599,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return True if the event was handled by the view, false otherwise.
      */
     protected boolean dispatchHoverEvent(MotionEvent event) {
-        //noinspection SimplifiableIfStatement
         ListenerInfo li = mListenerInfo;
+        //noinspection SimplifiableIfStatement
         if (li != null && li.mOnHoverListener != null
                 && (mViewFlags & ENABLED_MASK) == ENABLED
                 && li.mOnHoverListener.onHover(this, event)) {
@@ -7337,13 +8696,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             if (isPressed()) {
                 setPressed(false);
             }
-            if (imm != null && (mPrivateFlags & FOCUSED) != 0) {
+            if (imm != null && (mPrivateFlags & PFLAG_FOCUSED) != 0) {
                 imm.focusOut(this);
             }
             removeLongPressCallback();
             removeTapCallback();
             onFocusLost();
-        } else if (imm != null && (mPrivateFlags & FOCUSED) != 0) {
+        } else if (imm != null && (mPrivateFlags & PFLAG_FOCUSED) != 0) {
             imm.focusIn(this);
         }
         refreshDrawableState();
@@ -7367,7 +8726,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param visibility The new visibility of changedView: {@link #VISIBLE},
      * {@link #INVISIBLE} or {@link #GONE}.
      */
-    protected void dispatchVisibilityChanged(View changedView, int visibility) {
+    protected void dispatchVisibilityChanged(@NonNull View changedView,
+            @Visibility int visibility) {
         onVisibilityChanged(changedView, visibility);
     }
 
@@ -7378,12 +8738,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param visibility The new visibility of changedView: {@link #VISIBLE},
      * {@link #INVISIBLE} or {@link #GONE}.
      */
-    protected void onVisibilityChanged(View changedView, int visibility) {
+    protected void onVisibilityChanged(@NonNull View changedView, @Visibility int visibility) {
         if (visibility == VISIBLE) {
             if (mAttachInfo != null) {
                 initialAwakenScrollBars();
             } else {
-                mPrivateFlags |= AWAKEN_SCROLL_BARS_ON_ATTACH;
+                mPrivateFlags |= PFLAG_AWAKEN_SCROLL_BARS_ON_ATTACH;
             }
         }
     }
@@ -7397,7 +8757,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param hint A hint about whether or not this view is displayed:
      * {@link #VISIBLE} or {@link #INVISIBLE}.
      */
-    public void dispatchDisplayHint(int hint) {
+    public void dispatchDisplayHint(@Visibility int hint) {
         onDisplayHint(hint);
     }
 
@@ -7410,7 +8770,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param hint A hint about whether or not this view is displayed:
      * {@link #VISIBLE} or {@link #INVISIBLE}.
      */
-    protected void onDisplayHint(int hint) {
+    protected void onDisplayHint(@Visibility int hint) {
     }
 
     /**
@@ -7421,7 +8781,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @see #onWindowVisibilityChanged(int)
      */
-    public void dispatchWindowVisibilityChanged(int visibility) {
+    public void dispatchWindowVisibilityChanged(@Visibility int visibility) {
         onWindowVisibilityChanged(visibility);
     }
 
@@ -7435,7 +8795,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @param visibility The new visibility of the window.
      */
-    protected void onWindowVisibilityChanged(int visibility) {
+    protected void onWindowVisibilityChanged(@Visibility int visibility) {
         if (visibility == VISIBLE) {
             initialAwakenScrollBars();
         }
@@ -7447,6 +8807,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @return Returns the current visibility of the view's window.
      */
+    @Visibility
     public int getWindowVisibility() {
         return mAttachInfo != null ? mAttachInfo.mWindowVisibility : GONE;
     }
@@ -7484,7 +8845,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             outRect.bottom -= insets.bottom;
             return;
         }
-        Display d = WindowManagerImpl.getDefault().getDefaultDisplay();
+        // The view is not attached to a display so we don't have a context.
+        // Make a best guess about the display size.
+        Display d = DisplayManagerGlobal.getInstance().getRealDisplay(Display.DEFAULT_DISPLAY);
         d.getRectSize(outRect);
     }
 
@@ -7537,7 +8900,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     void needGlobalAttributesUpdate(boolean force) {
         final AttachInfo ai = mAttachInfo;
-        if (ai != null) {
+        if (ai != null && !ai.mRecomputeGlobalAttributes) {
             if (force || ai.mKeepScreenOn || (ai.mSystemUiVisibility != 0)
                     || ai.mHasSystemUiListeners) {
                 ai.mRecomputeGlobalAttributes = true;
@@ -7605,21 +8968,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         boolean result = false;
 
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER: {
-                if ((mViewFlags & ENABLED_MASK) == DISABLED) {
-                    return true;
-                }
-                // Long clickable items don't necessarily have to be clickable
-                if (((mViewFlags & CLICKABLE) == CLICKABLE ||
-                        (mViewFlags & LONG_CLICKABLE) == LONG_CLICKABLE) &&
-                        (event.getRepeatCount() == 0)) {
-                    setPressed(true);
-                    checkForLongClick(0);
-                    return true;
-                }
-                break;
+        if (KeyEvent.isConfirmKey(keyCode)) {
+            if ((mViewFlags & ENABLED_MASK) == DISABLED) {
+                return true;
+            }
+            // Long clickable items don't necessarily have to be clickable
+            if (((mViewFlags & CLICKABLE) == CLICKABLE ||
+                    (mViewFlags & LONG_CLICKABLE) == LONG_CLICKABLE) &&
+                    (event.getRepeatCount() == 0)) {
+                setPressed(true);
+                checkForLongClick(0);
+                return true;
             }
         }
         return result;
@@ -7651,28 +9010,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param event   The KeyEvent object that defines the button action.
      */
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        boolean result = false;
+        if (KeyEvent.isConfirmKey(keyCode)) {
+            if ((mViewFlags & ENABLED_MASK) == DISABLED) {
+                return true;
+            }
+            if ((mViewFlags & CLICKABLE) == CLICKABLE && isPressed()) {
+                setPressed(false);
 
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER: {
-                if ((mViewFlags & ENABLED_MASK) == DISABLED) {
-                    return true;
+                if (!mHasPerformedLongPress) {
+                    // This is a tap, so remove the longpress check
+                    removeLongPressCallback();
+                    return performClick();
                 }
-                if ((mViewFlags & CLICKABLE) == CLICKABLE && isPressed()) {
-                    setPressed(false);
-
-                    if (!mHasPerformedLongPress) {
-                        // This is a tap, so remove the longpress check
-                        removeLongPressCallback();
-
-                        result = performClick();
-                    }
-                }
-                break;
             }
         }
-        return result;
+        return false;
     }
 
     /**
@@ -7736,7 +9088,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * <p>When implementing this, you probably also want to implement
      * {@link #onCheckIsTextEditor()} to indicate you will return a
-     * non-null InputConnection.
+     * non-null InputConnection.</p>
+     *
+     * <p>Also, take good care to fill in the {@link android.view.inputmethod.EditorInfo}
+     * object correctly and in its entirety, so that the connected IME can rely
+     * on its values. For example, {@link android.view.inputmethod.EditorInfo#initialSelStart}
+     * and  {@link android.view.inputmethod.EditorInfo#initialSelEnd} members
+     * must be filled in with the correct cursor position for IMEs to work correctly
+     * with your application.</p>
      *
      * @param outAttrs Fill in with attribute information about the connection.
      */
@@ -7844,13 +9203,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * delivered to the focused view.
      * </p>
      * <pre> public boolean onGenericMotionEvent(MotionEvent event) {
-     *     if ((event.getSource() &amp; InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+     *     if (event.isFromSource(InputDevice.SOURCE_CLASS_JOYSTICK)) {
      *         if (event.getAction() == MotionEvent.ACTION_MOVE) {
      *             // process the joystick movement...
      *             return true;
      *         }
      *     }
-     *     if ((event.getSource() &amp; InputDevice.SOURCE_CLASS_POINTER) != 0) {
+     *     if (event.isFromSource(InputDevice.SOURCE_CLASS_POINTER)) {
      *         switch (event.getAction()) {
      *             case MotionEvent.ACTION_HOVER_MOVE:
      *                 // process the mouse hover movement...
@@ -7925,11 +9284,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                             && !pointInView(event.getX(), event.getY()))) {
                 mSendingHoverAccessibilityEvents = false;
                 sendAccessibilityHoverEvent(AccessibilityEvent.TYPE_VIEW_HOVER_EXIT);
-                // If the window does not have input focus we take away accessibility
-                // focus as soon as the user stop hovering over the view.
-                if (mAttachInfo != null && !mAttachInfo.mHasWindowFocus) {
-                    getViewRootImpl().setAccessibilityFocus(null, null);
-                }
             }
         }
 
@@ -7951,6 +9305,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             // Note that onGenericMotionEvent will be called by default when
             // onHoverEvent returns false (refer to dispatchGenericMotionEvent).
             dispatchGenericMotionEventInternal(event);
+            // The event was already handled by calling setHovered(), so always
+            // return true.
             return true;
         }
 
@@ -7983,7 +9339,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty
     public boolean isHovered() {
-        return (mPrivateFlags & HOVERED) != 0;
+        return (mPrivateFlags & PFLAG_HOVERED) != 0;
     }
 
     /**
@@ -8003,14 +9359,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void setHovered(boolean hovered) {
         if (hovered) {
-            if ((mPrivateFlags & HOVERED) == 0) {
-                mPrivateFlags |= HOVERED;
+            if ((mPrivateFlags & PFLAG_HOVERED) == 0) {
+                mPrivateFlags |= PFLAG_HOVERED;
                 refreshDrawableState();
                 onHoverChanged(true);
             }
         } else {
-            if ((mPrivateFlags & HOVERED) != 0) {
-                mPrivateFlags &= ~HOVERED;
+            if ((mPrivateFlags & PFLAG_HOVERED) != 0) {
+                mPrivateFlags &= ~PFLAG_HOVERED;
                 refreshDrawableState();
                 onHoverChanged(false);
             }
@@ -8034,15 +9390,28 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * Implement this method to handle touch screen motion events.
+     * <p>
+     * If this method is used to detect click actions, it is recommended that
+     * the actions be performed by implementing and calling
+     * {@link #performClick()}. This will ensure consistent system behavior,
+     * including:
+     * <ul>
+     * <li>obeying click sound preferences
+     * <li>dispatching OnClickListener calls
+     * <li>handling {@link AccessibilityNodeInfo#ACTION_CLICK ACTION_CLICK} when
+     * accessibility features are enabled
+     * </ul>
      *
      * @param event The motion event.
      * @return True if the event was handled, false otherwise.
      */
     public boolean onTouchEvent(MotionEvent event) {
+        final float x = event.getX();
+        final float y = event.getY();
         final int viewFlags = mViewFlags;
 
         if ((viewFlags & ENABLED_MASK) == DISABLED) {
-            if (event.getAction() == MotionEvent.ACTION_UP && (mPrivateFlags & PRESSED) != 0) {
+            if (event.getAction() == MotionEvent.ACTION_UP && (mPrivateFlags & PFLAG_PRESSED) != 0) {
                 setPressed(false);
             }
             // A disabled view that is clickable still consumes the touch
@@ -8061,8 +9430,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 (viewFlags & LONG_CLICKABLE) == LONG_CLICKABLE)) {
             switch (event.getAction()) {
                 case MotionEvent.ACTION_UP:
-                    boolean prepressed = (mPrivateFlags & PREPRESSED) != 0;
-                    if ((mPrivateFlags & PRESSED) != 0 || prepressed) {
+                    boolean prepressed = (mPrivateFlags & PFLAG_PREPRESSED) != 0;
+                    if ((mPrivateFlags & PFLAG_PRESSED) != 0 || prepressed) {
                         // take focus if we don't have it already and we should in
                         // touch mode.
                         boolean focusTaken = false;
@@ -8075,7 +9444,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                             // showed it as pressed.  Make it show the pressed
                             // state now (before scheduling the click) to ensure
                             // the user sees it.
-                            setPressed(true);
+                            setPressed(true, x, y);
                        }
 
                         if (!mHasPerformedLongPress) {
@@ -8107,6 +9476,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                             // If the post failed, unpress right now
                             mUnsetPressedState.run();
                         }
+
                         removeTapCallback();
                     }
                     break;
@@ -8124,14 +9494,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     // For views inside a scrolling container, delay the pressed feedback for
                     // a short period in case this is a scroll.
                     if (isInScrollingContainer) {
-                        mPrivateFlags |= PREPRESSED;
+                        mPrivateFlags |= PFLAG_PREPRESSED;
                         if (mPendingCheckForTap == null) {
                             mPendingCheckForTap = new CheckForTap();
                         }
+                        mPendingCheckForTap.x = event.getX();
+                        mPendingCheckForTap.y = event.getY();
                         postDelayed(mPendingCheckForTap, ViewConfiguration.getTapTimeout());
                     } else {
                         // Not inside a scrolling container, so show the feedback right away
-                        setPressed(true);
+                        setPressed(true, x, y);
                         checkForLongClick(0);
                     }
                     break;
@@ -8139,17 +9511,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 case MotionEvent.ACTION_CANCEL:
                     setPressed(false);
                     removeTapCallback();
+                    removeLongPressCallback();
                     break;
 
                 case MotionEvent.ACTION_MOVE:
-                    final int x = (int) event.getX();
-                    final int y = (int) event.getY();
+                    drawableHotspotChanged(x, y);
 
                     // Be lenient about moving outside of buttons
                     if (!pointInView(x, y, mTouchSlop)) {
                         // Outside button
                         removeTapCallback();
-                        if ((mPrivateFlags & PRESSED) != 0) {
+                        if ((mPrivateFlags & PFLAG_PRESSED) != 0) {
                             // Remove any future long press/tap checks
                             removeLongPressCallback();
 
@@ -8158,6 +9530,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     }
                     break;
             }
+
             return true;
         }
 
@@ -8200,7 +9573,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * Remove the prepress detection timer.
      */
     private void removeUnsetPressCallback() {
-        if ((mPrivateFlags & PRESSED) != 0 && mUnsetPressedState != null) {
+        if ((mPrivateFlags & PFLAG_PRESSED) != 0 && mUnsetPressedState != null) {
             setPressed(false);
             removeCallbacks(mUnsetPressedState);
         }
@@ -8211,7 +9584,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     private void removeTapCallback() {
         if (mPendingCheckForTap != null) {
-            mPrivateFlags &= ~PREPRESSED;
+            mPrivateFlags &= ~PFLAG_PREPRESSED;
             removeCallbacks(mPendingCheckForTap);
         }
     }
@@ -8259,12 +9632,40 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Request unbuffered dispatch of the given stream of MotionEvents to this View.
+     *
+     * Until this View receives a corresponding {@link MotionEvent#ACTION_UP}, ask that the input
+     * system not batch {@link MotionEvent}s but instead deliver them as soon as they're
+     * available. This method should only be called for touch events.
+     *
+     * <p class="note">This api is not intended for most applications. Buffered dispatch
+     * provides many of benefits, and just requesting unbuffered dispatch on most MotionEvent
+     * streams will not improve your input latency. Side effects include: increased latency,
+     * jittery scrolls and inability to take advantage of system resampling. Talk to your input
+     * professional to see if {@link #requestUnbufferedDispatch(MotionEvent)} is right for
+     * you.</p>
+     */
+    public final void requestUnbufferedDispatch(MotionEvent event) {
+        final int action = event.getAction();
+        if (mAttachInfo == null
+                || action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_MOVE
+                || !event.isTouchEvent()) {
+            return;
+        }
+        mAttachInfo.mUnbufferedDispatchRequested = true;
+    }
+
+    /**
      * Set flags controlling behavior of this view.
      *
      * @param flags Constant indicating the value which should be set
      * @param mask Constant indicating the bit range that should be changed
      */
     void setFlags(int flags, int mask) {
+        final boolean accessibilityEnabled =
+                AccessibilityManager.getInstance(mContext).isEnabled();
+        final boolean oldIncludeForAccessibility = accessibilityEnabled && includeForAccessibility();
+
         int old = mViewFlags;
         mViewFlags = (mViewFlags & ~mask) | (flags & mask);
 
@@ -8276,32 +9677,30 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         /* Check if the FOCUSABLE bit has changed */
         if (((changed & FOCUSABLE_MASK) != 0) &&
-                ((privateFlags & HAS_BOUNDS) !=0)) {
+                ((privateFlags & PFLAG_HAS_BOUNDS) !=0)) {
             if (((old & FOCUSABLE_MASK) == FOCUSABLE)
-                    && ((privateFlags & FOCUSED) != 0)) {
+                    && ((privateFlags & PFLAG_FOCUSED) != 0)) {
                 /* Give up focus if we are no longer focusable */
                 clearFocus();
             } else if (((old & FOCUSABLE_MASK) == NOT_FOCUSABLE)
-                    && ((privateFlags & FOCUSED) == 0)) {
+                    && ((privateFlags & PFLAG_FOCUSED) == 0)) {
                 /*
                  * Tell the view system that we are now available to take focus
                  * if no one else already has it.
                  */
                 if (mParent != null) mParent.focusableViewAvailable(this);
             }
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                notifyAccessibilityStateChanged();
-            }
         }
 
-        if ((flags & VISIBILITY_MASK) == VISIBLE) {
+        final int newVisibility = flags & VISIBILITY_MASK;
+        if (newVisibility == VISIBLE) {
             if ((changed & VISIBILITY_MASK) != 0) {
                 /*
                  * If this view is becoming visible, invalidate it in case it changed while
                  * it was not visible. Marking it drawn ensures that the invalidation will
                  * go through.
                  */
-                mPrivateFlags |= DRAWN;
+                mPrivateFlags |= PFLAG_DRAWN;
                 invalidate(true);
 
                 needGlobalAttributesUpdate(true);
@@ -8331,7 +9730,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
                 // Mark the view drawn to ensure that it gets invalidated properly the next
                 // time it is visible and gets invalidated
-                mPrivateFlags |= DRAWN;
+                mPrivateFlags |= PFLAG_DRAWN;
             }
             if (mAttachInfo != null) {
                 mAttachInfo.mViewVisibilityChanged = true;
@@ -8345,12 +9744,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
              * If this view is becoming invisible, set the DRAWN flag so that
              * the next invalidate() will not be skipped.
              */
-            mPrivateFlags |= DRAWN;
+            mPrivateFlags |= PFLAG_DRAWN;
 
-            if (((mViewFlags & VISIBILITY_MASK) == INVISIBLE) && hasFocus()) {
+            if (((mViewFlags & VISIBILITY_MASK) == INVISIBLE)) {
                 // root view becoming invisible shouldn't clear focus and accessibility focus
                 if (getRootView() != this) {
-                    clearFocus();
+                    if (hasFocus()) clearFocus();
                     clearAccessibilityFocus();
                 }
             }
@@ -8360,14 +9759,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         if ((changed & VISIBILITY_MASK) != 0) {
+            // If the view is invisible, cleanup its display list to free up resources
+            if (newVisibility != VISIBLE && mAttachInfo != null) {
+                cleanupDraw();
+            }
+
             if (mParent instanceof ViewGroup) {
                 ((ViewGroup) mParent).onChildVisibilityChanged(this,
-                        (changed & VISIBILITY_MASK), (flags & VISIBILITY_MASK));
+                        (changed & VISIBILITY_MASK), newVisibility);
                 ((View) mParent).invalidate(true);
             } else if (mParent != null) {
                 mParent.invalidateChild(this, null);
             }
-            dispatchVisibilityChanged(this, (flags & VISIBILITY_MASK));
+            dispatchVisibilityChanged(this, newVisibility);
+
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
 
         if ((changed & WILL_NOT_CACHE_DRAWING) != 0) {
@@ -8376,25 +9782,25 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         if ((changed & DRAWING_CACHE_ENABLED) != 0) {
             destroyDrawingCache();
-            mPrivateFlags &= ~DRAWING_CACHE_VALID;
+            mPrivateFlags &= ~PFLAG_DRAWING_CACHE_VALID;
             invalidateParentCaches();
         }
 
         if ((changed & DRAWING_CACHE_QUALITY_MASK) != 0) {
             destroyDrawingCache();
-            mPrivateFlags &= ~DRAWING_CACHE_VALID;
+            mPrivateFlags &= ~PFLAG_DRAWING_CACHE_VALID;
         }
 
         if ((changed & DRAW_MASK) != 0) {
             if ((mViewFlags & WILL_NOT_DRAW) != 0) {
                 if (mBackground != null) {
-                    mPrivateFlags &= ~SKIP_DRAW;
-                    mPrivateFlags |= ONLY_DRAWS_BACKGROUND;
+                    mPrivateFlags &= ~PFLAG_SKIP_DRAW;
+                    mPrivateFlags |= PFLAG_ONLY_DRAWS_BACKGROUND;
                 } else {
-                    mPrivateFlags |= SKIP_DRAW;
+                    mPrivateFlags |= PFLAG_SKIP_DRAW;
                 }
             } else {
-                mPrivateFlags &= ~SKIP_DRAW;
+                mPrivateFlags &= ~PFLAG_SKIP_DRAW;
             }
             requestLayout();
             invalidate(true);
@@ -8406,16 +9812,32 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             }
         }
 
-        if (AccessibilityManager.getInstance(mContext).isEnabled()
-                && ((changed & FOCUSABLE) != 0 || (changed & CLICKABLE) != 0
-                        || (changed & LONG_CLICKABLE) != 0 || (changed & ENABLED) != 0)) {
-            notifyAccessibilityStateChanged();
+        if (accessibilityEnabled) {
+            if ((changed & FOCUSABLE_MASK) != 0 || (changed & VISIBILITY_MASK) != 0
+                    || (changed & CLICKABLE) != 0 || (changed & LONG_CLICKABLE) != 0) {
+                if (oldIncludeForAccessibility != includeForAccessibility()) {
+                    notifySubtreeAccessibilityStateChangedIfNeeded();
+                } else {
+                    notifyViewAccessibilityStateChangedIfNeeded(
+                            AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                }
+            } else if ((changed & ENABLED_MASK) != 0) {
+                notifyViewAccessibilityStateChangedIfNeeded(
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+            }
         }
     }
 
     /**
      * Change the view's z order in the tree, so it's on top of other sibling
-     * views
+     * views. This ordering change may affect layout, if the parent container
+     * uses an order-dependent layout scheme (e.g., LinearLayout). Prior
+     * to {@link android.os.Build.VERSION_CODES#KITKAT} this
+     * method should be followed by calls to {@link #requestLayout()} and
+     * {@link View#invalidate()} on the view's parent to force the parent to redraw
+     * with the new child ordering.
+     *
+     * @see ViewGroup#bringChildToFront(View)
      */
     public void bringToFront() {
         if (mParent != null) {
@@ -8445,6 +9867,29 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (ai != null) {
             ai.mViewScrollChanged = true;
         }
+
+        if (mListenerInfo != null && mListenerInfo.mOnScrollChangeListener != null) {
+            mListenerInfo.mOnScrollChangeListener.onScrollChange(this, l, t, oldl, oldt);
+        }
+    }
+
+    /**
+     * Interface definition for a callback to be invoked when the scroll
+     * position of a view changes.
+     *
+     * @hide Only used internally.
+     */
+    public interface OnScrollChangeListener {
+        /**
+         * Called when the scroll position of a view changes.
+         *
+         * @param v The view whose scroll position has changed.
+         * @param scrollX Current horizontal scroll origin.
+         * @param scrollY Current vertical scroll origin.
+         * @param oldScrollX Previous horizontal scroll origin.
+         * @param oldScrollY Previous vertical scroll origin.
+         */
+        void onScrollChange(View v, int scrollX, int scrollY, int oldScrollX, int oldScrollY);
     }
 
     /**
@@ -8453,9 +9898,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public interface OnLayoutChangeListener {
         /**
-         * Called when the focus state of a view has changed.
+         * Called when the layout bounds of a view changes due to layout processing.
          *
-         * @param v The view whose state has changed.
+         * @param v The view whose bounds have changed.
          * @param left The new value of the view's left property.
          * @param top The new value of the view's top property.
          * @param right The new value of the view's right property.
@@ -8568,7 +10013,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Return the visible drawing bounds of your view. Fills in the output
      * rectangle with the values from getScrollX(), getScrollY(),
-     * getWidth(), and getHeight().
+     * getWidth(), and getHeight(). These bounds do not account for any
+     * transformation properties currently set on the view, such as
+     * {@link #setScaleX(float)} or {@link #setRotation(float)}.
      *
      * @param outRect The (scrolled) drawing bounds of the view.
      */
@@ -8642,7 +10089,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * The transform matrix of this view, which is calculated based on the current
-     * roation, scale, and pivot properties.
+     * rotation, scale, and pivot properties.
      *
      * @see #getRotation()
      * @see #getScaleX()
@@ -8652,21 +10099,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return The current transform matrix for the view
      */
     public Matrix getMatrix() {
-        if (mTransformationInfo != null) {
-            updateMatrix();
-            return mTransformationInfo.mMatrix;
-        }
-        return Matrix.IDENTITY_MATRIX;
-    }
-
-    /**
-     * Utility function to determine if the value is far enough away from zero to be
-     * considered non-zero.
-     * @param value A floating point value to check for zero-ness
-     * @return whether the passed-in value is far enough away from zero to be considered non-zero
-     */
-    private static boolean nonzero(float value) {
-        return (value < -NONZERO_EPSILON || value > NONZERO_EPSILON);
+        ensureTransformationInfo();
+        final Matrix matrix = mTransformationInfo.mMatrix;
+        mRenderNode.getMatrix(matrix);
+        return matrix;
     }
 
     /**
@@ -8676,11 +10112,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return True if the transform matrix is the identity matrix, false otherwise.
      */
     final boolean hasIdentityMatrix() {
-        if (mTransformationInfo != null) {
-            updateMatrix();
-            return mTransformationInfo.mMatrixIsIdentity;
-        }
-        return true;
+        return mRenderNode.hasIdentityMatrix();
     }
 
     void ensureTransformationInfo() {
@@ -8689,86 +10121,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
     }
 
-    /**
-     * Recomputes the transform matrix if necessary.
-     */
-    private void updateMatrix() {
-        final TransformationInfo info = mTransformationInfo;
-        if (info == null) {
-            return;
-        }
-        if (info.mMatrixDirty) {
-            // transform-related properties have changed since the last time someone
-            // asked for the matrix; recalculate it with the current values
-
-            // Figure out if we need to update the pivot point
-            if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                if ((mRight - mLeft) != info.mPrevWidth || (mBottom - mTop) != info.mPrevHeight) {
-                    info.mPrevWidth = mRight - mLeft;
-                    info.mPrevHeight = mBottom - mTop;
-                    info.mPivotX = info.mPrevWidth / 2f;
-                    info.mPivotY = info.mPrevHeight / 2f;
-                }
-            }
-            info.mMatrix.reset();
-            if (!nonzero(info.mRotationX) && !nonzero(info.mRotationY)) {
-                info.mMatrix.setTranslate(info.mTranslationX, info.mTranslationY);
-                info.mMatrix.preRotate(info.mRotation, info.mPivotX, info.mPivotY);
-                info.mMatrix.preScale(info.mScaleX, info.mScaleY, info.mPivotX, info.mPivotY);
-            } else {
-                if (info.mCamera == null) {
-                    info.mCamera = new Camera();
-                    info.matrix3D = new Matrix();
-                }
-                info.mCamera.save();
-                info.mMatrix.preScale(info.mScaleX, info.mScaleY, info.mPivotX, info.mPivotY);
-                info.mCamera.rotate(info.mRotationX, info.mRotationY, -info.mRotation);
-                info.mCamera.getMatrix(info.matrix3D);
-                info.matrix3D.preTranslate(-info.mPivotX, -info.mPivotY);
-                info.matrix3D.postTranslate(info.mPivotX + info.mTranslationX,
-                        info.mPivotY + info.mTranslationY);
-                info.mMatrix.postConcat(info.matrix3D);
-                info.mCamera.restore();
-            }
-            info.mMatrixDirty = false;
-            info.mMatrixIsIdentity = info.mMatrix.isIdentity();
-            info.mInverseMatrixDirty = true;
-        }
-    }
-
-    /**
-     * When searching for a view to focus this rectangle is used when considering if this view is
-     * a good candidate for receiving focus.
-     *
-     * By default, the rectangle is the {@link #getDrawingRect}) of the view.
-     *
-     * @param r The rectangle to fill in, in this view's coordinates.
-     */
-    public void getFocusRect(Rect r) {
-        getDrawingRect(r);
-    }
-
    /**
      * Utility method to retrieve the inverse of the current mMatrix property.
      * We cache the matrix to avoid recalculating it when transform properties
      * have not changed.
      *
      * @return The inverse of the current matrix of this view.
+     * @hide
      */
-    final Matrix getInverseMatrix() {
-        final TransformationInfo info = mTransformationInfo;
-        if (info != null) {
-            updateMatrix();
-            if (info.mInverseMatrixDirty) {
-                if (info.mInverseMatrix == null) {
-                    info.mInverseMatrix = new Matrix();
-                }
-                info.mMatrix.invert(info.mInverseMatrix);
-                info.mInverseMatrixDirty = false;
-            }
-            return info.mInverseMatrix;
+    public final Matrix getInverseMatrix() {
+        ensureTransformationInfo();
+        if (mTransformationInfo.mInverseMatrix == null) {
+            mTransformationInfo.mInverseMatrix = new Matrix();
         }
-        return Matrix.IDENTITY_MATRIX;
+        final Matrix matrix = mTransformationInfo.mInverseMatrix;
+        mRenderNode.getInverseMatrix(matrix);
+        return matrix;
     }
 
     /**
@@ -8779,14 +10147,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return The distance along the Z axis.
      */
     public float getCameraDistance() {
-        ensureTransformationInfo();
         final float dpi = mResources.getDisplayMetrics().densityDpi;
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mCamera == null) {
-            info.mCamera = new Camera();
-            info.matrix3D = new Matrix();
-        }
-        return -(info.mCamera.getLocationZ() * dpi);
+        return -(mRenderNode.getCameraDistance() * dpi);
     }
 
     /**
@@ -8829,27 +10191,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #setRotationY(float)
      */
     public void setCameraDistance(float distance) {
-        invalidateViewProperty(true, false);
-
-        ensureTransformationInfo();
         final float dpi = mResources.getDisplayMetrics().densityDpi;
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mCamera == null) {
-            info.mCamera = new Camera();
-            info.matrix3D = new Matrix();
-        }
 
-        info.mCamera.setLocation(0.0f, 0.0f, -Math.abs(distance) / dpi);
-        info.mMatrixDirty = true;
-
+        invalidateViewProperty(true, false);
+        mRenderNode.setCameraDistance(-Math.abs(distance) / dpi);
         invalidateViewProperty(false, false);
-        if (mDisplayList != null) {
-            mDisplayList.setCameraDistance(-Math.abs(distance) / dpi);
-        }
-        if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-            // View was rejected last time it was drawn by its parent; this may have changed
-            invalidateParentIfNeeded();
-        }
+
+        invalidateParentIfNeededAndWasQuickRejected();
     }
 
     /**
@@ -8863,7 +10211,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getRotation() {
-        return mTransformationInfo != null ? mTransformationInfo.mRotation : 0;
+        return mRenderNode.getRotation();
     }
 
     /**
@@ -8881,21 +10229,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_rotation
      */
     public void setRotation(float rotation) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mRotation != rotation) {
+        if (rotation != getRotation()) {
             // Double-invalidation is necessary to capture view's old and new areas
             invalidateViewProperty(true, false);
-            info.mRotation = rotation;
-            info.mMatrixDirty = true;
+            mRenderNode.setRotation(rotation);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setRotation(rotation);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -8910,7 +10251,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getRotationY() {
-        return mTransformationInfo != null ? mTransformationInfo.mRotationY : 0;
+        return mRenderNode.getRotationY();
     }
 
     /**
@@ -8933,20 +10274,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_rotationY
      */
     public void setRotationY(float rotationY) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mRotationY != rotationY) {
+        if (rotationY != getRotationY()) {
             invalidateViewProperty(true, false);
-            info.mRotationY = rotationY;
-            info.mMatrixDirty = true;
+            mRenderNode.setRotationY(rotationY);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setRotationY(rotationY);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -8961,7 +10295,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getRotationX() {
-        return mTransformationInfo != null ? mTransformationInfo.mRotationX : 0;
+        return mRenderNode.getRotationX();
     }
 
     /**
@@ -8984,20 +10318,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_rotationX
      */
     public void setRotationX(float rotationX) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mRotationX != rotationX) {
+        if (rotationX != getRotationX()) {
             invalidateViewProperty(true, false);
-            info.mRotationX = rotationX;
-            info.mMatrixDirty = true;
+            mRenderNode.setRotationX(rotationX);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setRotationX(rotationX);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9013,7 +10340,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getScaleX() {
-        return mTransformationInfo != null ? mTransformationInfo.mScaleX : 1;
+        return mRenderNode.getScaleX();
     }
 
     /**
@@ -9027,20 +10354,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_scaleX
      */
     public void setScaleX(float scaleX) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mScaleX != scaleX) {
+        if (scaleX != getScaleX()) {
             invalidateViewProperty(true, false);
-            info.mScaleX = scaleX;
-            info.mMatrixDirty = true;
+            mRenderNode.setScaleX(scaleX);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setScaleX(scaleX);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9056,7 +10376,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getScaleY() {
-        return mTransformationInfo != null ? mTransformationInfo.mScaleY : 1;
+        return mRenderNode.getScaleY();
     }
 
     /**
@@ -9070,20 +10390,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_scaleY
      */
     public void setScaleY(float scaleY) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mScaleY != scaleY) {
+        if (scaleY != getScaleY()) {
             invalidateViewProperty(true, false);
-            info.mScaleY = scaleY;
-            info.mMatrixDirty = true;
+            mRenderNode.setScaleY(scaleY);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setScaleY(scaleY);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9101,7 +10414,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getPivotX() {
-        return mTransformationInfo != null ? mTransformationInfo.mPivotX : 0;
+        return mRenderNode.getPivotX();
     }
 
     /**
@@ -9120,21 +10433,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_transformPivotX
      */
     public void setPivotX(float pivotX) {
-        ensureTransformationInfo();
-        mPrivateFlags |= PIVOT_EXPLICITLY_SET;
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mPivotX != pivotX) {
+        if (!mRenderNode.isPivotExplicitlySet() || pivotX != getPivotX()) {
             invalidateViewProperty(true, false);
-            info.mPivotX = pivotX;
-            info.mMatrixDirty = true;
+            mRenderNode.setPivotX(pivotX);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setPivotX(pivotX);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
         }
     }
 
@@ -9152,7 +10456,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getPivotY() {
-        return mTransformationInfo != null ? mTransformationInfo.mPivotY : 0;
+        return mRenderNode.getPivotY();
     }
 
     /**
@@ -9170,21 +10474,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_transformPivotY
      */
     public void setPivotY(float pivotY) {
-        ensureTransformationInfo();
-        mPrivateFlags |= PIVOT_EXPLICITLY_SET;
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mPivotY != pivotY) {
+        if (!mRenderNode.isPivotExplicitlySet() || pivotY != getPivotY()) {
             invalidateViewProperty(true, false);
-            info.mPivotY = pivotY;
-            info.mMatrixDirty = true;
+            mRenderNode.setPivotY(pivotY);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setPivotY(pivotY);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
         }
     }
 
@@ -9201,18 +10496,24 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Returns whether this View has content which overlaps. This function, intended to be
-     * overridden by specific View types, is an optimization when alpha is set on a view. If
-     * rendering overlaps in a view with alpha < 1, that view is drawn to an offscreen buffer
-     * and then composited it into place, which can be expensive. If the view has no overlapping
-     * rendering, the view can draw each primitive with the appropriate alpha value directly.
-     * An example of overlapping rendering is a TextView with a background image, such as a
-     * Button. An example of non-overlapping rendering is a TextView with no background, or
-     * an ImageView with only the foreground image. The default implementation returns true;
-     * subclasses should override if they have cases which can be optimized.
+     * Returns whether this View has content which overlaps.
+     *
+     * <p>This function, intended to be overridden by specific View types, is an optimization when
+     * alpha is set on a view. If rendering overlaps in a view with alpha < 1, that view is drawn to
+     * an offscreen buffer and then composited into place, which can be expensive. If the view has
+     * no overlapping rendering, the view can draw each primitive with the appropriate alpha value
+     * directly. An example of overlapping rendering is a TextView with a background image, such as
+     * a Button. An example of non-overlapping rendering is a TextView with no background, or an
+     * ImageView with only the foreground image. The default implementation returns true; subclasses
+     * should override if they have cases which can be optimized.</p>
+     *
+     * <p>The current implementation of the saveLayer and saveLayerAlpha methods in {@link Canvas}
+     * necessitates that a View return true if it uses the methods internally without passing the
+     * {@link Canvas#CLIP_TO_LAYER_SAVE_FLAG}.</p>
      *
      * @return true if the content in this view might overlap, false otherwise.
      */
+    @ViewDebug.ExportedProperty(category = "drawing")
     public boolean hasOverlappingRendering() {
         return true;
     }
@@ -9221,17 +10522,26 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * <p>Sets the opacity of the view. This is a value from 0 to 1, where 0 means the view is
      * completely transparent and 1 means the view is completely opaque.</p>
      *
-     * <p>If this view overrides {@link #onSetAlpha(int)} to return true, then this view is
-     * responsible for applying the opacity itself. Otherwise, calling this method is
-     * equivalent to calling {@link #setLayerType(int, android.graphics.Paint)} and
-     * setting a hardware layer.</p>
+     * <p> Note that setting alpha to a translucent value (0 < alpha < 1) can have significant
+     * performance implications, especially for large views. It is best to use the alpha property
+     * sparingly and transiently, as in the case of fading animations.</p>
      *
-     * <p>Note that setting alpha to a translucent value (0 < alpha < 1) may have
-     * performance implications. It is generally best to use the alpha property sparingly and
-     * transiently, as in the case of fading animations.</p>
+     * <p>For a view with a frequently changing alpha, such as during a fading animation, it is
+     * strongly recommended for performance reasons to either override
+     * {@link #hasOverlappingRendering()} to return false if appropriate, or setting a
+     * {@link #setLayerType(int, android.graphics.Paint) layer type} on the view.</p>
+     *
+     * <p>If this view overrides {@link #onSetAlpha(int)} to return true, then this view is
+     * responsible for applying the opacity itself.</p>
+     *
+     * <p>Note that if the view is backed by a
+     * {@link #setLayerType(int, android.graphics.Paint) layer} and is associated with a
+     * {@link #setLayerPaint(android.graphics.Paint) layer paint}, setting an alpha value less than
+     * 1.0 will supercede the alpha of the layer paint.</p>
      *
      * @param alpha The opacity of the view.
      *
+     * @see #hasOverlappingRendering()
      * @see #setLayerType(int, android.graphics.Paint)
      *
      * @attr ref android.R.styleable#View_alpha
@@ -9241,16 +10551,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (mTransformationInfo.mAlpha != alpha) {
             mTransformationInfo.mAlpha = alpha;
             if (onSetAlpha((int) (alpha * 255))) {
-                mPrivateFlags |= ALPHA_SET;
+                mPrivateFlags |= PFLAG_ALPHA_SET;
                 // subclass is handling alpha - don't optimize rendering cache invalidation
                 invalidateParentCaches();
                 invalidate(true);
             } else {
-                mPrivateFlags &= ~ALPHA_SET;
+                mPrivateFlags &= ~PFLAG_ALPHA_SET;
                 invalidateViewProperty(true, false);
-                if (mDisplayList != null) {
-                    mDisplayList.setAlpha(alpha);
-                }
+                mRenderNode.setAlpha(getFinalAlpha());
+                notifyViewAccessibilityStateChangedIfNeeded(
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -9271,16 +10581,58 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             mTransformationInfo.mAlpha = alpha;
             boolean subclassHandlesAlpha = onSetAlpha((int) (alpha * 255));
             if (subclassHandlesAlpha) {
-                mPrivateFlags |= ALPHA_SET;
+                mPrivateFlags |= PFLAG_ALPHA_SET;
                 return true;
             } else {
-                mPrivateFlags &= ~ALPHA_SET;
-                if (mDisplayList != null) {
-                    mDisplayList.setAlpha(alpha);
-                }
+                mPrivateFlags &= ~PFLAG_ALPHA_SET;
+                mRenderNode.setAlpha(getFinalAlpha());
             }
         }
         return false;
+    }
+
+    /**
+     * This property is hidden and intended only for use by the Fade transition, which
+     * animates it to produce a visual translucency that does not side-effect (or get
+     * affected by) the real alpha property. This value is composited with the other
+     * alpha value (and the AlphaAnimation value, when that is present) to produce
+     * a final visual translucency result, which is what is passed into the DisplayList.
+     *
+     * @hide
+     */
+    public void setTransitionAlpha(float alpha) {
+        ensureTransformationInfo();
+        if (mTransformationInfo.mTransitionAlpha != alpha) {
+            mTransformationInfo.mTransitionAlpha = alpha;
+            mPrivateFlags &= ~PFLAG_ALPHA_SET;
+            invalidateViewProperty(true, false);
+            mRenderNode.setAlpha(getFinalAlpha());
+        }
+    }
+
+    /**
+     * Calculates the visual alpha of this view, which is a combination of the actual
+     * alpha value and the transitionAlpha value (if set).
+     */
+    private float getFinalAlpha() {
+        if (mTransformationInfo != null) {
+            return mTransformationInfo.mAlpha * mTransformationInfo.mTransitionAlpha;
+        }
+        return 1;
+    }
+
+    /**
+     * This property is hidden and intended only for use by the Fade transition, which
+     * animates it to produce a visual translucency that does not side-effect (or get
+     * affected by) the real alpha property. This value is composited with the other
+     * alpha value (and the AlphaAnimation value, when that is present) to produce
+     * a final visual translucency result, which is what is passed into the DisplayList.
+     *
+     * @hide
+     */
+    @ViewDebug.ExportedProperty(category = "drawing")
+    public float getTransitionAlpha() {
+        return mTransformationInfo != null ? mTransformationInfo.mTransitionAlpha : 1;
     }
 
     /**
@@ -9302,9 +10654,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public final void setTop(int top) {
         if (top != mTop) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
                 if (mAttachInfo != null) {
                     int minTop;
@@ -9327,23 +10677,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             int oldHeight = mBottom - mTop;
 
             mTop = top;
-            if (mDisplayList != null) {
-                mDisplayList.setTop(mTop);
-            }
+            mRenderNode.setTop(mTop);
 
-            onSizeChanged(width, mBottom - mTop, width, oldHeight);
+            sizeChange(width, mBottom - mTop, width, oldHeight);
 
             if (!matrixIsIdentity) {
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                    // A change in dimension means an auto-centered pivot point changes, too
-                    mTransformationInfo.mMatrixDirty = true;
-                }
-                mPrivateFlags |= DRAWN; // force another invalidation with the new orientation
+                mPrivateFlags |= PFLAG_DRAWN; // force another invalidation with the new orientation
                 invalidate(true);
             }
             mBackgroundSizeChanged = true;
             invalidateParentIfNeeded();
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
+            if ((mPrivateFlags2 & PFLAG2_VIEW_QUICK_REJECTED) == PFLAG2_VIEW_QUICK_REJECTED) {
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
@@ -9366,7 +10710,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return The dirty state of this view.
      */
     public boolean isDirty() {
-        return (mPrivateFlags & DIRTY_MASK) != 0;
+        return (mPrivateFlags & PFLAG_DIRTY_MASK) != 0;
     }
 
     /**
@@ -9378,9 +10722,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public final void setBottom(int bottom) {
         if (bottom != mBottom) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
                 if (mAttachInfo != null) {
                     int maxBottom;
@@ -9400,23 +10742,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             int oldHeight = mBottom - mTop;
 
             mBottom = bottom;
-            if (mDisplayList != null) {
-                mDisplayList.setBottom(mBottom);
-            }
+            mRenderNode.setBottom(mBottom);
 
-            onSizeChanged(width, mBottom - mTop, width, oldHeight);
+            sizeChange(width, mBottom - mTop, width, oldHeight);
 
             if (!matrixIsIdentity) {
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                    // A change in dimension means an auto-centered pivot point changes, too
-                    mTransformationInfo.mMatrixDirty = true;
-                }
-                mPrivateFlags |= DRAWN; // force another invalidation with the new orientation
+                mPrivateFlags |= PFLAG_DRAWN; // force another invalidation with the new orientation
                 invalidate(true);
             }
             mBackgroundSizeChanged = true;
             invalidateParentIfNeeded();
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
+            if ((mPrivateFlags2 & PFLAG2_VIEW_QUICK_REJECTED) == PFLAG2_VIEW_QUICK_REJECTED) {
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
@@ -9438,13 +10774,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * by the layout system and should not generally be called otherwise, because the property
      * may be changed at any time by the layout.
      *
-     * @param left The bottom of this view, in pixels.
+     * @param left The left of this view, in pixels.
      */
     public final void setLeft(int left) {
         if (left != mLeft) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
                 if (mAttachInfo != null) {
                     int minLeft;
@@ -9467,23 +10801,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             int height = mBottom - mTop;
 
             mLeft = left;
-            if (mDisplayList != null) {
-                mDisplayList.setLeft(left);
-            }
+            mRenderNode.setLeft(left);
 
-            onSizeChanged(mRight - mLeft, height, oldWidth, height);
+            sizeChange(mRight - mLeft, height, oldWidth, height);
 
             if (!matrixIsIdentity) {
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                    // A change in dimension means an auto-centered pivot point changes, too
-                    mTransformationInfo.mMatrixDirty = true;
-                }
-                mPrivateFlags |= DRAWN; // force another invalidation with the new orientation
+                mPrivateFlags |= PFLAG_DRAWN; // force another invalidation with the new orientation
                 invalidate(true);
             }
             mBackgroundSizeChanged = true;
             invalidateParentIfNeeded();
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
+            if ((mPrivateFlags2 & PFLAG2_VIEW_QUICK_REJECTED) == PFLAG2_VIEW_QUICK_REJECTED) {
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
@@ -9505,13 +10833,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * by the layout system and should not generally be called otherwise, because the property
      * may be changed at any time by the layout.
      *
-     * @param right The bottom of this view, in pixels.
+     * @param right The right of this view, in pixels.
      */
     public final void setRight(int right) {
         if (right != mRight) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
                 if (mAttachInfo != null) {
                     int maxRight;
@@ -9531,23 +10857,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             int height = mBottom - mTop;
 
             mRight = right;
-            if (mDisplayList != null) {
-                mDisplayList.setRight(mRight);
-            }
+            mRenderNode.setRight(mRight);
 
-            onSizeChanged(mRight - mLeft, height, oldWidth, height);
+            sizeChange(mRight - mLeft, height, oldWidth, height);
 
             if (!matrixIsIdentity) {
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                    // A change in dimension means an auto-centered pivot point changes, too
-                    mTransformationInfo.mMatrixDirty = true;
-                }
-                mPrivateFlags |= DRAWN; // force another invalidation with the new orientation
+                mPrivateFlags |= PFLAG_DRAWN; // force another invalidation with the new orientation
                 invalidate(true);
             }
             mBackgroundSizeChanged = true;
             invalidateParentIfNeeded();
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
+            if ((mPrivateFlags2 & PFLAG2_VIEW_QUICK_REJECTED) == PFLAG2_VIEW_QUICK_REJECTED) {
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
@@ -9563,7 +10883,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getX() {
-        return mLeft + (mTransformationInfo != null ? mTransformationInfo.mTranslationX : 0);
+        return mLeft + getTranslationX();
     }
 
     /**
@@ -9586,7 +10906,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getY() {
-        return mTop + (mTransformationInfo != null ? mTransformationInfo.mTranslationY : 0);
+        return mTop + getTranslationY();
     }
 
     /**
@@ -9600,6 +10920,53 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         setTranslationY(y - mTop);
     }
 
+    /**
+     * The visual z position of this view, in pixels. This is equivalent to the
+     * {@link #setTranslationZ(float) translationZ} property plus the current
+     * {@link #getElevation() elevation} property.
+     *
+     * @return The visual z position of this view, in pixels.
+     */
+    @ViewDebug.ExportedProperty(category = "drawing")
+    public float getZ() {
+        return getElevation() + getTranslationZ();
+    }
+
+    /**
+     * Sets the visual z position of this view, in pixels. This is equivalent to setting the
+     * {@link #setTranslationZ(float) translationZ} property to be the difference between
+     * the x value passed in and the current {@link #getElevation() elevation} property.
+     *
+     * @param z The visual z position of this view, in pixels.
+     */
+    public void setZ(float z) {
+        setTranslationZ(z - getElevation());
+    }
+
+    /**
+     * The base elevation of this view relative to its parent, in pixels.
+     *
+     * @return The base depth position of the view, in pixels.
+     */
+    @ViewDebug.ExportedProperty(category = "drawing")
+    public float getElevation() {
+        return mRenderNode.getElevation();
+    }
+
+    /**
+     * Sets the base elevation of this view, in pixels.
+     *
+     * @attr ref android.R.styleable#View_elevation
+     */
+    public void setElevation(float elevation) {
+        if (elevation != getElevation()) {
+            invalidateViewProperty(true, false);
+            mRenderNode.setElevation(elevation);
+            invalidateViewProperty(false, true);
+
+            invalidateParentIfNeededAndWasQuickRejected();
+        }
+    }
 
     /**
      * The horizontal location of this view relative to its {@link #getLeft() left} position.
@@ -9610,7 +10977,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getTranslationX() {
-        return mTransformationInfo != null ? mTransformationInfo.mTranslationX : 0;
+        return mRenderNode.getTranslationX();
     }
 
     /**
@@ -9624,26 +10991,18 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_translationX
      */
     public void setTranslationX(float translationX) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mTranslationX != translationX) {
-            // Double-invalidation is necessary to capture view's old and new areas
+        if (translationX != getTranslationX()) {
             invalidateViewProperty(true, false);
-            info.mTranslationX = translationX;
-            info.mMatrixDirty = true;
+            mRenderNode.setTranslationX(translationX);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setTranslationX(translationX);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
-            }
+
+            invalidateParentIfNeededAndWasQuickRejected();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
     /**
-     * The horizontal location of this view relative to its {@link #getTop() top} position.
+     * The vertical location of this view relative to its {@link #getTop() top} position.
      * This position is post-layout, in addition to wherever the object's
      * layout placed it.
      *
@@ -9652,7 +11011,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public float getTranslationY() {
-        return mTransformationInfo != null ? mTransformationInfo.mTranslationY : 0;
+        return mRenderNode.getTranslationY();
     }
 
     /**
@@ -9666,21 +11025,225 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @attr ref android.R.styleable#View_translationY
      */
     public void setTranslationY(float translationY) {
-        ensureTransformationInfo();
-        final TransformationInfo info = mTransformationInfo;
-        if (info.mTranslationY != translationY) {
+        if (translationY != getTranslationY()) {
             invalidateViewProperty(true, false);
-            info.mTranslationY = translationY;
-            info.mMatrixDirty = true;
+            mRenderNode.setTranslationY(translationY);
             invalidateViewProperty(false, true);
-            if (mDisplayList != null) {
-                mDisplayList.setTranslationY(translationY);
-            }
-            if ((mPrivateFlags2 & VIEW_QUICK_REJECTED) == VIEW_QUICK_REJECTED) {
-                // View was rejected last time it was drawn by its parent; this may have changed
-                invalidateParentIfNeeded();
+
+            invalidateParentIfNeededAndWasQuickRejected();
+        }
+    }
+
+    /**
+     * The depth location of this view relative to its {@link #getElevation() elevation}.
+     *
+     * @return The depth of this view relative to its elevation.
+     */
+    @ViewDebug.ExportedProperty(category = "drawing")
+    public float getTranslationZ() {
+        return mRenderNode.getTranslationZ();
+    }
+
+    /**
+     * Sets the depth location of this view relative to its {@link #getElevation() elevation}.
+     *
+     * @attr ref android.R.styleable#View_translationZ
+     */
+    public void setTranslationZ(float translationZ) {
+        if (translationZ != getTranslationZ()) {
+            invalidateViewProperty(true, false);
+            mRenderNode.setTranslationZ(translationZ);
+            invalidateViewProperty(false, true);
+
+            invalidateParentIfNeededAndWasQuickRejected();
+        }
+    }
+
+    /** @hide */
+    public void setAnimationMatrix(Matrix matrix) {
+        invalidateViewProperty(true, false);
+        mRenderNode.setAnimationMatrix(matrix);
+        invalidateViewProperty(false, true);
+
+        invalidateParentIfNeededAndWasQuickRejected();
+    }
+
+    /**
+     * Returns the current StateListAnimator if exists.
+     *
+     * @return StateListAnimator or null if it does not exists
+     * @see    #setStateListAnimator(android.animation.StateListAnimator)
+     */
+    public StateListAnimator getStateListAnimator() {
+        return mStateListAnimator;
+    }
+
+    /**
+     * Attaches the provided StateListAnimator to this View.
+     * <p>
+     * Any previously attached StateListAnimator will be detached.
+     *
+     * @param stateListAnimator The StateListAnimator to update the view
+     * @see {@link android.animation.StateListAnimator}
+     */
+    public void setStateListAnimator(StateListAnimator stateListAnimator) {
+        if (mStateListAnimator == stateListAnimator) {
+            return;
+        }
+        if (mStateListAnimator != null) {
+            mStateListAnimator.setTarget(null);
+        }
+        mStateListAnimator = stateListAnimator;
+        if (stateListAnimator != null) {
+            stateListAnimator.setTarget(this);
+            if (isAttachedToWindow()) {
+                stateListAnimator.setState(getDrawableState());
             }
         }
+    }
+
+    /**
+     * Returns whether the Outline should be used to clip the contents of the View.
+     * <p>
+     * Note that this flag will only be respected if the View's Outline returns true from
+     * {@link Outline#canClip()}.
+     *
+     * @see #setOutlineProvider(ViewOutlineProvider)
+     * @see #setClipToOutline(boolean)
+     */
+    public final boolean getClipToOutline() {
+        return mRenderNode.getClipToOutline();
+    }
+
+    /**
+     * Sets whether the View's Outline should be used to clip the contents of the View.
+     * <p>
+     * Only a single non-rectangular clip can be applied on a View at any time.
+     * Circular clips from a {@link ViewAnimationUtils#createCircularReveal(View, int, int, float, float)
+     * circular reveal} animation take priority over Outline clipping, and
+     * child Outline clipping takes priority over Outline clipping done by a
+     * parent.
+     * <p>
+     * Note that this flag will only be respected if the View's Outline returns true from
+     * {@link Outline#canClip()}.
+     *
+     * @see #setOutlineProvider(ViewOutlineProvider)
+     * @see #getClipToOutline()
+     */
+    public void setClipToOutline(boolean clipToOutline) {
+        damageInParent();
+        if (getClipToOutline() != clipToOutline) {
+            mRenderNode.setClipToOutline(clipToOutline);
+        }
+    }
+
+    // correspond to the enum values of View_outlineProvider
+    private static final int PROVIDER_BACKGROUND = 0;
+    private static final int PROVIDER_NONE = 1;
+    private static final int PROVIDER_BOUNDS = 2;
+    private static final int PROVIDER_PADDED_BOUNDS = 3;
+    private void setOutlineProviderFromAttribute(int providerInt) {
+        switch (providerInt) {
+            case PROVIDER_BACKGROUND:
+                setOutlineProvider(ViewOutlineProvider.BACKGROUND);
+                break;
+            case PROVIDER_NONE:
+                setOutlineProvider(null);
+                break;
+            case PROVIDER_BOUNDS:
+                setOutlineProvider(ViewOutlineProvider.BOUNDS);
+                break;
+            case PROVIDER_PADDED_BOUNDS:
+                setOutlineProvider(ViewOutlineProvider.PADDED_BOUNDS);
+                break;
+        }
+    }
+
+    /**
+     * Sets the {@link ViewOutlineProvider} of the view, which generates the Outline that defines
+     * the shape of the shadow it casts, and enables outline clipping.
+     * <p>
+     * The default ViewOutlineProvider, {@link ViewOutlineProvider#BACKGROUND}, queries the Outline
+     * from the View's background drawable, via {@link Drawable#getOutline(Outline)}. Changing the
+     * outline provider with this method allows this behavior to be overridden.
+     * <p>
+     * If the ViewOutlineProvider is null, if querying it for an outline returns false,
+     * or if the produced Outline is {@link Outline#isEmpty()}, shadows will not be cast.
+     * <p>
+     * Only outlines that return true from {@link Outline#canClip()} may be used for clipping.
+     *
+     * @see #setClipToOutline(boolean)
+     * @see #getClipToOutline()
+     * @see #getOutlineProvider()
+     */
+    public void setOutlineProvider(ViewOutlineProvider provider) {
+        mOutlineProvider = provider;
+        invalidateOutline();
+    }
+
+    /**
+     * Returns the current {@link ViewOutlineProvider} of the view, which generates the Outline
+     * that defines the shape of the shadow it casts, and enables outline clipping.
+     *
+     * @see #setOutlineProvider(ViewOutlineProvider)
+     */
+    public ViewOutlineProvider getOutlineProvider() {
+        return mOutlineProvider;
+    }
+
+    /**
+     * Called to rebuild this View's Outline from its {@link ViewOutlineProvider outline provider}
+     *
+     * @see #setOutlineProvider(ViewOutlineProvider)
+     */
+    public void invalidateOutline() {
+        rebuildOutline();
+
+        notifySubtreeAccessibilityStateChangedIfNeeded();
+        invalidateViewProperty(false, false);
+    }
+
+    /**
+     * Internal version of {@link #invalidateOutline()} which invalidates the
+     * outline without invalidating the view itself. This is intended to be called from
+     * within methods in the View class itself which are the result of the view being
+     * invalidated already. For example, when we are drawing the background of a View,
+     * we invalidate the outline in case it changed in the meantime, but we do not
+     * need to invalidate the view because we're already drawing the background as part
+     * of drawing the view in response to an earlier invalidation of the view.
+     */
+    private void rebuildOutline() {
+        // Unattached views ignore this signal, and outline is recomputed in onAttachedToWindow()
+        if (mAttachInfo == null) return;
+
+        if (mOutlineProvider == null) {
+            // no provider, remove outline
+            mRenderNode.setOutline(null);
+        } else {
+            final Outline outline = mAttachInfo.mTmpOutline;
+            outline.setEmpty();
+            outline.setAlpha(1.0f);
+
+            mOutlineProvider.getOutline(this, outline);
+            mRenderNode.setOutline(outline);
+        }
+    }
+
+    /**
+     * HierarchyViewer only
+     *
+     * @hide
+     */
+    @ViewDebug.ExportedProperty(category = "drawing")
+    public boolean hasShadow() {
+        return mRenderNode.hasShadow();
+    }
+
+
+    /** @hide */
+    public void setRevealClip(boolean shouldClip, float x, float y, float radius) {
+        mRenderNode.setRevealClip(shouldClip, x, y, radius);
+        invalidateViewProperty(false, false);
     }
 
     /**
@@ -9689,15 +11252,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param outRect The hit rectangle of the view.
      */
     public void getHitRect(Rect outRect) {
-        updateMatrix();
-        final TransformationInfo info = mTransformationInfo;
-        if (info == null || info.mMatrixIsIdentity || mAttachInfo == null) {
+        if (hasIdentityMatrix() || mAttachInfo == null) {
             outRect.set(mLeft, mTop, mRight, mBottom);
         } else {
             final RectF tmpRect = mAttachInfo.mTmpTransformRect;
-            tmpRect.set(-info.mPivotX, -info.mPivotY,
-                    getWidth() - info.mPivotX, getHeight() - info.mPivotY);
-            info.mMatrix.mapRect(tmpRect);
+            tmpRect.set(0, 0, getWidth(), getHeight());
+            getMatrix().mapRect(tmpRect); // TODO: mRenderNode.mapRect(tmpRect)
             outRect.set((int) tmpRect.left + mLeft, (int) tmpRect.top + mTop,
                     (int) tmpRect.right + mLeft, (int) tmpRect.bottom + mTop);
         }
@@ -9716,8 +11276,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * is inside the view, where the area of the view is expanded by the slop factor.
      * This method is called while processing touch-move events to determine if the event
      * is still within the view.
+     *
+     * @hide
      */
-    private boolean pointInView(float localX, float localY, float slop) {
+    public boolean pointInView(float localX, float localY, float slop) {
         return localX >= -slop && localY >= -slop && localX < ((mRight - mLeft) + slop) &&
                 localY < ((mBottom - mTop) + slop);
     }
@@ -9726,7 +11288,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * When a view has focus and the user navigates away from it, the next view is searched for
      * starting from the rectangle filled in by this method.
      *
-     * By default, the rectange is the {@link #getDrawingRect(android.graphics.Rect)})
+     * By default, the rectangle is the {@link #getDrawingRect(android.graphics.Rect)})
      * of the view.  However, if your view maintains some idea of internal selection,
      * such as a cursor, or a selected row or column, you should override this method and
      * fill in a more specific rectangle.
@@ -9784,11 +11346,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void offsetTopAndBottom(int offset) {
         if (offset != 0) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
-                if (mDisplayList != null) {
+                if (isHardwareAccelerated()) {
                     invalidateViewProperty(false, false);
                 } else {
                     final ViewParent p = mParent;
@@ -9816,8 +11376,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
             mTop += offset;
             mBottom += offset;
-            if (mDisplayList != null) {
-                mDisplayList.offsetTopBottom(offset);
+            mRenderNode.offsetTopAndBottom(offset);
+            if (isHardwareAccelerated()) {
                 invalidateViewProperty(false, false);
             } else {
                 if (!matrixIsIdentity) {
@@ -9825,21 +11385,20 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
     /**
      * Offset this view's horizontal location by the specified amount of pixels.
      *
-     * @param offset the numer of pixels to offset the view by
+     * @param offset the number of pixels to offset the view by
      */
     public void offsetLeftAndRight(int offset) {
         if (offset != 0) {
-            updateMatrix();
-            final boolean matrixIsIdentity = mTransformationInfo == null
-                    || mTransformationInfo.mMatrixIsIdentity;
+            final boolean matrixIsIdentity = hasIdentityMatrix();
             if (matrixIsIdentity) {
-                if (mDisplayList != null) {
+                if (isHardwareAccelerated()) {
                     invalidateViewProperty(false, false);
                 } else {
                     final ViewParent p = mParent;
@@ -9864,8 +11423,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
             mLeft += offset;
             mRight += offset;
-            if (mDisplayList != null) {
-                mDisplayList.offsetLeftRight(offset);
+            mRenderNode.offsetLeftAndRight(offset);
+            if (isHardwareAccelerated()) {
                 invalidateViewProperty(false, false);
             } else {
                 if (!matrixIsIdentity) {
@@ -9873,6 +11432,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9910,10 +11470,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             throw new NullPointerException("Layout parameters cannot be null");
         }
         mLayoutParams = params;
+        resolveLayoutParams();
         if (mParent instanceof ViewGroup) {
             ((ViewGroup) mParent).onSetLayoutParams(this, params);
         }
         requestLayout();
+    }
+
+    /**
+     * Resolve the layout parameters depending on the resolved layout direction
+     *
+     * @hide
+     */
+    public void resolveLayoutParams() {
+        if (mLayoutParams != null) {
+            mLayoutParams.resolveLayoutDirection(getLayoutDirection());
+        }
     }
 
     /**
@@ -10124,94 +11696,54 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 (!(mParent instanceof ViewGroup) ||
                         !((ViewGroup) mParent).isViewTransitioning(this));
     }
+
     /**
      * Mark the area defined by dirty as needing to be drawn. If the view is
-     * visible, {@link #onDraw(android.graphics.Canvas)} will be called at some point
-     * in the future. This must be called from a UI thread. To call from a non-UI
-     * thread, call {@link #postInvalidate()}.
+     * visible, {@link #onDraw(android.graphics.Canvas)} will be called at some
+     * point in the future.
+     * <p>
+     * This must be called from a UI thread. To call from a non-UI thread, call
+     * {@link #postInvalidate()}.
+     * <p>
+     * <b>WARNING:</b> In API 19 and below, this method may be destructive to
+     * {@code dirty}.
      *
-     * WARNING: This method is destructive to dirty.
      * @param dirty the rectangle representing the bounds of the dirty region
      */
     public void invalidate(Rect dirty) {
-        if (skipInvalidate()) {
-            return;
-        }
-        if ((mPrivateFlags & (DRAWN | HAS_BOUNDS)) == (DRAWN | HAS_BOUNDS) ||
-                (mPrivateFlags & DRAWING_CACHE_VALID) == DRAWING_CACHE_VALID ||
-                (mPrivateFlags & INVALIDATED) != INVALIDATED) {
-            mPrivateFlags &= ~DRAWING_CACHE_VALID;
-            mPrivateFlags |= INVALIDATED;
-            mPrivateFlags |= DIRTY;
-            final ViewParent p = mParent;
-            final AttachInfo ai = mAttachInfo;
-            //noinspection PointlessBooleanExpression,ConstantConditions
-            if (!HardwareRenderer.RENDER_DIRTY_REGIONS) {
-                if (p != null && ai != null && ai.mHardwareAccelerated) {
-                    // fast-track for GL-enabled applications; just invalidate the whole hierarchy
-                    // with a null dirty rect, which tells the ViewAncestor to redraw everything
-                    p.invalidateChild(this, null);
-                    return;
-                }
-            }
-            if (p != null && ai != null) {
-                final int scrollX = mScrollX;
-                final int scrollY = mScrollY;
-                final Rect r = ai.mTmpInvalRect;
-                r.set(dirty.left - scrollX, dirty.top - scrollY,
-                        dirty.right - scrollX, dirty.bottom - scrollY);
-                mParent.invalidateChild(this, r);
-            }
-        }
+        final int scrollX = mScrollX;
+        final int scrollY = mScrollY;
+        invalidateInternal(dirty.left - scrollX, dirty.top - scrollY,
+                dirty.right - scrollX, dirty.bottom - scrollY, true, false);
     }
 
     /**
-     * Mark the area defined by the rect (l,t,r,b) as needing to be drawn.
-     * The coordinates of the dirty rect are relative to the view.
-     * If the view is visible, {@link #onDraw(android.graphics.Canvas)}
-     * will be called at some point in the future. This must be called from
-     * a UI thread. To call from a non-UI thread, call {@link #postInvalidate()}.
+     * Mark the area defined by the rect (l,t,r,b) as needing to be drawn. The
+     * coordinates of the dirty rect are relative to the view. If the view is
+     * visible, {@link #onDraw(android.graphics.Canvas)} will be called at some
+     * point in the future.
+     * <p>
+     * This must be called from a UI thread. To call from a non-UI thread, call
+     * {@link #postInvalidate()}.
+     *
      * @param l the left position of the dirty region
      * @param t the top position of the dirty region
      * @param r the right position of the dirty region
      * @param b the bottom position of the dirty region
      */
     public void invalidate(int l, int t, int r, int b) {
-        if (skipInvalidate()) {
-            return;
-        }
-        if ((mPrivateFlags & (DRAWN | HAS_BOUNDS)) == (DRAWN | HAS_BOUNDS) ||
-                (mPrivateFlags & DRAWING_CACHE_VALID) == DRAWING_CACHE_VALID ||
-                (mPrivateFlags & INVALIDATED) != INVALIDATED) {
-            mPrivateFlags &= ~DRAWING_CACHE_VALID;
-            mPrivateFlags |= INVALIDATED;
-            mPrivateFlags |= DIRTY;
-            final ViewParent p = mParent;
-            final AttachInfo ai = mAttachInfo;
-            //noinspection PointlessBooleanExpression,ConstantConditions
-            if (!HardwareRenderer.RENDER_DIRTY_REGIONS) {
-                if (p != null && ai != null && ai.mHardwareAccelerated) {
-                    // fast-track for GL-enabled applications; just invalidate the whole hierarchy
-                    // with a null dirty rect, which tells the ViewAncestor to redraw everything
-                    p.invalidateChild(this, null);
-                    return;
-                }
-            }
-            if (p != null && ai != null && l < r && t < b) {
-                final int scrollX = mScrollX;
-                final int scrollY = mScrollY;
-                final Rect tmpr = ai.mTmpInvalRect;
-                tmpr.set(l - scrollX, t - scrollY, r - scrollX, b - scrollY);
-                p.invalidateChild(this, tmpr);
-            }
-        }
+        final int scrollX = mScrollX;
+        final int scrollY = mScrollY;
+        invalidateInternal(l - scrollX, t - scrollY, r - scrollX, b - scrollY, true, false);
     }
 
     /**
      * Invalidate the whole view. If the view is visible,
      * {@link #onDraw(android.graphics.Canvas)} will be called at some point in
-     * the future. This must be called from a UI thread. To call from a non-UI thread,
-     * call {@link #postInvalidate()}.
+     * the future.
+     * <p>
+     * This must be called from a UI thread. To call from a non-UI thread, call
+     * {@link #postInvalidate()}.
      */
     public void invalidate() {
         invalidate(true);
@@ -10219,47 +11751,107 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * This is where the invalidate() work actually happens. A full invalidate()
-     * causes the drawing cache to be invalidated, but this function can be called with
-     * invalidateCache set to false to skip that invalidation step for cases that do not
-     * need it (for example, a component that remains at the same dimensions with the same
-     * content).
+     * causes the drawing cache to be invalidated, but this function can be
+     * called with invalidateCache set to false to skip that invalidation step
+     * for cases that do not need it (for example, a component that remains at
+     * the same dimensions with the same content).
      *
-     * @param invalidateCache Whether the drawing cache for this view should be invalidated as
-     * well. This is usually true for a full invalidate, but may be set to false if the
-     * View's contents or dimensions have not changed.
+     * @param invalidateCache Whether the drawing cache for this view should be
+     *            invalidated as well. This is usually true for a full
+     *            invalidate, but may be set to false if the View's contents or
+     *            dimensions have not changed.
      */
     void invalidate(boolean invalidateCache) {
+        invalidateInternal(0, 0, mRight - mLeft, mBottom - mTop, invalidateCache, true);
+    }
+
+    void invalidateInternal(int l, int t, int r, int b, boolean invalidateCache,
+            boolean fullInvalidate) {
+        if (mGhostView != null) {
+            mGhostView.invalidate(true);
+            return;
+        }
+
         if (skipInvalidate()) {
             return;
         }
-        if ((mPrivateFlags & (DRAWN | HAS_BOUNDS)) == (DRAWN | HAS_BOUNDS) ||
-                (invalidateCache && (mPrivateFlags & DRAWING_CACHE_VALID) == DRAWING_CACHE_VALID) ||
-                (mPrivateFlags & INVALIDATED) != INVALIDATED || isOpaque() != mLastIsOpaque) {
-            mLastIsOpaque = isOpaque();
-            mPrivateFlags &= ~DRAWN;
-            mPrivateFlags |= DIRTY;
-            if (invalidateCache) {
-                mPrivateFlags |= INVALIDATED;
-                mPrivateFlags &= ~DRAWING_CACHE_VALID;
+
+        if ((mPrivateFlags & (PFLAG_DRAWN | PFLAG_HAS_BOUNDS)) == (PFLAG_DRAWN | PFLAG_HAS_BOUNDS)
+                || (invalidateCache && (mPrivateFlags & PFLAG_DRAWING_CACHE_VALID) == PFLAG_DRAWING_CACHE_VALID)
+                || (mPrivateFlags & PFLAG_INVALIDATED) != PFLAG_INVALIDATED
+                || (fullInvalidate && isOpaque() != mLastIsOpaque)) {
+            if (fullInvalidate) {
+                mLastIsOpaque = isOpaque();
+                mPrivateFlags &= ~PFLAG_DRAWN;
             }
+
+            mPrivateFlags |= PFLAG_DIRTY;
+
+            if (invalidateCache) {
+                mPrivateFlags |= PFLAG_INVALIDATED;
+                mPrivateFlags &= ~PFLAG_DRAWING_CACHE_VALID;
+            }
+
+            // Propagate the damage rectangle to the parent view.
             final AttachInfo ai = mAttachInfo;
             final ViewParent p = mParent;
-            //noinspection PointlessBooleanExpression,ConstantConditions
-            if (!HardwareRenderer.RENDER_DIRTY_REGIONS) {
-                if (p != null && ai != null && ai.mHardwareAccelerated) {
-                    // fast-track for GL-enabled applications; just invalidate the whole hierarchy
-                    // with a null dirty rect, which tells the ViewAncestor to redraw everything
-                    p.invalidateChild(this, null);
-                    return;
+            if (p != null && ai != null && l < r && t < b) {
+                final Rect damage = ai.mTmpInvalRect;
+                damage.set(l, t, r, b);
+                p.invalidateChild(this, damage);
+            }
+
+            // Damage the entire projection receiver, if necessary.
+            if (mBackground != null && mBackground.isProjected()) {
+                final View receiver = getProjectionReceiver();
+                if (receiver != null) {
+                    receiver.damageInParent();
                 }
             }
 
-            if (p != null && ai != null) {
-                final Rect r = ai.mTmpInvalRect;
-                r.set(0, 0, mRight - mLeft, mBottom - mTop);
-                // Don't call invalidate -- we don't want to internally scroll
-                // our own bounds
-                p.invalidateChild(this, r);
+            // Damage the entire IsolatedZVolume receiving this view's shadow.
+            if (isHardwareAccelerated() && getZ() != 0) {
+                damageShadowReceiver();
+            }
+        }
+    }
+
+    /**
+     * @return this view's projection receiver, or {@code null} if none exists
+     */
+    private View getProjectionReceiver() {
+        ViewParent p = getParent();
+        while (p != null && p instanceof View) {
+            final View v = (View) p;
+            if (v.isProjectionReceiver()) {
+                return v;
+            }
+            p = p.getParent();
+        }
+
+        return null;
+    }
+
+    /**
+     * @return whether the view is a projection receiver
+     */
+    private boolean isProjectionReceiver() {
+        return mBackground != null;
+    }
+
+    /**
+     * Damage area of the screen that can be covered by this View's shadow.
+     *
+     * This method will guarantee that any changes to shadows cast by a View
+     * are damaged on the screen for future redraw.
+     */
+    private void damageShadowReceiver() {
+        final AttachInfo ai = mAttachInfo;
+        if (ai != null) {
+            ViewParent p = getParent();
+            if (p != null && p instanceof ViewGroup) {
+                final ViewGroup vg = (ViewGroup) p;
+                vg.damageInParent();
             }
         }
     }
@@ -10281,25 +11873,39 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * list properties are not being used in this view
      */
     void invalidateViewProperty(boolean invalidateParent, boolean forceRedraw) {
-        if (mDisplayList == null || (mPrivateFlags & DRAW_ANIMATION) == DRAW_ANIMATION) {
+        if (!isHardwareAccelerated()
+                || !mRenderNode.isValid()
+                || (mPrivateFlags & PFLAG_DRAW_ANIMATION) != 0) {
             if (invalidateParent) {
                 invalidateParentCaches();
             }
             if (forceRedraw) {
-                mPrivateFlags |= DRAWN; // force another invalidation with the new orientation
+                mPrivateFlags |= PFLAG_DRAWN; // force another invalidation with the new orientation
             }
             invalidate(false);
         } else {
-            final AttachInfo ai = mAttachInfo;
-            final ViewParent p = mParent;
-            if (p != null && ai != null) {
-                final Rect r = ai.mTmpInvalRect;
-                r.set(0, 0, mRight - mLeft, mBottom - mTop);
-                if (mParent instanceof ViewGroup) {
-                    ((ViewGroup) mParent).invalidateChildFast(this, r);
-                } else {
-                    mParent.invalidateChild(this, r);
-                }
+            damageInParent();
+        }
+        if (isHardwareAccelerated() && invalidateParent && getZ() != 0) {
+            damageShadowReceiver();
+        }
+    }
+
+    /**
+     * Tells the parent view to damage this view's bounds.
+     *
+     * @hide
+     */
+    protected void damageInParent() {
+        final AttachInfo ai = mAttachInfo;
+        final ViewParent p = mParent;
+        if (p != null && ai != null) {
+            final Rect r = ai.mTmpInvalRect;
+            r.set(0, 0, mRight - mLeft, mBottom - mTop);
+            if (mParent instanceof ViewGroup) {
+                ((ViewGroup) mParent).damageChild(this, r);
+            } else {
+                mParent.invalidateChild(this, r);
             }
         }
     }
@@ -10312,10 +11918,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             RectF boundingRect = mAttachInfo.mTmpTransformRect;
             boundingRect.set(rect);
             getMatrix().mapRect(boundingRect);
-            rect.set((int) (boundingRect.left - 0.5f),
-                    (int) (boundingRect.top - 0.5f),
-                    (int) (boundingRect.right + 0.5f),
-                    (int) (boundingRect.bottom + 0.5f));
+            rect.set((int) Math.floor(boundingRect.left),
+                    (int) Math.floor(boundingRect.top),
+                    (int) Math.ceil(boundingRect.right),
+                    (int) Math.ceil(boundingRect.bottom));
         }
     }
 
@@ -10330,7 +11936,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     protected void invalidateParentCaches() {
         if (mParent instanceof View) {
-            ((View) mParent).mPrivateFlags |= INVALIDATED;
+            ((View) mParent).mPrivateFlags |= PFLAG_INVALIDATED;
         }
     }
 
@@ -10350,6 +11956,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * @hide
+     */
+    protected void invalidateParentIfNeededAndWasQuickRejected() {
+        if ((mPrivateFlags2 & PFLAG2_VIEW_QUICK_REJECTED) != 0) {
+            // View was rejected last time it was drawn by its parent; this may have changed
+            invalidateParentIfNeeded();
+        }
+    }
+
+    /**
      * Indicates whether this View is opaque. An opaque View guarantees that it will
      * draw all the pixels overlapping its bounds using a fully opaque color.
      *
@@ -10362,9 +11978,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty(category = "drawing")
     public boolean isOpaque() {
-        return (mPrivateFlags & OPAQUE_MASK) == OPAQUE_MASK &&
-                ((mTransformationInfo != null ? mTransformationInfo.mAlpha : 1)
-                        >= 1.0f - ViewConfiguration.ALPHA_THRESHOLD);
+        return (mPrivateFlags & PFLAG_OPAQUE_MASK) == PFLAG_OPAQUE_MASK &&
+                getFinalAlpha() >= 1.0f;
     }
 
     /**
@@ -10374,20 +11989,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         // Opaque if:
         //   - Has a background
         //   - Background is opaque
-        //   - Doesn't have scrollbars or scrollbars are inside overlay
+        //   - Doesn't have scrollbars or scrollbars overlay
 
         if (mBackground != null && mBackground.getOpacity() == PixelFormat.OPAQUE) {
-            mPrivateFlags |= OPAQUE_BACKGROUND;
+            mPrivateFlags |= PFLAG_OPAQUE_BACKGROUND;
         } else {
-            mPrivateFlags &= ~OPAQUE_BACKGROUND;
+            mPrivateFlags &= ~PFLAG_OPAQUE_BACKGROUND;
         }
 
         final int flags = mViewFlags;
         if (((flags & SCROLLBARS_VERTICAL) == 0 && (flags & SCROLLBARS_HORIZONTAL) == 0) ||
-                (flags & SCROLLBARS_STYLE_MASK) == SCROLLBARS_INSIDE_OVERLAY) {
-            mPrivateFlags |= OPAQUE_SCROLLBARS;
+                (flags & SCROLLBARS_STYLE_MASK) == SCROLLBARS_INSIDE_OVERLAY ||
+                (flags & SCROLLBARS_STYLE_MASK) == SCROLLBARS_OUTSIDE_OVERLAY) {
+            mPrivateFlags |= PFLAG_OPAQUE_SCROLLBARS;
         } else {
-            mPrivateFlags &= ~OPAQUE_SCROLLBARS;
+            mPrivateFlags &= ~PFLAG_OPAQUE_SCROLLBARS;
         }
     }
 
@@ -10395,7 +12011,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     protected boolean hasOpaqueScrollbars() {
-        return (mPrivateFlags & OPAQUE_SCROLLBARS) == OPAQUE_SCROLLBARS;
+        return (mPrivateFlags & PFLAG_OPAQUE_SCROLLBARS) == PFLAG_OPAQUE_SCROLLBARS;
     }
 
     /**
@@ -10403,8 +12019,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * handler can be used to pump events in the UI events queue.
      */
     public Handler getHandler() {
-        if (mAttachInfo != null) {
-            return mAttachInfo.mHandler;
+        final AttachInfo attachInfo = mAttachInfo;
+        if (attachInfo != null) {
+            return attachInfo.mHandler;
         }
         return null;
     }
@@ -10422,11 +12039,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * @hide
+     */
+    public HardwareRenderer getHardwareRenderer() {
+        return mAttachInfo != null ? mAttachInfo.mHardwareRenderer : null;
+    }
+
+    /**
      * <p>Causes the Runnable to be added to the message queue.
      * The runnable will be run on the user interface thread.</p>
-     *
-     * <p>This method can be invoked from outside of the UI thread
-     * only when this View is attached to a window.</p>
      *
      * @param action The Runnable that will be executed.
      *
@@ -10451,9 +12072,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * <p>Causes the Runnable to be added to the message queue, to be run
      * after the specified amount of time elapses.
      * The runnable will be run on the user interface thread.</p>
-     *
-     * <p>This method can be invoked from outside of the UI thread
-     * only when this View is attached to a window.</p>
      *
      * @param action The Runnable that will be executed.
      * @param delayMillis The delay (in milliseconds) until the Runnable
@@ -10483,9 +12101,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * <p>Causes the Runnable to execute on the next animation time step.
      * The runnable will be run on the user interface thread.</p>
      *
-     * <p>This method can be invoked from outside of the UI thread
-     * only when this View is attached to a window.</p>
-     *
      * @param action The Runnable that will be executed.
      *
      * @see #postOnAnimationDelayed
@@ -10506,9 +12121,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * <p>Causes the Runnable to execute on the next animation time step,
      * after the specified amount of time elapses.
      * The runnable will be run on the user interface thread.</p>
-     *
-     * <p>This method can be invoked from outside of the UI thread
-     * only when this View is attached to a window.</p>
      *
      * @param action The Runnable that will be executed.
      * @param delayMillis The delay (in milliseconds) until the Runnable
@@ -10531,9 +12143,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * <p>Removes the specified Runnable from the message queue.</p>
      *
-     * <p>This method can be invoked from outside of the UI thread
-     * only when this View is attached to a window.</p>
-     *
      * @param action The Runnable to remove from the message handling queue
      *
      * @return true if this view could ask the Handler to remove the Runnable,
@@ -10553,10 +12162,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 attachInfo.mHandler.removeCallbacks(action);
                 attachInfo.mViewRootImpl.mChoreographer.removeCallbacks(
                         Choreographer.CALLBACK_ANIMATION, action, null);
-            } else {
-                // Assume that post will succeed later
-                ViewRootImpl.getRunQueue().removeCallbacks(action);
             }
+            // Assume that post will succeed later
+            ViewRootImpl.getRunQueue().removeCallbacks(action);
         }
         return true;
     }
@@ -10642,7 +12250,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         // if we are not attached to our window
         final AttachInfo attachInfo = mAttachInfo;
         if (attachInfo != null) {
-            final AttachInfo.InvalidateInfo info = AttachInfo.InvalidateInfo.acquire();
+            final AttachInfo.InvalidateInfo info = AttachInfo.InvalidateInfo.obtain();
             info.target = this;
             info.left = left;
             info.top = top;
@@ -10691,7 +12299,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         // if we are not attached to our window
         final AttachInfo attachInfo = mAttachInfo;
         if (attachInfo != null) {
-            final AttachInfo.InvalidateInfo info = AttachInfo.InvalidateInfo.acquire();
+            final AttachInfo.InvalidateInfo info = AttachInfo.InvalidateInfo.obtain();
             info.target = this;
             info.left = left;
             info.top = top;
@@ -10923,7 +12531,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     protected void recomputePadding() {
-        setPadding(mUserPaddingLeft, mPaddingTop, mUserPaddingRight, mUserPaddingBottom);
+        internalSetPadding(mUserPaddingLeft, mPaddingTop, mUserPaddingRight, mUserPaddingBottom);
     }
 
     /**
@@ -11047,7 +12655,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @attr ref android.R.styleable#View_scrollbarStyle
      */
-    public void setScrollBarStyle(int style) {
+    public void setScrollBarStyle(@ScrollBarStyle int style) {
         if (style != (mViewFlags & SCROLLBARS_STYLE_MASK)) {
             mViewFlags = (mViewFlags & ~SCROLLBARS_STYLE_MASK) | (style & SCROLLBARS_STYLE_MASK);
             computeOpaqueFlags();
@@ -11071,6 +12679,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             @ViewDebug.IntToString(from = SCROLLBARS_OUTSIDE_OVERLAY, to = "OUTSIDE_OVERLAY"),
             @ViewDebug.IntToString(from = SCROLLBARS_OUTSIDE_INSET, to = "OUTSIDE_INSET")
     })
+    @ScrollBarStyle
     public int getScrollBarStyle() {
         return mViewFlags & SCROLLBARS_STYLE_MASK;
     }
@@ -11179,7 +12788,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * <p>Compute the vertical extent of the horizontal scrollbar's thumb
+     * <p>Compute the vertical extent of the vertical scrollbar's thumb
      * within the vertical range. This value is used to compute the length
      * of the thumb within the scrollbar's track.</p>
      *
@@ -11267,7 +12876,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                         Interpolator.Result.FREEZE_END) {
                     cache.state = ScrollabilityCache.OFF;
                 } else {
-                    cache.scrollBar.setAlpha(Math.round(values[0]));
+                    cache.scrollBar.mutate().setAlpha(Math.round(values[0]));
                 }
 
                 // This will make the scroll bars inval themselves after
@@ -11277,7 +12886,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             } else {
                 // We're just on -- but we may have been fading before so
                 // reset alpha
-                cache.scrollBar.setAlpha(255);
+                cache.scrollBar.mutate().setAlpha(255);
             }
 
 
@@ -11299,7 +12908,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 final int scrollY = mScrollY;
                 final int inside = (viewFlags & SCROLLBARS_OUTSIDE_MASK) == 0 ? ~0 : 0;
 
-                int left, top, right, bottom;
+                int left;
+                int top;
+                int right;
+                int bottom;
 
                 if (drawHorizontalScrollBar) {
                     int size = scrollBar.getSize(false);
@@ -11331,9 +12943,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     scrollBar.setParameters(computeVerticalScrollRange(),
                                             computeVerticalScrollOffset(),
                                             computeVerticalScrollExtent(), true);
-                    switch (mVerticalScrollbarPosition) {
+                    int verticalScrollbarPosition = mVerticalScrollbarPosition;
+                    if (verticalScrollbarPosition == SCROLLBAR_POSITION_DEFAULT) {
+                        verticalScrollbarPosition = isLayoutRtl() ?
+                                SCROLLBAR_POSITION_LEFT : SCROLLBAR_POSITION_RIGHT;
+                    }
+                    switch (verticalScrollbarPosition) {
                         default:
-                        case SCROLLBAR_POSITION_DEFAULT:
                         case SCROLLBAR_POSITION_RIGHT:
                             left = scrollX + width - size - (mUserPaddingRight & inside);
                             break;
@@ -11436,33 +13052,75 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #onDetachedFromWindow()
      */
     protected void onAttachedToWindow() {
-        if ((mPrivateFlags & REQUEST_TRANSPARENT_REGIONS) != 0) {
+        if ((mPrivateFlags & PFLAG_REQUEST_TRANSPARENT_REGIONS) != 0) {
             mParent.requestTransparentRegion(this);
         }
 
-        if ((mPrivateFlags & AWAKEN_SCROLL_BARS_ON_ATTACH) != 0) {
+        if ((mPrivateFlags & PFLAG_AWAKEN_SCROLL_BARS_ON_ATTACH) != 0) {
             initialAwakenScrollBars();
-            mPrivateFlags &= ~AWAKEN_SCROLL_BARS_ON_ATTACH;
+            mPrivateFlags &= ~PFLAG_AWAKEN_SCROLL_BARS_ON_ATTACH;
         }
+
+        mPrivateFlags3 &= ~PFLAG3_IS_LAID_OUT;
 
         jumpDrawablesToCurrentState();
 
-        // Order is important here: LayoutDirection MUST be resolved before Padding
-        // and TextDirection
-        resolveLayoutDirection();
-        resolvePadding();
-        resolveTextDirection();
-        resolveTextAlignment();
+        resetSubtreeAccessibilityStateChanged();
 
-        clearAccessibilityFocus();
+        // rebuild, since Outline not maintained while View is detached
+        rebuildOutline();
+
         if (isFocused()) {
             InputMethodManager imm = InputMethodManager.peekInstance();
             imm.focusIn(this);
         }
+    }
 
-        if (mAttachInfo != null && mDisplayList != null) {
-            mAttachInfo.mViewRootImpl.dequeueDisplayList(mDisplayList);
+    /**
+     * Resolve all RTL related properties.
+     *
+     * @return true if resolution of RTL properties has been done
+     *
+     * @hide
+     */
+    public boolean resolveRtlPropertiesIfNeeded() {
+        if (!needRtlPropertiesResolution()) return false;
+
+        // Order is important here: LayoutDirection MUST be resolved first
+        if (!isLayoutDirectionResolved()) {
+            resolveLayoutDirection();
+            resolveLayoutParams();
         }
+        // ... then we can resolve the others properties depending on the resolved LayoutDirection.
+        if (!isTextDirectionResolved()) {
+            resolveTextDirection();
+        }
+        if (!isTextAlignmentResolved()) {
+            resolveTextAlignment();
+        }
+        // Should resolve Drawables before Padding because we need the layout direction of the
+        // Drawable to correctly resolve Padding.
+        if (!areDrawablesResolved()) {
+            resolveDrawables();
+        }
+        if (!isPaddingResolved()) {
+            resolvePadding();
+        }
+        onRtlPropertiesChanged(getLayoutDirection());
+        return true;
+    }
+
+    /**
+     * Reset resolution of all RTL related properties.
+     *
+     * @hide
+     */
+    public void resetRtlProperties() {
+        resetResolvedLayoutDirection();
+        resetResolvedTextDirection();
+        resetResolvedTextAlignment();
+        resetResolvedPadding();
+        resetResolvedDrawables();
     }
 
     /**
@@ -11492,36 +13150,79 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Return true if we are in RTL compatibility mode (either before Jelly Bean MR1 or
+     * RTL not supported)
+     */
+    private boolean isRtlCompatibilityMode() {
+        final int targetSdkVersion = getContext().getApplicationInfo().targetSdkVersion;
+        return targetSdkVersion < JELLY_BEAN_MR1 || !hasRtlSupport();
+    }
+
+    /**
+     * @return true if RTL properties need resolution.
+     *
+     */
+    private boolean needRtlPropertiesResolution() {
+        return (mPrivateFlags2 & ALL_RTL_PROPERTIES_RESOLVED) != ALL_RTL_PROPERTIES_RESOLVED;
+    }
+
+    /**
+     * Called when any RTL property (layout direction or text direction or text alignment) has
+     * been changed.
+     *
+     * Subclasses need to override this method to take care of cached information that depends on the
+     * resolved layout direction, or to inform child views that inherit their layout direction.
+     *
+     * The default implementation does nothing.
+     *
+     * @param layoutDirection the direction of the layout
+     *
+     * @see #LAYOUT_DIRECTION_LTR
+     * @see #LAYOUT_DIRECTION_RTL
+     */
+    public void onRtlPropertiesChanged(@ResolvedLayoutDir int layoutDirection) {
+    }
+
+    /**
      * Resolve and cache the layout direction. LTR is set initially. This is implicitly supposing
      * that the parent directionality can and will be resolved before its children.
-     * Will call {@link View#onResolvedLayoutDirectionChanged} when resolution is done.
+     *
+     * @return true if resolution has been done, false otherwise.
+     *
      * @hide
      */
-    public void resolveLayoutDirection() {
+    public boolean resolveLayoutDirection() {
         // Clear any previous layout direction resolution
-        mPrivateFlags2 &= ~LAYOUT_DIRECTION_RESOLVED_MASK;
+        mPrivateFlags2 &= ~PFLAG2_LAYOUT_DIRECTION_RESOLVED_MASK;
 
         if (hasRtlSupport()) {
             // Set resolved depending on layout direction
-            switch (getLayoutDirection()) {
+            switch ((mPrivateFlags2 & PFLAG2_LAYOUT_DIRECTION_MASK) >>
+                    PFLAG2_LAYOUT_DIRECTION_MASK_SHIFT) {
                 case LAYOUT_DIRECTION_INHERIT:
-                    // If this is root view, no need to look at parent's layout dir.
-                    if (canResolveLayoutDirection()) {
-                        ViewGroup viewGroup = ((ViewGroup) mParent);
+                    // We cannot resolve yet. LTR is by default and let the resolution happen again
+                    // later to get the correct resolved value
+                    if (!canResolveLayoutDirection()) return false;
 
-                        if (viewGroup.getResolvedLayoutDirection() == LAYOUT_DIRECTION_RTL) {
-                            mPrivateFlags2 |= LAYOUT_DIRECTION_RESOLVED_RTL;
+                    // Parent has not yet resolved, LTR is still the default
+                    try {
+                        if (!mParent.isLayoutDirectionResolved()) return false;
+
+                        if (mParent.getLayoutDirection() == LAYOUT_DIRECTION_RTL) {
+                            mPrivateFlags2 |= PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL;
                         }
-                    } else {
-                        // Nothing to do, LTR by default
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
                     }
                     break;
                 case LAYOUT_DIRECTION_RTL:
-                    mPrivateFlags2 |= LAYOUT_DIRECTION_RESOLVED_RTL;
+                    mPrivateFlags2 |= PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL;
                     break;
                 case LAYOUT_DIRECTION_LOCALE:
-                    if(isLayoutDirectionRtl(Locale.getDefault())) {
-                        mPrivateFlags2 |= LAYOUT_DIRECTION_RESOLVED_RTL;
+                    if((LAYOUT_DIRECTION_RTL ==
+                            TextUtils.getLayoutDirectionFromLocale(Locale.getDefault()))) {
+                        mPrivateFlags2 |= PFLAG2_LAYOUT_DIRECTION_RESOLVED_RTL;
                     }
                     break;
                 default:
@@ -11530,137 +13231,148 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         // Set to resolved
-        mPrivateFlags2 |= LAYOUT_DIRECTION_RESOLVED;
-        onResolvedLayoutDirectionChanged();
-        // Resolve padding
-        resolvePadding();
-    }
-
-    /**
-     * Called when layout direction has been resolved.
-     *
-     * The default implementation does nothing.
-     * @hide
-     */
-    public void onResolvedLayoutDirectionChanged() {
-    }
-
-    /**
-     * Resolve padding depending on layout direction.
-     * @hide
-     */
-    public void resolvePadding() {
-        // If the user specified the absolute padding (either with android:padding or
-        // android:paddingLeft/Top/Right/Bottom), use this padding, otherwise
-        // use the default padding or the padding from the background drawable
-        // (stored at this point in mPadding*)
-        int resolvedLayoutDirection = getResolvedLayoutDirection();
-        switch (resolvedLayoutDirection) {
-            case LAYOUT_DIRECTION_RTL:
-                // Start user padding override Right user padding. Otherwise, if Right user
-                // padding is not defined, use the default Right padding. If Right user padding
-                // is defined, just use it.
-                if (mUserPaddingStart >= 0) {
-                    mUserPaddingRight = mUserPaddingStart;
-                } else if (mUserPaddingRight < 0) {
-                    mUserPaddingRight = mPaddingRight;
-                }
-                if (mUserPaddingEnd >= 0) {
-                    mUserPaddingLeft = mUserPaddingEnd;
-                } else if (mUserPaddingLeft < 0) {
-                    mUserPaddingLeft = mPaddingLeft;
-                }
-                break;
-            case LAYOUT_DIRECTION_LTR:
-            default:
-                // Start user padding override Left user padding. Otherwise, if Left user
-                // padding is not defined, use the default left padding. If Left user padding
-                // is defined, just use it.
-                if (mUserPaddingStart >= 0) {
-                    mUserPaddingLeft = mUserPaddingStart;
-                } else if (mUserPaddingLeft < 0) {
-                    mUserPaddingLeft = mPaddingLeft;
-                }
-                if (mUserPaddingEnd >= 0) {
-                    mUserPaddingRight = mUserPaddingEnd;
-                } else if (mUserPaddingRight < 0) {
-                    mUserPaddingRight = mPaddingRight;
-                }
-        }
-
-        mUserPaddingBottom = (mUserPaddingBottom >= 0) ? mUserPaddingBottom : mPaddingBottom;
-
-        if(isPaddingRelative()) {
-            setPaddingRelative(mUserPaddingStart, mPaddingTop, mUserPaddingEnd, mUserPaddingBottom);
-        } else {
-            recomputePadding();
-        }
-        onPaddingChanged(resolvedLayoutDirection);
-    }
-
-    /**
-     * Resolve padding depending on the layout direction. Subclasses that care about
-     * padding resolution should override this method. The default implementation does
-     * nothing.
-     *
-     * @param layoutDirection the direction of the layout
-     *
-     * @see {@link #LAYOUT_DIRECTION_LTR}
-     * @see {@link #LAYOUT_DIRECTION_RTL}
-     * @hide
-     */
-    public void onPaddingChanged(int layoutDirection) {
+        mPrivateFlags2 |= PFLAG2_LAYOUT_DIRECTION_RESOLVED;
+        return true;
     }
 
     /**
      * Check if layout direction resolution can be done.
      *
      * @return true if layout direction resolution can be done otherwise return false.
-     * @hide
      */
     public boolean canResolveLayoutDirection() {
-        switch (getLayoutDirection()) {
+        switch (getRawLayoutDirection()) {
             case LAYOUT_DIRECTION_INHERIT:
-                return (mParent != null) && (mParent instanceof ViewGroup);
+                if (mParent != null) {
+                    try {
+                        return mParent.canResolveLayoutDirection();
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                    }
+                }
+                return false;
+
             default:
                 return true;
         }
     }
 
     /**
-     * Reset the resolved layout direction. Will call {@link View#onResolvedLayoutDirectionReset}
-     * when reset is done.
+     * Reset the resolved layout direction. Layout direction will be resolved during a call to
+     * {@link #onMeasure(int, int)}.
+     *
      * @hide
      */
     public void resetResolvedLayoutDirection() {
         // Reset the current resolved bits
-        mPrivateFlags2 &= ~LAYOUT_DIRECTION_RESOLVED_MASK;
-        onResolvedLayoutDirectionReset();
-        // Reset also the text direction
-        resetResolvedTextDirection();
+        mPrivateFlags2 &= ~PFLAG2_LAYOUT_DIRECTION_RESOLVED_MASK;
     }
 
     /**
-     * Called during reset of resolved layout direction.
+     * @return true if the layout direction is inherited.
      *
-     * Subclasses need to override this method to clear cached information that depends on the
-     * resolved layout direction, or to inform child views that inherit their layout direction.
-     *
-     * The default implementation does nothing.
      * @hide
      */
-    public void onResolvedLayoutDirectionReset() {
+    public boolean isLayoutDirectionInherited() {
+        return (getRawLayoutDirection() == LAYOUT_DIRECTION_INHERIT);
     }
 
     /**
-     * Check if a Locale uses an RTL script.
+     * @return true if layout direction has been resolved.
+     */
+    public boolean isLayoutDirectionResolved() {
+        return (mPrivateFlags2 & PFLAG2_LAYOUT_DIRECTION_RESOLVED) == PFLAG2_LAYOUT_DIRECTION_RESOLVED;
+    }
+
+    /**
+     * Return if padding has been resolved
      *
-     * @param locale Locale to check
-     * @return true if the Locale uses an RTL script.
      * @hide
      */
-    protected static boolean isLayoutDirectionRtl(Locale locale) {
-        return (LAYOUT_DIRECTION_RTL == LocaleUtil.getLayoutDirectionFromLocale(locale));
+    boolean isPaddingResolved() {
+        return (mPrivateFlags2 & PFLAG2_PADDING_RESOLVED) == PFLAG2_PADDING_RESOLVED;
+    }
+
+    /**
+     * Resolves padding depending on layout direction, if applicable, and
+     * recomputes internal padding values to adjust for scroll bars.
+     *
+     * @hide
+     */
+    public void resolvePadding() {
+        final int resolvedLayoutDirection = getLayoutDirection();
+
+        if (!isRtlCompatibilityMode()) {
+            // Post Jelly Bean MR1 case: we need to take the resolved layout direction into account.
+            // If start / end padding are defined, they will be resolved (hence overriding) to
+            // left / right or right / left depending on the resolved layout direction.
+            // If start / end padding are not defined, use the left / right ones.
+            if (mBackground != null && (!mLeftPaddingDefined || !mRightPaddingDefined)) {
+                Rect padding = sThreadLocal.get();
+                if (padding == null) {
+                    padding = new Rect();
+                    sThreadLocal.set(padding);
+                }
+                mBackground.getPadding(padding);
+                if (!mLeftPaddingDefined) {
+                    mUserPaddingLeftInitial = padding.left;
+                }
+                if (!mRightPaddingDefined) {
+                    mUserPaddingRightInitial = padding.right;
+                }
+            }
+            switch (resolvedLayoutDirection) {
+                case LAYOUT_DIRECTION_RTL:
+                    if (mUserPaddingStart != UNDEFINED_PADDING) {
+                        mUserPaddingRight = mUserPaddingStart;
+                    } else {
+                        mUserPaddingRight = mUserPaddingRightInitial;
+                    }
+                    if (mUserPaddingEnd != UNDEFINED_PADDING) {
+                        mUserPaddingLeft = mUserPaddingEnd;
+                    } else {
+                        mUserPaddingLeft = mUserPaddingLeftInitial;
+                    }
+                    break;
+                case LAYOUT_DIRECTION_LTR:
+                default:
+                    if (mUserPaddingStart != UNDEFINED_PADDING) {
+                        mUserPaddingLeft = mUserPaddingStart;
+                    } else {
+                        mUserPaddingLeft = mUserPaddingLeftInitial;
+                    }
+                    if (mUserPaddingEnd != UNDEFINED_PADDING) {
+                        mUserPaddingRight = mUserPaddingEnd;
+                    } else {
+                        mUserPaddingRight = mUserPaddingRightInitial;
+                    }
+            }
+
+            mUserPaddingBottom = (mUserPaddingBottom >= 0) ? mUserPaddingBottom : mPaddingBottom;
+        }
+
+        internalSetPadding(mUserPaddingLeft, mPaddingTop, mUserPaddingRight, mUserPaddingBottom);
+        onRtlPropertiesChanged(resolvedLayoutDirection);
+
+        mPrivateFlags2 |= PFLAG2_PADDING_RESOLVED;
+    }
+
+    /**
+     * Reset the resolved layout direction.
+     *
+     * @hide
+     */
+    public void resetResolvedPadding() {
+        resetResolvedPaddingInternal();
+    }
+
+    /**
+     * Used when we only want to reset *this* view's padding and not trigger overrides
+     * in ViewGroup that reset children too.
+     */
+    void resetResolvedPaddingInternal() {
+        mPrivateFlags2 &= ~PFLAG2_PADDING_RESOLVED;
     }
 
     /**
@@ -11670,32 +13382,46 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #onAttachedToWindow()
      */
     protected void onDetachedFromWindow() {
-        mPrivateFlags &= ~CANCEL_NEXT_UP_EVENT;
+    }
+
+    /**
+     * This is a framework-internal mirror of onDetachedFromWindow() that's called
+     * after onDetachedFromWindow().
+     *
+     * If you override this you *MUST* call super.onDetachedFromWindowInternal()!
+     * The super method should be called at the end of the overriden method to ensure
+     * subclasses are destroyed first
+     *
+     * @hide
+     */
+    protected void onDetachedFromWindowInternal() {
+        mPrivateFlags &= ~PFLAG_CANCEL_NEXT_UP_EVENT;
+        mPrivateFlags3 &= ~PFLAG3_IS_LAID_OUT;
 
         removeUnsetPressCallback();
         removeLongPressCallback();
         removePerformClickCallback();
         removeSendViewScrolledAccessibilityEventCallback();
+        stopNestedScroll();
+
+        // Anything that started animating right before detach should already
+        // be in its final state when re-attached.
+        jumpDrawablesToCurrentState();
 
         destroyDrawingCache();
 
-        destroyLayer(false);
-
-        if (mAttachInfo != null) {
-            if (mDisplayList != null) {
-                mAttachInfo.mViewRootImpl.enqueueDisplayList(mDisplayList);
-            }
-            mAttachInfo.mViewRootImpl.cancelInvalidate(this);
-        } else {
-            // Should never happen
-            clearDisplayList();
-        }
-
+        cleanupDraw();
         mCurrentAnimation = null;
+    }
 
-        resetResolvedLayoutDirection();
-        resetResolvedTextAlignment();
-        resetAccessibilityStateChanged();
+    private void cleanupDraw() {
+        resetDisplayList();
+        if (mAttachInfo != null) {
+            mAttachInfo.mViewRootImpl.cancelInvalidate(this);
+        }
+    }
+
+    void invalidateInheritedLayoutMode(int layoutModeOfRoot) {
     }
 
     /**
@@ -11712,6 +13438,26 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public IBinder getWindowToken() {
         return mAttachInfo != null ? mAttachInfo.mWindowToken : null;
+    }
+
+    /**
+     * Retrieve the {@link WindowId} for the window this view is
+     * currently attached to.
+     */
+    public WindowId getWindowId() {
+        if (mAttachInfo == null) {
+            return null;
+        }
+        if (mAttachInfo.mWindowId == null) {
+            try {
+                mAttachInfo.mIWindowId = mAttachInfo.mSession.getWindowId(
+                        mAttachInfo.mWindowToken);
+                mAttachInfo.mWindowId = new WindowId(
+                        mAttachInfo.mIWindowId);
+            } catch (RemoteException e) {
+            }
+        }
+        return mAttachInfo.mWindowId;
     }
 
     /**
@@ -11737,6 +13483,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Gets the logical display to which the view's window has been attached.
+     *
+     * @return The logical display, or null if the view is not currently attached to a window.
+     */
+    public Display getDisplay() {
+        return mAttachInfo != null ? mAttachInfo.mDisplay : null;
+    }
+
+    /**
      * Retrieve private session object this view hierarchy is using to
      * communicate with the window manager.
      * @return the session object to communicate with the window manager
@@ -11752,16 +13507,19 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     void dispatchAttachedToWindow(AttachInfo info, int visibility) {
         //System.out.println("Attached! " + this);
         mAttachInfo = info;
+        if (mOverlay != null) {
+            mOverlay.getOverlayView().dispatchAttachedToWindow(info, visibility);
+        }
         mWindowAttachCount++;
         // We will need to evaluate the drawable state at least once.
-        mPrivateFlags |= DRAWABLE_STATE_DIRTY;
+        mPrivateFlags |= PFLAG_DRAWABLE_STATE_DIRTY;
         if (mFloatingTreeObserver != null) {
             info.mTreeObserver.merge(mFloatingTreeObserver);
             mFloatingTreeObserver = null;
         }
-        if ((mPrivateFlags&SCROLL_CONTAINER) != 0) {
+        if ((mPrivateFlags&PFLAG_SCROLL_CONTAINER) != 0) {
             mAttachInfo.mScrollContainers.add(this);
-            mPrivateFlags |= SCROLL_CONTAINER_ADDED;
+            mPrivateFlags |= PFLAG_SCROLL_CONTAINER_ADDED;
         }
         performCollectViewAttributes(mAttachInfo, visibility);
         onAttachedToWindow();
@@ -11783,10 +13541,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (vis != GONE) {
             onWindowVisibilityChanged(vis);
         }
-        if ((mPrivateFlags&DRAWABLE_STATE_DIRTY) != 0) {
+        if ((mPrivateFlags&PFLAG_DRAWABLE_STATE_DIRTY) != 0) {
             // If nobody has evaluated the drawable state yet, then do it now.
             refreshDrawableState();
         }
+        needGlobalAttributesUpdate(false);
     }
 
     void dispatchDetachedFromWindow() {
@@ -11799,6 +13558,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         onDetachedFromWindow();
+        onDetachedFromWindowInternal();
 
         ListenerInfo li = mListenerInfo;
         final CopyOnWriteArrayList<OnAttachStateChangeListener> listeners =
@@ -11813,12 +13573,70 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             }
         }
 
-        if ((mPrivateFlags & SCROLL_CONTAINER_ADDED) != 0) {
+        if ((mPrivateFlags & PFLAG_SCROLL_CONTAINER_ADDED) != 0) {
             mAttachInfo.mScrollContainers.remove(this);
-            mPrivateFlags &= ~SCROLL_CONTAINER_ADDED;
+            mPrivateFlags &= ~PFLAG_SCROLL_CONTAINER_ADDED;
         }
 
         mAttachInfo = null;
+        if (mOverlay != null) {
+            mOverlay.getOverlayView().dispatchDetachedFromWindow();
+        }
+    }
+
+    /**
+     * Cancel any deferred high-level input events that were previously posted to the event queue.
+     *
+     * <p>Many views post high-level events such as click handlers to the event queue
+     * to run deferred in order to preserve a desired user experience - clearing visible
+     * pressed states before executing, etc. This method will abort any events of this nature
+     * that are currently in flight.</p>
+     *
+     * <p>Custom views that generate their own high-level deferred input events should override
+     * {@link #onCancelPendingInputEvents()} and remove those pending events from the queue.</p>
+     *
+     * <p>This will also cancel pending input events for any child views.</p>
+     *
+     * <p>Note that this may not be sufficient as a debouncing strategy for clicks in all cases.
+     * This will not impact newer events posted after this call that may occur as a result of
+     * lower-level input events still waiting in the queue. If you are trying to prevent
+     * double-submitted  events for the duration of some sort of asynchronous transaction
+     * you should also take other steps to protect against unexpected double inputs e.g. calling
+     * {@link #setEnabled(boolean) setEnabled(false)} and re-enabling the view when
+     * the transaction completes, tracking already submitted transaction IDs, etc.</p>
+     */
+    public final void cancelPendingInputEvents() {
+        dispatchCancelPendingInputEvents();
+    }
+
+    /**
+     * Called by {@link #cancelPendingInputEvents()} to cancel input events in flight.
+     * Overridden by ViewGroup to dispatch. Package scoped to prevent app-side meddling.
+     */
+    void dispatchCancelPendingInputEvents() {
+        mPrivateFlags3 &= ~PFLAG3_CALLED_SUPER;
+        onCancelPendingInputEvents();
+        if ((mPrivateFlags3 & PFLAG3_CALLED_SUPER) != PFLAG3_CALLED_SUPER) {
+            throw new SuperNotCalledException("View " + getClass().getSimpleName() +
+                    " did not call through to super.onCancelPendingInputEvents()");
+        }
+    }
+
+    /**
+     * Called as the result of a call to {@link #cancelPendingInputEvents()} on this view or
+     * a parent view.
+     *
+     * <p>This method is responsible for removing any pending high-level input events that were
+     * posted to the event queue to run later. Custom view classes that post their own deferred
+     * high-level events via {@link #post(Runnable)}, {@link #postDelayed(Runnable, long)} or
+     * {@link android.os.Handler} should override this method, call
+     * <code>super.onCancelPendingInputEvents()</code> and remove those callbacks as appropriate.
+     * </p>
+     */
+    public void onCancelPendingInputEvents() {
+        removePerformClickCallback();
+        cancelLongPress();
+        mPrivateFlags3 |= PFLAG3_CALLED_SUPER;
     }
 
     /**
@@ -11847,9 +13665,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     protected void dispatchSaveInstanceState(SparseArray<Parcelable> container) {
         if (mID != NO_ID && (mViewFlags & SAVE_DISABLED_MASK) == 0) {
-            mPrivateFlags &= ~SAVE_STATE_CALLED;
+            mPrivateFlags &= ~PFLAG_SAVE_STATE_CALLED;
             Parcelable state = onSaveInstanceState();
-            if ((mPrivateFlags & SAVE_STATE_CALLED) == 0) {
+            if ((mPrivateFlags & PFLAG_SAVE_STATE_CALLED) == 0) {
                 throw new IllegalStateException(
                         "Derived class did not call super.onSaveInstanceState()");
             }
@@ -11883,7 +13701,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #setSaveEnabled(boolean)
      */
     protected Parcelable onSaveInstanceState() {
-        mPrivateFlags |= SAVE_STATE_CALLED;
+        mPrivateFlags |= PFLAG_SAVE_STATE_CALLED;
         return BaseSavedState.EMPTY_STATE;
     }
 
@@ -11918,9 +13736,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             if (state != null) {
                 // Log.i("View", "Restoreing #" + Integer.toHexString(mID)
                 // + ": " + state);
-                mPrivateFlags &= ~SAVE_STATE_CALLED;
+                mPrivateFlags &= ~PFLAG_SAVE_STATE_CALLED;
                 onRestoreInstanceState(state);
-                if ((mPrivateFlags & SAVE_STATE_CALLED) == 0) {
+                if ((mPrivateFlags & PFLAG_SAVE_STATE_CALLED) == 0) {
                     throw new IllegalStateException(
                             "Derived class did not call super.onRestoreInstanceState()");
                 }
@@ -11941,7 +13759,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #dispatchRestoreInstanceState(android.util.SparseArray)
      */
     protected void onRestoreInstanceState(Parcelable state) {
-        mPrivateFlags |= SAVE_STATE_CALLED;
+        mPrivateFlags |= PFLAG_SAVE_STATE_CALLED;
         if (state != BaseSavedState.EMPTY_STATE && state != null) {
             throw new IllegalArgumentException("Wrong state class, expecting View State but "
                     + "received " + state.getClass().toString() + " instead. This usually happens "
@@ -12000,8 +13818,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     /**
      * <p>Specifies the type of layer backing this view. The layer can be
-     * {@link #LAYER_TYPE_NONE disabled}, {@link #LAYER_TYPE_SOFTWARE software} or
-     * {@link #LAYER_TYPE_HARDWARE hardware}.</p>
+     * {@link #LAYER_TYPE_NONE}, {@link #LAYER_TYPE_SOFTWARE} or
+     * {@link #LAYER_TYPE_HARDWARE}.</p>
      *
      * <p>A layer is associated with an optional {@link android.graphics.Paint}
      * instance that controls how the layer is composed on screen. The following
@@ -12013,16 +13831,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * </ul>
      *
      * <p>If this view has an alpha value set to < 1.0 by calling
-     * {@link #setAlpha(float)}, the alpha value of the layer's paint is replaced by
-     * this view's alpha value. Calling {@link #setAlpha(float)} is therefore
-     * equivalent to setting a hardware layer on this view and providing a paint with
-     * the desired alpha value.<p>
+     * {@link #setAlpha(float)}, the alpha value of the layer's paint is superceded
+     * by this view's alpha value.</p>
      *
-     * <p>Refer to the documentation of {@link #LAYER_TYPE_NONE disabled},
-     * {@link #LAYER_TYPE_SOFTWARE software} and {@link #LAYER_TYPE_HARDWARE hardware}
+     * <p>Refer to the documentation of {@link #LAYER_TYPE_NONE},
+     * {@link #LAYER_TYPE_SOFTWARE} and {@link #LAYER_TYPE_HARDWARE}
      * for more information on when and how to use layers.</p>
      *
-     * @param layerType The ype of layer to use with this view, must be one of
+     * @param layerType The type of layer to use with this view, must be one of
      *        {@link #LAYER_TYPE_NONE}, {@link #LAYER_TYPE_SOFTWARE} or
      *        {@link #LAYER_TYPE_HARDWARE}
      * @param paint The paint used to compose the layer. This argument is optional
@@ -12043,34 +13859,66 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     + "LAYER_TYPE_SOFTWARE or LAYER_TYPE_HARDWARE");
         }
 
-        if (layerType == mLayerType) {
-            if (layerType != LAYER_TYPE_NONE && paint != mLayerPaint) {
-                mLayerPaint = paint == null ? new Paint() : paint;
-                invalidateParentCaches();
-                invalidate(true);
-            }
+        boolean typeChanged = mRenderNode.setLayerType(layerType);
+
+        if (!typeChanged) {
+            setLayerPaint(paint);
             return;
         }
 
         // Destroy any previous software drawing cache if needed
-        switch (mLayerType) {
-            case LAYER_TYPE_HARDWARE:
-                destroyLayer(false);
-                // fall through - non-accelerated views may use software layer mechanism instead
-            case LAYER_TYPE_SOFTWARE:
-                destroyDrawingCache();
-                break;
-            default:
-                break;
+        if (mLayerType == LAYER_TYPE_SOFTWARE) {
+            destroyDrawingCache();
         }
 
         mLayerType = layerType;
-        final boolean layerDisabled = mLayerType == LAYER_TYPE_NONE;
+        final boolean layerDisabled = (mLayerType == LAYER_TYPE_NONE);
         mLayerPaint = layerDisabled ? null : (paint == null ? new Paint() : paint);
-        mLocalDirtyRect = layerDisabled ? null : new Rect();
+        mRenderNode.setLayerPaint(mLayerPaint);
 
+        // draw() behaves differently if we are on a layer, so we need to
+        // invalidate() here
         invalidateParentCaches();
         invalidate(true);
+    }
+
+    /**
+     * Updates the {@link Paint} object used with the current layer (used only if the current
+     * layer type is not set to {@link #LAYER_TYPE_NONE}). Changed properties of the Paint
+     * provided to {@link #setLayerType(int, android.graphics.Paint)} will be used the next time
+     * the View is redrawn, but {@link #setLayerPaint(android.graphics.Paint)} must be called to
+     * ensure that the view gets redrawn immediately.
+     *
+     * <p>A layer is associated with an optional {@link android.graphics.Paint}
+     * instance that controls how the layer is composed on screen. The following
+     * properties of the paint are taken into account when composing the layer:</p>
+     * <ul>
+     * <li>{@link android.graphics.Paint#getAlpha() Translucency (alpha)}</li>
+     * <li>{@link android.graphics.Paint#getXfermode() Blending mode}</li>
+     * <li>{@link android.graphics.Paint#getColorFilter() Color filter}</li>
+     * </ul>
+     *
+     * <p>If this view has an alpha value set to < 1.0 by calling {@link #setAlpha(float)}, the
+     * alpha value of the layer's paint is superceded by this view's alpha value.</p>
+     *
+     * @param paint The paint used to compose the layer. This argument is optional
+     *        and can be null. It is ignored when the layer type is
+     *        {@link #LAYER_TYPE_NONE}
+     *
+     * @see #setLayerType(int, android.graphics.Paint)
+     */
+    public void setLayerPaint(Paint paint) {
+        int layerType = getLayerType();
+        if (layerType != LAYER_TYPE_NONE) {
+            mLayerPaint = paint == null ? new Paint() : paint;
+            if (layerType == LAYER_TYPE_HARDWARE) {
+                if (mRenderNode.setLayerPaint(mLayerPaint)) {
+                    invalidateViewProperty(false, false);
+                }
+            } else {
+                invalidate();
+            }
+        }
     }
 
     /**
@@ -12117,16 +13965,20 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public void buildLayer() {
         if (mLayerType == LAYER_TYPE_NONE) return;
 
-        if (mAttachInfo == null) {
+        final AttachInfo attachInfo = mAttachInfo;
+        if (attachInfo == null) {
             throw new IllegalStateException("This view must be attached to a window first");
+        }
+
+        if (getWidth() == 0 || getHeight() == 0) {
+            return;
         }
 
         switch (mLayerType) {
             case LAYER_TYPE_HARDWARE:
-                if (mAttachInfo.mHardwareRenderer != null &&
-                        mAttachInfo.mHardwareRenderer.isEnabled() &&
-                        mAttachInfo.mHardwareRenderer.validate()) {
-                    getHardwareLayer();
+                updateDisplayListIfDirty();
+                if (attachInfo.mHardwareRenderer != null && mRenderNode.isValid()) {
+                    attachInfo.mHardwareRenderer.buildLayer(mRenderNode);
                 }
                 break;
             case LAYER_TYPE_SOFTWARE:
@@ -12135,79 +13987,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
     }
 
-    // Make sure the HardwareRenderer.validate() was invoked before calling this method
-    void flushLayer() {
-        if (mLayerType == LAYER_TYPE_HARDWARE && mHardwareLayer != null) {
-            mHardwareLayer.flush();
-        }
-    }
-
     /**
-     * <p>Returns a hardware layer that can be used to draw this view again
-     * without executing its draw method.</p>
+     * If this View draws with a HardwareLayer, returns it.
+     * Otherwise returns null
      *
-     * @return A HardwareLayer ready to render, or null if an error occurred.
+     * TODO: Only TextureView uses this, can we eliminate it?
      */
     HardwareLayer getHardwareLayer() {
-        if (mAttachInfo == null || mAttachInfo.mHardwareRenderer == null ||
-                !mAttachInfo.mHardwareRenderer.isEnabled()) {
-            return null;
-        }
-
-        if (!mAttachInfo.mHardwareRenderer.validate()) return null;
-
-        final int width = mRight - mLeft;
-        final int height = mBottom - mTop;
-
-        if (width == 0 || height == 0) {
-            return null;
-        }
-
-        if ((mPrivateFlags & DRAWING_CACHE_VALID) == 0 || mHardwareLayer == null) {
-            if (mHardwareLayer == null) {
-                mHardwareLayer = mAttachInfo.mHardwareRenderer.createHardwareLayer(
-                        width, height, isOpaque());
-                mLocalDirtyRect.set(0, 0, width, height);
-            } else if (mHardwareLayer.getWidth() != width || mHardwareLayer.getHeight() != height) {
-                mHardwareLayer.resize(width, height);
-                mLocalDirtyRect.set(0, 0, width, height);
-            }
-
-            // The layer is not valid if the underlying GPU resources cannot be allocated
-            if (!mHardwareLayer.isValid()) {
-                return null;
-            }
-
-            mHardwareLayer.redraw(getHardwareLayerDisplayList(mHardwareLayer), mLocalDirtyRect);
-            mLocalDirtyRect.setEmpty();
-        }
-
-        return mHardwareLayer;
-    }
-
-    /**
-     * Destroys this View's hardware layer if possible.
-     *
-     * @return True if the layer was destroyed, false otherwise.
-     *
-     * @see #setLayerType(int, android.graphics.Paint)
-     * @see #LAYER_TYPE_HARDWARE
-     */
-    boolean destroyLayer(boolean valid) {
-        if (mHardwareLayer != null) {
-            AttachInfo info = mAttachInfo;
-            if (info != null && info.mHardwareRenderer != null &&
-                    info.mHardwareRenderer.isEnabled() &&
-                    (valid || info.mHardwareRenderer.validate())) {
-                mHardwareLayer.destroy();
-                mHardwareLayer = null;
-
-                invalidate(true);
-                invalidateParentCaches();
-            }
-            return true;
-        }
-        return false;
+        return null;
     }
 
     /**
@@ -12222,7 +14009,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @hide
      */
     protected void destroyHardwareResources() {
-        destroyLayer(true);
+        // Although the Layer will be destroyed by RenderNode, we want to release
+        // the staging display list, which is also a signal to RenderNode that it's
+        // safe to free its copy of the display list as it knows that we will
+        // push an updated DisplayList if we try to draw again
+        resetDisplayList();
     }
 
     /**
@@ -12278,10 +14069,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @SuppressWarnings({"UnusedDeclaration"})
     public void outputDirtyFlags(String indent, boolean clear, int clearMask) {
-        Log.d("View", indent + this + "             DIRTY(" + (mPrivateFlags & View.DIRTY_MASK) +
-                ") DRAWN(" + (mPrivateFlags & DRAWN) + ")" + " CACHE_VALID(" +
-                (mPrivateFlags & View.DRAWING_CACHE_VALID) +
-                ") INVALIDATED(" + (mPrivateFlags & INVALIDATED) + ")");
+        Log.d("View", indent + this + "             DIRTY(" + (mPrivateFlags & View.PFLAG_DIRTY_MASK) +
+                ") DRAWN(" + (mPrivateFlags & PFLAG_DRAWN) + ")" + " CACHE_VALID(" +
+                (mPrivateFlags & View.PFLAG_DRAWING_CACHE_VALID) +
+                ") INVALIDATED(" + (mPrivateFlags & PFLAG_INVALIDATED) + ")");
         if (clear) {
             mPrivateFlags &= clearMask;
         }
@@ -12317,159 +14108,95 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         return !(mAttachInfo == null || mAttachInfo.mHardwareRenderer == null);
     }
 
-    /**
-     * @return The HardwareRenderer associated with that view or null if hardware rendering
-     * is not supported or this this has not been attached to a window.
-     *
-     * @hide
-     */
-    public HardwareRenderer getHardwareRenderer() {
-        if (mAttachInfo != null) {
-            return mAttachInfo.mHardwareRenderer;
-        }
-        return null;
-    }
-
-    /**
-     * Returns a DisplayList. If the incoming displayList is null, one will be created.
-     * Otherwise, the same display list will be returned (after having been rendered into
-     * along the way, depending on the invalidation state of the view).
-     *
-     * @param displayList The previous version of this displayList, could be null.
-     * @param isLayer Whether the requester of the display list is a layer. If so,
-     * the view will avoid creating a layer inside the resulting display list.
-     * @return A new or reused DisplayList object.
-     */
-    private DisplayList getDisplayList(DisplayList displayList, boolean isLayer) {
+    private void updateDisplayListIfDirty() {
+        final RenderNode renderNode = mRenderNode;
         if (!canHaveDisplayList()) {
-            return null;
+            // can't populate RenderNode, don't try
+            return;
         }
 
-        if (((mPrivateFlags & DRAWING_CACHE_VALID) == 0 ||
-                displayList == null || !displayList.isValid() ||
-                (!isLayer && mRecreateDisplayList))) {
+        if ((mPrivateFlags & PFLAG_DRAWING_CACHE_VALID) == 0
+                || !renderNode.isValid()
+                || (mRecreateDisplayList)) {
             // Don't need to recreate the display list, just need to tell our
             // children to restore/recreate theirs
-            if (displayList != null && displayList.isValid() &&
-                    !isLayer && !mRecreateDisplayList) {
-                mPrivateFlags |= DRAWN | DRAWING_CACHE_VALID;
-                mPrivateFlags &= ~DIRTY_MASK;
+            if (renderNode.isValid()
+                    && !mRecreateDisplayList) {
+                mPrivateFlags |= PFLAG_DRAWN | PFLAG_DRAWING_CACHE_VALID;
+                mPrivateFlags &= ~PFLAG_DIRTY_MASK;
                 dispatchGetDisplayList();
 
-                return displayList;
+                return; // no work needed
             }
 
-            if (!isLayer) {
-                // If we got here, we're recreating it. Mark it as such to ensure that
-                // we copy in child display lists into ours in drawChild()
-                mRecreateDisplayList = true;
-            }
-            if (displayList == null) {
-                final String name = getClass().getSimpleName();
-                displayList = mAttachInfo.mHardwareRenderer.createDisplayList(name);
-                // If we're creating a new display list, make sure our parent gets invalidated
-                // since they will need to recreate their display list to account for this
-                // new child display list.
-                invalidateParentCaches();
-            }
+            // If we got here, we're recreating it. Mark it as such to ensure that
+            // we copy in child display lists into ours in drawChild()
+            mRecreateDisplayList = true;
 
-            boolean caching = false;
-            final HardwareCanvas canvas = displayList.start();
             int width = mRight - mLeft;
             int height = mBottom - mTop;
+            int layerType = getLayerType();
+
+            final HardwareCanvas canvas = renderNode.start(width, height);
+            canvas.setHighContrastText(mAttachInfo.mHighContrastText);
 
             try {
-                canvas.setViewport(width, height);
-                // The dirty rect should always be null for a display list
-                canvas.onPreDraw(null);
-                int layerType = (
-                        !(mParent instanceof ViewGroup) || ((ViewGroup)mParent).mDrawLayers) ?
-                        getLayerType() : LAYER_TYPE_NONE;
-                if (!isLayer && layerType != LAYER_TYPE_NONE) {
-                    if (layerType == LAYER_TYPE_HARDWARE) {
-                        final HardwareLayer layer = getHardwareLayer();
-                        if (layer != null && layer.isValid()) {
-                            canvas.drawHardwareLayer(layer, 0, 0, mLayerPaint);
-                        } else {
-                            canvas.saveLayer(0, 0, mRight - mLeft, mBottom - mTop, mLayerPaint,
-                                    Canvas.HAS_ALPHA_LAYER_SAVE_FLAG |
-                                            Canvas.CLIP_TO_LAYER_SAVE_FLAG);
-                        }
-                        caching = true;
-                    } else {
-                        buildDrawingCache(true);
-                        Bitmap cache = getDrawingCache(true);
-                        if (cache != null) {
-                            canvas.drawBitmap(cache, 0, 0, mLayerPaint);
-                            caching = true;
-                        }
+                final HardwareLayer layer = getHardwareLayer();
+                if (layer != null && layer.isValid()) {
+                    canvas.drawHardwareLayer(layer, 0, 0, mLayerPaint);
+                } else if (layerType == LAYER_TYPE_SOFTWARE) {
+                    buildDrawingCache(true);
+                    Bitmap cache = getDrawingCache(true);
+                    if (cache != null) {
+                        canvas.drawBitmap(cache, 0, 0, mLayerPaint);
                     }
                 } else {
-
                     computeScroll();
 
                     canvas.translate(-mScrollX, -mScrollY);
-                    if (!isLayer) {
-                        mPrivateFlags |= DRAWN | DRAWING_CACHE_VALID;
-                        mPrivateFlags &= ~DIRTY_MASK;
-                    }
+                    mPrivateFlags |= PFLAG_DRAWN | PFLAG_DRAWING_CACHE_VALID;
+                    mPrivateFlags &= ~PFLAG_DIRTY_MASK;
 
                     // Fast path for layouts with no backgrounds
-                    if ((mPrivateFlags & SKIP_DRAW) == SKIP_DRAW) {
+                    if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
                         dispatchDraw(canvas);
+                        if (mOverlay != null && !mOverlay.isEmpty()) {
+                            mOverlay.getOverlayView().draw(canvas);
+                        }
                     } else {
                         draw(canvas);
                     }
                 }
             } finally {
-                canvas.onPostDraw();
-
-                displayList.end();
-                displayList.setCaching(caching);
-                if (isLayer) {
-                    displayList.setLeftTopRightBottom(0, 0, width, height);
-                } else {
-                    setDisplayListProperties(displayList);
-                }
+                renderNode.end(canvas);
+                setDisplayListProperties(renderNode);
             }
-        } else if (!isLayer) {
-            mPrivateFlags |= DRAWN | DRAWING_CACHE_VALID;
-            mPrivateFlags &= ~DIRTY_MASK;
+        } else {
+            mPrivateFlags |= PFLAG_DRAWN | PFLAG_DRAWING_CACHE_VALID;
+            mPrivateFlags &= ~PFLAG_DIRTY_MASK;
         }
-
-        return displayList;
     }
 
     /**
-     * Get the DisplayList for the HardwareLayer
+     * Returns a RenderNode with View draw content recorded, which can be
+     * used to draw this view again without executing its draw method.
      *
-     * @param layer The HardwareLayer whose DisplayList we want
-     * @return A DisplayList fopr the specified HardwareLayer
-     */
-    private DisplayList getHardwareLayerDisplayList(HardwareLayer layer) {
-        DisplayList displayList = getDisplayList(layer.getDisplayList(), true);
-        layer.setDisplayList(displayList);
-        return displayList;
-    }
-
-
-    /**
-     * <p>Returns a display list that can be used to draw this view again
-     * without executing its draw method.</p>
-     *
-     * @return A DisplayList ready to replay, or null if caching is not enabled.
+     * @return A RenderNode ready to replay, or null if caching is not enabled.
      *
      * @hide
      */
-    public DisplayList getDisplayList() {
-        mDisplayList = getDisplayList(mDisplayList, false);
-        return mDisplayList;
+    public RenderNode getDisplayList() {
+        updateDisplayListIfDirty();
+        return mRenderNode;
     }
 
-    private void clearDisplayList() {
-        if (mDisplayList != null) {
-            mDisplayList.invalidate();
-            mDisplayList.clear();
+    private void resetDisplayList() {
+        if (mRenderNode.isValid()) {
+            mRenderNode.destroyDisplayListData();
+        }
+
+        if (mBackgroundRenderNode != null && mBackgroundRenderNode.isValid()) {
+            mBackgroundRenderNode.destroyDisplayListData();
         }
     }
 
@@ -12556,7 +14283,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     public void setDrawingCacheBackgroundColor(int color) {
         if (color != mDrawingCacheBackgroundColor) {
             mDrawingCacheBackgroundColor = color;
-            mPrivateFlags &= ~DRAWING_CACHE_VALID;
+            mPrivateFlags &= ~PFLAG_DRAWING_CACHE_VALID;
         }
     }
 
@@ -12602,142 +14329,160 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #destroyDrawingCache()
      */
     public void buildDrawingCache(boolean autoScale) {
-        if ((mPrivateFlags & DRAWING_CACHE_VALID) == 0 || (autoScale ?
+        if ((mPrivateFlags & PFLAG_DRAWING_CACHE_VALID) == 0 || (autoScale ?
                 mDrawingCache == null : mUnscaledDrawingCache == null)) {
-            mCachingFailed = false;
+            if (Trace.isTagEnabled(Trace.TRACE_TAG_VIEW)) {
+                Trace.traceBegin(Trace.TRACE_TAG_VIEW,
+                        "buildDrawingCache/SW Layer for " + getClass().getSimpleName());
+            }
+            try {
+                buildDrawingCacheImpl(autoScale);
+            } finally {
+                Trace.traceEnd(Trace.TRACE_TAG_VIEW);
+            }
+        }
+    }
 
-            int width = mRight - mLeft;
-            int height = mBottom - mTop;
+    /**
+     * private, internal implementation of buildDrawingCache, used to enable tracing
+     */
+    private void buildDrawingCacheImpl(boolean autoScale) {
+        mCachingFailed = false;
 
-            final AttachInfo attachInfo = mAttachInfo;
-            final boolean scalingRequired = attachInfo != null && attachInfo.mScalingRequired;
+        int width = mRight - mLeft;
+        int height = mBottom - mTop;
 
-            if (autoScale && scalingRequired) {
-                width = (int) ((width * attachInfo.mApplicationScale) + 0.5f);
-                height = (int) ((height * attachInfo.mApplicationScale) + 0.5f);
+        final AttachInfo attachInfo = mAttachInfo;
+        final boolean scalingRequired = attachInfo != null && attachInfo.mScalingRequired;
+
+        if (autoScale && scalingRequired) {
+            width = (int) ((width * attachInfo.mApplicationScale) + 0.5f);
+            height = (int) ((height * attachInfo.mApplicationScale) + 0.5f);
+        }
+
+        final int drawingCacheBackgroundColor = mDrawingCacheBackgroundColor;
+        final boolean opaque = drawingCacheBackgroundColor != 0 || isOpaque();
+        final boolean use32BitCache = attachInfo != null && attachInfo.mUse32BitDrawingCache;
+
+        final long projectedBitmapSize = width * height * (opaque && !use32BitCache ? 2 : 4);
+        final long drawingCacheSize =
+                ViewConfiguration.get(mContext).getScaledMaximumDrawingCacheSize();
+        if (width <= 0 || height <= 0 || projectedBitmapSize > drawingCacheSize) {
+            if (width > 0 && height > 0) {
+                Log.w(VIEW_LOG_TAG, "View too large to fit into drawing cache, needs "
+                        + projectedBitmapSize + " bytes, only "
+                        + drawingCacheSize + " available");
+            }
+            destroyDrawingCache();
+            mCachingFailed = true;
+            return;
+        }
+
+        boolean clear = true;
+        Bitmap bitmap = autoScale ? mDrawingCache : mUnscaledDrawingCache;
+
+        if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height) {
+            Bitmap.Config quality;
+            if (!opaque) {
+                // Never pick ARGB_4444 because it looks awful
+                // Keep the DRAWING_CACHE_QUALITY_LOW flag just in case
+                switch (mViewFlags & DRAWING_CACHE_QUALITY_MASK) {
+                    case DRAWING_CACHE_QUALITY_AUTO:
+                    case DRAWING_CACHE_QUALITY_LOW:
+                    case DRAWING_CACHE_QUALITY_HIGH:
+                    default:
+                        quality = Bitmap.Config.ARGB_8888;
+                        break;
+                }
+            } else {
+                // Optimization for translucent windows
+                // If the window is translucent, use a 32 bits bitmap to benefit from memcpy()
+                quality = use32BitCache ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
             }
 
-            final int drawingCacheBackgroundColor = mDrawingCacheBackgroundColor;
-            final boolean opaque = drawingCacheBackgroundColor != 0 || isOpaque();
-            final boolean use32BitCache = attachInfo != null && attachInfo.mUse32BitDrawingCache;
+            // Try to cleanup memory
+            if (bitmap != null) bitmap.recycle();
 
-            if (width <= 0 || height <= 0 ||
-                     // Projected bitmap size in bytes
-                    (width * height * (opaque && !use32BitCache ? 2 : 4) >
-                            ViewConfiguration.get(mContext).getScaledMaximumDrawingCacheSize())) {
-                destroyDrawingCache();
+            try {
+                bitmap = Bitmap.createBitmap(mResources.getDisplayMetrics(),
+                        width, height, quality);
+                bitmap.setDensity(getResources().getDisplayMetrics().densityDpi);
+                if (autoScale) {
+                    mDrawingCache = bitmap;
+                } else {
+                    mUnscaledDrawingCache = bitmap;
+                }
+                if (opaque && use32BitCache) bitmap.setHasAlpha(false);
+            } catch (OutOfMemoryError e) {
+                // If there is not enough memory to create the bitmap cache, just
+                // ignore the issue as bitmap caches are not required to draw the
+                // view hierarchy
+                if (autoScale) {
+                    mDrawingCache = null;
+                } else {
+                    mUnscaledDrawingCache = null;
+                }
                 mCachingFailed = true;
                 return;
             }
 
-            boolean clear = true;
-            Bitmap bitmap = autoScale ? mDrawingCache : mUnscaledDrawingCache;
+            clear = drawingCacheBackgroundColor != 0;
+        }
 
-            if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height) {
-                Bitmap.Config quality;
-                if (!opaque) {
-                    // Never pick ARGB_4444 because it looks awful
-                    // Keep the DRAWING_CACHE_QUALITY_LOW flag just in case
-                    switch (mViewFlags & DRAWING_CACHE_QUALITY_MASK) {
-                        case DRAWING_CACHE_QUALITY_AUTO:
-                            quality = Bitmap.Config.ARGB_8888;
-                            break;
-                        case DRAWING_CACHE_QUALITY_LOW:
-                            quality = Bitmap.Config.ARGB_8888;
-                            break;
-                        case DRAWING_CACHE_QUALITY_HIGH:
-                            quality = Bitmap.Config.ARGB_8888;
-                            break;
-                        default:
-                            quality = Bitmap.Config.ARGB_8888;
-                            break;
-                    }
-                } else {
-                    // Optimization for translucent windows
-                    // If the window is translucent, use a 32 bits bitmap to benefit from memcpy()
-                    quality = use32BitCache ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
-                }
-
-                // Try to cleanup memory
-                if (bitmap != null) bitmap.recycle();
-
-                try {
-                    bitmap = Bitmap.createBitmap(width, height, quality);
-                    bitmap.setDensity(getResources().getDisplayMetrics().densityDpi);
-                    if (autoScale) {
-                        mDrawingCache = bitmap;
-                    } else {
-                        mUnscaledDrawingCache = bitmap;
-                    }
-                    if (opaque && use32BitCache) bitmap.setHasAlpha(false);
-                } catch (OutOfMemoryError e) {
-                    // If there is not enough memory to create the bitmap cache, just
-                    // ignore the issue as bitmap caches are not required to draw the
-                    // view hierarchy
-                    if (autoScale) {
-                        mDrawingCache = null;
-                    } else {
-                        mUnscaledDrawingCache = null;
-                    }
-                    mCachingFailed = true;
-                    return;
-                }
-
-                clear = drawingCacheBackgroundColor != 0;
+        Canvas canvas;
+        if (attachInfo != null) {
+            canvas = attachInfo.mCanvas;
+            if (canvas == null) {
+                canvas = new Canvas();
             }
+            canvas.setBitmap(bitmap);
+            // Temporarily clobber the cached Canvas in case one of our children
+            // is also using a drawing cache. Without this, the children would
+            // steal the canvas by attaching their own bitmap to it and bad, bad
+            // thing would happen (invisible views, corrupted drawings, etc.)
+            attachInfo.mCanvas = null;
+        } else {
+            // This case should hopefully never or seldom happen
+            canvas = new Canvas(bitmap);
+        }
 
-            Canvas canvas;
-            if (attachInfo != null) {
-                canvas = attachInfo.mCanvas;
-                if (canvas == null) {
-                    canvas = new Canvas();
-                }
-                canvas.setBitmap(bitmap);
-                // Temporarily clobber the cached Canvas in case one of our children
-                // is also using a drawing cache. Without this, the children would
-                // steal the canvas by attaching their own bitmap to it and bad, bad
-                // thing would happen (invisible views, corrupted drawings, etc.)
-                attachInfo.mCanvas = null;
-            } else {
-                // This case should hopefully never or seldom happen
-                canvas = new Canvas(bitmap);
+        if (clear) {
+            bitmap.eraseColor(drawingCacheBackgroundColor);
+        }
+
+        computeScroll();
+        final int restoreCount = canvas.save();
+
+        if (autoScale && scalingRequired) {
+            final float scale = attachInfo.mApplicationScale;
+            canvas.scale(scale, scale);
+        }
+
+        canvas.translate(-mScrollX, -mScrollY);
+
+        mPrivateFlags |= PFLAG_DRAWN;
+        if (mAttachInfo == null || !mAttachInfo.mHardwareAccelerated ||
+                mLayerType != LAYER_TYPE_NONE) {
+            mPrivateFlags |= PFLAG_DRAWING_CACHE_VALID;
+        }
+
+        // Fast path for layouts with no backgrounds
+        if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
+            mPrivateFlags &= ~PFLAG_DIRTY_MASK;
+            dispatchDraw(canvas);
+            if (mOverlay != null && !mOverlay.isEmpty()) {
+                mOverlay.getOverlayView().draw(canvas);
             }
+        } else {
+            draw(canvas);
+        }
 
-            if (clear) {
-                bitmap.eraseColor(drawingCacheBackgroundColor);
-            }
+        canvas.restoreToCount(restoreCount);
+        canvas.setBitmap(null);
 
-            computeScroll();
-            final int restoreCount = canvas.save();
-
-            if (autoScale && scalingRequired) {
-                final float scale = attachInfo.mApplicationScale;
-                canvas.scale(scale, scale);
-            }
-
-            canvas.translate(-mScrollX, -mScrollY);
-
-            mPrivateFlags |= DRAWN;
-            if (mAttachInfo == null || !mAttachInfo.mHardwareAccelerated ||
-                    mLayerType != LAYER_TYPE_NONE) {
-                mPrivateFlags |= DRAWING_CACHE_VALID;
-            }
-
-            // Fast path for layouts with no backgrounds
-            if ((mPrivateFlags & SKIP_DRAW) == SKIP_DRAW) {
-                mPrivateFlags &= ~DIRTY_MASK;
-                dispatchDraw(canvas);
-            } else {
-                draw(canvas);
-            }
-
-            canvas.restoreToCount(restoreCount);
-            canvas.setBitmap(null);
-
-            if (attachInfo != null) {
-                // Restore the cached Canvas for our siblings
-                attachInfo.mCanvas = canvas;
-            }
+        if (attachInfo != null) {
+            // Restore the cached Canvas for our siblings
+            attachInfo.mCanvas = canvas;
         }
     }
 
@@ -12754,7 +14499,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         width = (int) ((width * scale) + 0.5f);
         height = (int) ((height * scale) + 0.5f);
 
-        Bitmap bitmap = Bitmap.createBitmap(width > 0 ? width : 1, height > 0 ? height : 1, quality);
+        Bitmap bitmap = Bitmap.createBitmap(mResources.getDisplayMetrics(),
+                width > 0 ? width : 1, height > 0 ? height : 1, quality);
         if (bitmap == null) {
             throw new OutOfMemoryError();
         }
@@ -12792,11 +14538,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         // Temporarily remove the dirty mask
         int flags = mPrivateFlags;
-        mPrivateFlags &= ~DIRTY_MASK;
+        mPrivateFlags &= ~PFLAG_DIRTY_MASK;
 
         // Fast path for layouts with no backgrounds
-        if ((mPrivateFlags & SKIP_DRAW) == SKIP_DRAW) {
+        if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
             dispatchDraw(canvas);
+            if (mOverlay != null && !mOverlay.isEmpty()) {
+                mOverlay.getOverlayView().draw(canvas);
+            }
         } else {
             draw(canvas);
         }
@@ -12946,8 +14695,45 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return True if the view is attached to a window and the window is
      *         hardware accelerated; false in any other case.
      */
+    @ViewDebug.ExportedProperty(category = "drawing")
     public boolean isHardwareAccelerated() {
         return mAttachInfo != null && mAttachInfo.mHardwareAccelerated;
+    }
+
+    /**
+     * Sets a rectangular area on this view to which the view will be clipped
+     * when it is drawn. Setting the value to null will remove the clip bounds
+     * and the view will draw normally, using its full bounds.
+     *
+     * @param clipBounds The rectangular area, in the local coordinates of
+     * this view, to which future drawing operations will be clipped.
+     */
+    public void setClipBounds(Rect clipBounds) {
+        if (clipBounds == mClipBounds
+                || (clipBounds != null && clipBounds.equals(mClipBounds))) {
+            return;
+        }
+        if (clipBounds != null) {
+            if (mClipBounds == null) {
+                mClipBounds = new Rect(clipBounds);
+            } else {
+                mClipBounds.set(clipBounds);
+            }
+        } else {
+            mClipBounds = null;
+        }
+        mRenderNode.setClipBounds(mClipBounds);
+        invalidateViewProperty(false, false);
+    }
+
+    /**
+     * Returns a copy of the current {@link #setClipBounds(Rect) clipBounds}.
+     *
+     * @return A copy of the current clip bounds if clip bounds are set,
+     * otherwise null.
+     */
+    public Rect getClipBounds() {
+        return (mClipBounds != null) ? new Rect(mClipBounds) : null;
     }
 
     /**
@@ -12966,7 +14752,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             onAnimationStart();
         }
 
-        boolean more = a.getTransformation(drawingTime, parent.mChildTransformation, 1f);
+        final Transformation t = parent.getChildTransformation();
+        boolean more = a.getTransformation(drawingTime, t, 1f);
         if (scalingRequired && mAttachInfo.mApplicationScale != 1f) {
             if (parent.mInvalidationTransformation == null) {
                 parent.mInvalidationTransformation = new Transformation();
@@ -12974,18 +14761,18 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             invalidationTransform = parent.mInvalidationTransformation;
             a.getTransformation(drawingTime, invalidationTransform, 1f);
         } else {
-            invalidationTransform = parent.mChildTransformation;
+            invalidationTransform = t;
         }
 
         if (more) {
             if (!a.willChangeBounds()) {
-                if ((flags & (parent.FLAG_OPTIMIZE_INVALIDATE | parent.FLAG_ANIMATION_DONE)) ==
-                        parent.FLAG_OPTIMIZE_INVALIDATE) {
-                    parent.mGroupFlags |= parent.FLAG_INVALIDATE_REQUIRED;
-                } else if ((flags & parent.FLAG_INVALIDATE_REQUIRED) == 0) {
+                if ((flags & (ViewGroup.FLAG_OPTIMIZE_INVALIDATE | ViewGroup.FLAG_ANIMATION_DONE)) ==
+                        ViewGroup.FLAG_OPTIMIZE_INVALIDATE) {
+                    parent.mGroupFlags |= ViewGroup.FLAG_INVALIDATE_REQUIRED;
+                } else if ((flags & ViewGroup.FLAG_INVALIDATE_REQUIRED) == 0) {
                     // The child need to draw an animation, potentially offscreen, so
                     // make sure we do not cancel invalidate requests
-                    parent.mPrivateFlags |= DRAW_ANIMATION;
+                    parent.mPrivateFlags |= PFLAG_DRAW_ANIMATION;
                     parent.invalidate(mLeft, mTop, mRight, mBottom);
                 }
             } else {
@@ -12998,7 +14785,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
                 // The child need to draw an animation, potentially offscreen, so
                 // make sure we do not cancel invalidate requests
-                parent.mPrivateFlags |= DRAW_ANIMATION;
+                parent.mPrivateFlags |= PFLAG_DRAW_ANIMATION;
 
                 final int left = mLeft + (int) region.left;
                 final int top = mTop + (int) region.top;
@@ -13010,62 +14797,44 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * This method is called by getDisplayList() when a display list is created or re-rendered.
-     * It sets or resets the current value of all properties on that display list (resetting is
-     * necessary when a display list is being re-created, because we need to make sure that
-     * previously-set transform values
+     * This method is called by getDisplayList() when a display list is recorded for a View.
+     * It pushes any properties to the RenderNode that aren't managed by the RenderNode.
      */
-    void setDisplayListProperties(DisplayList displayList) {
-        if (displayList != null) {
-            displayList.setLeftTopRightBottom(mLeft, mTop, mRight, mBottom);
-            displayList.setHasOverlappingRendering(hasOverlappingRendering());
+    void setDisplayListProperties(RenderNode renderNode) {
+        if (renderNode != null) {
+            renderNode.setHasOverlappingRendering(hasOverlappingRendering());
             if (mParent instanceof ViewGroup) {
-                displayList.setClipChildren(
-                        (((ViewGroup)mParent).mGroupFlags & ViewGroup.FLAG_CLIP_CHILDREN) != 0);
+                renderNode.setClipToBounds(
+                        (((ViewGroup) mParent).mGroupFlags & ViewGroup.FLAG_CLIP_CHILDREN) != 0);
             }
             float alpha = 1;
             if (mParent instanceof ViewGroup && (((ViewGroup) mParent).mGroupFlags &
                     ViewGroup.FLAG_SUPPORT_STATIC_TRANSFORMATIONS) != 0) {
                 ViewGroup parentVG = (ViewGroup) mParent;
-                final boolean hasTransform =
-                        parentVG.getChildStaticTransformation(this, parentVG.mChildTransformation);
-                if (hasTransform) {
-                    Transformation transform = parentVG.mChildTransformation;
-                    final int transformType = parentVG.mChildTransformation.getTransformationType();
+                final Transformation t = parentVG.getChildTransformation();
+                if (parentVG.getChildStaticTransformation(this, t)) {
+                    final int transformType = t.getTransformationType();
                     if (transformType != Transformation.TYPE_IDENTITY) {
                         if ((transformType & Transformation.TYPE_ALPHA) != 0) {
-                            alpha = transform.getAlpha();
+                            alpha = t.getAlpha();
                         }
                         if ((transformType & Transformation.TYPE_MATRIX) != 0) {
-                            displayList.setStaticMatrix(transform.getMatrix());
+                            renderNode.setStaticMatrix(t.getMatrix());
                         }
                     }
                 }
             }
             if (mTransformationInfo != null) {
-                alpha *= mTransformationInfo.mAlpha;
+                alpha *= getFinalAlpha();
                 if (alpha < 1) {
                     final int multipliedAlpha = (int) (255 * alpha);
                     if (onSetAlpha(multipliedAlpha)) {
                         alpha = 1;
                     }
                 }
-                displayList.setTransformationInfo(alpha,
-                        mTransformationInfo.mTranslationX, mTransformationInfo.mTranslationY,
-                        mTransformationInfo.mRotation, mTransformationInfo.mRotationX,
-                        mTransformationInfo.mRotationY, mTransformationInfo.mScaleX,
-                        mTransformationInfo.mScaleY);
-                if (mTransformationInfo.mCamera == null) {
-                    mTransformationInfo.mCamera = new Camera();
-                    mTransformationInfo.matrix3D = new Matrix();
-                }
-                displayList.setCameraDistance(mTransformationInfo.mCamera.getLocationZ());
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == PIVOT_EXPLICITLY_SET) {
-                    displayList.setPivotX(getPivotX());
-                    displayList.setPivotY(getPivotY());
-                }
+                renderNode.setAlpha(alpha);
             } else if (alpha < 1) {
-                displayList.setAlpha(alpha);
+                renderNode.setAlpha(alpha);
             }
         }
     }
@@ -13076,13 +14845,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * to be called from anywhere else other than ViewGroup.drawChild().
      */
     boolean draw(Canvas canvas, ViewGroup parent, long drawingTime) {
-        boolean useDisplayListProperties = mAttachInfo != null && mAttachInfo.mHardwareAccelerated;
+        boolean usingRenderNodeProperties = mAttachInfo != null && mAttachInfo.mHardwareAccelerated;
         boolean more = false;
         final boolean childHasIdentityMatrix = hasIdentityMatrix();
         final int flags = parent.mGroupFlags;
 
         if ((flags & ViewGroup.FLAG_CLEAR_TRANSFORMATION) == ViewGroup.FLAG_CLEAR_TRANSFORMATION) {
-            parent.mChildTransformation.clear();
+            parent.getChildTransformation().clear();
             parent.mGroupFlags &= ~ViewGroup.FLAG_CLEAR_TRANSFORMATION;
         }
 
@@ -13091,7 +14860,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         boolean scalingRequired = false;
         boolean caching;
-        int layerType = parent.mDrawLayers ? getLayerType() : LAYER_TYPE_NONE;
+        int layerType = getLayerType();
 
         final boolean hardwareAccelerated = canvas.isHardwareAccelerated();
         if ((flags & ViewGroup.FLAG_CHILDREN_DRAWN_WITH_CACHE) != 0 ||
@@ -13108,24 +14877,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             more = drawAnimation(parent, drawingTime, a, scalingRequired);
             concatMatrix = a.willChangeTransformationMatrix();
             if (concatMatrix) {
-                mPrivateFlags3 |= VIEW_IS_ANIMATING_TRANSFORM;
+                mPrivateFlags3 |= PFLAG3_VIEW_IS_ANIMATING_TRANSFORM;
             }
-            transformToApply = parent.mChildTransformation;
+            transformToApply = parent.getChildTransformation();
         } else {
-            if ((mPrivateFlags3 & VIEW_IS_ANIMATING_TRANSFORM) == VIEW_IS_ANIMATING_TRANSFORM &&
-                    mDisplayList != null) {
+            if ((mPrivateFlags3 & PFLAG3_VIEW_IS_ANIMATING_TRANSFORM) != 0) {
                 // No longer animating: clear out old animation matrix
-                mDisplayList.setAnimationMatrix(null);
-                mPrivateFlags3 &= ~VIEW_IS_ANIMATING_TRANSFORM;
+                mRenderNode.setAnimationMatrix(null);
+                mPrivateFlags3 &= ~PFLAG3_VIEW_IS_ANIMATING_TRANSFORM;
             }
-            if (!useDisplayListProperties &&
+            if (!usingRenderNodeProperties &&
                     (flags & ViewGroup.FLAG_SUPPORT_STATIC_TRANSFORMATIONS) != 0) {
-                final boolean hasTransform =
-                        parent.getChildStaticTransformation(this, parent.mChildTransformation);
+                final Transformation t = parent.getChildTransformation();
+                final boolean hasTransform = parent.getChildStaticTransformation(this, t);
                 if (hasTransform) {
-                    final int transformType = parent.mChildTransformation.getTransformationType();
-                    transformToApply = transformType != Transformation.TYPE_IDENTITY ?
-                            parent.mChildTransformation : null;
+                    final int transformType = t.getTransformationType();
+                    transformToApply = transformType != Transformation.TYPE_IDENTITY ? t : null;
                     concatMatrix = (transformType & Transformation.TYPE_MATRIX) != 0;
                 }
             }
@@ -13135,28 +14902,26 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         // Sets the flag as early as possible to allow draw() implementations
         // to call invalidate() successfully when doing animations
-        mPrivateFlags |= DRAWN;
+        mPrivateFlags |= PFLAG_DRAWN;
 
-        if (!concatMatrix && canvas.quickReject(mLeft, mTop, mRight, mBottom, Canvas.EdgeType.BW) &&
-                (mPrivateFlags & DRAW_ANIMATION) == 0) {
-            mPrivateFlags2 |= VIEW_QUICK_REJECTED;
+        if (!concatMatrix &&
+                (flags & (ViewGroup.FLAG_SUPPORT_STATIC_TRANSFORMATIONS |
+                        ViewGroup.FLAG_CLIP_CHILDREN)) == ViewGroup.FLAG_CLIP_CHILDREN &&
+                canvas.quickReject(mLeft, mTop, mRight, mBottom, Canvas.EdgeType.BW) &&
+                (mPrivateFlags & PFLAG_DRAW_ANIMATION) == 0) {
+            mPrivateFlags2 |= PFLAG2_VIEW_QUICK_REJECTED;
             return more;
         }
-        mPrivateFlags2 &= ~VIEW_QUICK_REJECTED;
+        mPrivateFlags2 &= ~PFLAG2_VIEW_QUICK_REJECTED;
 
         if (hardwareAccelerated) {
             // Clear INVALIDATED flag to allow invalidation to occur during rendering, but
             // retain the flag's value temporarily in the mRecreateDisplayList flag
-            mRecreateDisplayList = (mPrivateFlags & INVALIDATED) == INVALIDATED;
-            mPrivateFlags &= ~INVALIDATED;
+            mRecreateDisplayList = (mPrivateFlags & PFLAG_INVALIDATED) == PFLAG_INVALIDATED;
+            mPrivateFlags &= ~PFLAG_INVALIDATED;
         }
 
-        computeScroll();
-
-        final int sx = mScrollX;
-        final int sy = mScrollY;
-
-        DisplayList displayList = null;
+        RenderNode renderNode = null;
         Bitmap cache = null;
         boolean hasDisplayList = false;
         if (caching) {
@@ -13169,7 +14934,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             } else {
                 switch (layerType) {
                     case LAYER_TYPE_SOFTWARE:
-                        if (useDisplayListProperties) {
+                        if (usingRenderNodeProperties) {
                             hasDisplayList = canHaveDisplayList();
                         } else {
                             buildDrawingCache(true);
@@ -13177,7 +14942,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                         }
                         break;
                     case LAYER_TYPE_HARDWARE:
-                        if (useDisplayListProperties) {
+                        if (usingRenderNodeProperties) {
                             hasDisplayList = canHaveDisplayList();
                         }
                         break;
@@ -13189,17 +14954,25 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
             }
         }
-        useDisplayListProperties &= hasDisplayList;
-        if (useDisplayListProperties) {
-            displayList = getDisplayList();
-            if (!displayList.isValid()) {
+        usingRenderNodeProperties &= hasDisplayList;
+        if (usingRenderNodeProperties) {
+            renderNode = getDisplayList();
+            if (!renderNode.isValid()) {
                 // Uncommon, but possible. If a view is removed from the hierarchy during the call
                 // to getDisplayList(), the display list will be marked invalid and we should not
                 // try to use it again.
-                displayList = null;
+                renderNode = null;
                 hasDisplayList = false;
-                useDisplayListProperties = false;
+                usingRenderNodeProperties = false;
             }
+        }
+
+        int sx = 0;
+        int sy = 0;
+        if (!hasDisplayList) {
+            computeScroll();
+            sx = mScrollX;
+            sy = mScrollY;
         }
 
         final boolean hasNoCache = cache == null || hasDisplayList;
@@ -13207,17 +14980,17 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 layerType != LAYER_TYPE_HARDWARE;
 
         int restoreTo = -1;
-        if (!useDisplayListProperties || transformToApply != null) {
+        if (!usingRenderNodeProperties || transformToApply != null) {
             restoreTo = canvas.save();
         }
         if (offsetForScroll) {
             canvas.translate(mLeft - sx, mTop - sy);
         } else {
-            if (!useDisplayListProperties) {
+            if (!usingRenderNodeProperties) {
                 canvas.translate(mLeft, mTop);
             }
             if (scalingRequired) {
-                if (useDisplayListProperties) {
+                if (usingRenderNodeProperties) {
                     // TODO: Might not need this if we put everything inside the DL
                     restoreTo = canvas.save();
                 }
@@ -13227,9 +15000,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             }
         }
 
-        float alpha = useDisplayListProperties ? 1 : getAlpha();
-        if (transformToApply != null || alpha < 1 || !hasIdentityMatrix() ||
-                (mPrivateFlags3 & VIEW_IS_ANIMATING_ALPHA) == VIEW_IS_ANIMATING_ALPHA) {
+        float alpha = usingRenderNodeProperties ? 1 : (getAlpha() * getTransitionAlpha());
+        if (transformToApply != null || alpha < 1 ||  !hasIdentityMatrix() ||
+                (mPrivateFlags3 & PFLAG3_VIEW_IS_ANIMATING_ALPHA) == PFLAG3_VIEW_IS_ANIMATING_ALPHA) {
             if (transformToApply != null || !childHasIdentityMatrix) {
                 int transX = 0;
                 int transY = 0;
@@ -13241,8 +15014,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
                 if (transformToApply != null) {
                     if (concatMatrix) {
-                        if (useDisplayListProperties) {
-                            displayList.setAnimationMatrix(transformToApply.getMatrix());
+                        if (usingRenderNodeProperties) {
+                            renderNode.setAnimationMatrix(transformToApply.getMatrix());
                         } else {
                             // Undo the scroll translation, apply the transformation matrix,
                             // then redo the scroll translate to get the correct result.
@@ -13260,7 +15033,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     }
                 }
 
-                if (!childHasIdentityMatrix && !useDisplayListProperties) {
+                if (!childHasIdentityMatrix && !usingRenderNodeProperties) {
                     canvas.translate(-transX, -transY);
                     canvas.concat(getMatrix());
                     canvas.translate(transX, transY);
@@ -13269,11 +15042,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
             // Deal with alpha if it is or used to be <1
             if (alpha < 1 ||
-                    (mPrivateFlags3 & VIEW_IS_ANIMATING_ALPHA) == VIEW_IS_ANIMATING_ALPHA) {
+                    (mPrivateFlags3 & PFLAG3_VIEW_IS_ANIMATING_ALPHA) == PFLAG3_VIEW_IS_ANIMATING_ALPHA) {
                 if (alpha < 1) {
-                    mPrivateFlags3 |= VIEW_IS_ANIMATING_ALPHA;
+                    mPrivateFlags3 |= PFLAG3_VIEW_IS_ANIMATING_ALPHA;
                 } else {
-                    mPrivateFlags3 &= ~VIEW_IS_ANIMATING_ALPHA;
+                    mPrivateFlags3 &= ~PFLAG3_VIEW_IS_ANIMATING_ALPHA;
                 }
                 parent.mGroupFlags |= ViewGroup.FLAG_CLEAR_TRANSFORMATION;
                 if (hasNoCache) {
@@ -13284,56 +15057,69 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                                 layerType != LAYER_TYPE_NONE) {
                             layerFlags |= Canvas.CLIP_TO_LAYER_SAVE_FLAG;
                         }
-                        if (useDisplayListProperties) {
-                            displayList.setAlpha(alpha * getAlpha());
+                        if (usingRenderNodeProperties) {
+                            renderNode.setAlpha(alpha * getAlpha() * getTransitionAlpha());
                         } else  if (layerType == LAYER_TYPE_NONE) {
                             final int scrollX = hasDisplayList ? 0 : sx;
                             final int scrollY = hasDisplayList ? 0 : sy;
-                            canvas.saveLayerAlpha(scrollX, scrollY, scrollX + mRight - mLeft,
-                                    scrollY + mBottom - mTop, multipliedAlpha, layerFlags);
+                            canvas.saveLayerAlpha(scrollX, scrollY,
+                                    scrollX + (mRight - mLeft), scrollY + (mBottom - mTop),
+                                    multipliedAlpha, layerFlags);
                         }
                     } else {
                         // Alpha is handled by the child directly, clobber the layer's alpha
-                        mPrivateFlags |= ALPHA_SET;
+                        mPrivateFlags |= PFLAG_ALPHA_SET;
                     }
                 }
             }
-        } else if ((mPrivateFlags & ALPHA_SET) == ALPHA_SET) {
+        } else if ((mPrivateFlags & PFLAG_ALPHA_SET) == PFLAG_ALPHA_SET) {
             onSetAlpha(255);
-            mPrivateFlags &= ~ALPHA_SET;
+            mPrivateFlags &= ~PFLAG_ALPHA_SET;
         }
 
-        if ((flags & ViewGroup.FLAG_CLIP_CHILDREN) == ViewGroup.FLAG_CLIP_CHILDREN &&
-                !useDisplayListProperties) {
-            if (offsetForScroll) {
-                canvas.clipRect(sx, sy, sx + (mRight - mLeft), sy + (mBottom - mTop));
-            } else {
-                if (!scalingRequired || cache == null) {
-                    canvas.clipRect(0, 0, mRight - mLeft, mBottom - mTop);
+        if (!usingRenderNodeProperties) {
+            // apply clips directly, since RenderNode won't do it for this draw
+            if ((flags & ViewGroup.FLAG_CLIP_CHILDREN) == ViewGroup.FLAG_CLIP_CHILDREN
+                    && cache == null) {
+                if (offsetForScroll) {
+                    canvas.clipRect(sx, sy, sx + (mRight - mLeft), sy + (mBottom - mTop));
                 } else {
-                    canvas.clipRect(0, 0, cache.getWidth(), cache.getHeight());
+                    if (!scalingRequired || cache == null) {
+                        canvas.clipRect(0, 0, mRight - mLeft, mBottom - mTop);
+                    } else {
+                        canvas.clipRect(0, 0, cache.getWidth(), cache.getHeight());
+                    }
                 }
+            }
+
+            if (mClipBounds != null) {
+                // clip bounds ignore scroll
+                canvas.clipRect(mClipBounds);
             }
         }
 
-        if (!useDisplayListProperties && hasDisplayList) {
-            displayList = getDisplayList();
-            if (!displayList.isValid()) {
+
+
+        if (!usingRenderNodeProperties && hasDisplayList) {
+            renderNode = getDisplayList();
+            if (!renderNode.isValid()) {
                 // Uncommon, but possible. If a view is removed from the hierarchy during the call
                 // to getDisplayList(), the display list will be marked invalid and we should not
                 // try to use it again.
-                displayList = null;
+                renderNode = null;
                 hasDisplayList = false;
             }
         }
 
         if (hasNoCache) {
             boolean layerRendered = false;
-            if (layerType == LAYER_TYPE_HARDWARE && !useDisplayListProperties) {
+            if (layerType == LAYER_TYPE_HARDWARE && !usingRenderNodeProperties) {
                 final HardwareLayer layer = getHardwareLayer();
                 if (layer != null && layer.isValid()) {
+                    int restoreAlpha = mLayerPaint.getAlpha();
                     mLayerPaint.setAlpha((int) (alpha * 255));
                     ((HardwareCanvas) canvas).drawHardwareLayer(layer, 0, 0, mLayerPaint);
+                    mLayerPaint.setAlpha(restoreAlpha);
                     layerRendered = true;
                 } else {
                     final int scrollX = hasDisplayList ? 0 : sx;
@@ -13347,20 +15133,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             if (!layerRendered) {
                 if (!hasDisplayList) {
                     // Fast path for layouts with no backgrounds
-                    if ((mPrivateFlags & SKIP_DRAW) == SKIP_DRAW) {
-                        mPrivateFlags &= ~DIRTY_MASK;
+                    if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
+                        mPrivateFlags &= ~PFLAG_DIRTY_MASK;
                         dispatchDraw(canvas);
                     } else {
                         draw(canvas);
                     }
                 } else {
-                    mPrivateFlags &= ~DIRTY_MASK;
-                    ((HardwareCanvas) canvas).drawDisplayList(displayList, null, flags);
+                    mPrivateFlags &= ~PFLAG_DIRTY_MASK;
+                    ((HardwareCanvas) canvas).drawRenderNode(renderNode, null, flags);
                 }
             }
         } else if (cache != null) {
-            mPrivateFlags &= ~DIRTY_MASK;
+            mPrivateFlags &= ~PFLAG_DIRTY_MASK;
             Paint cachePaint;
+            int restoreAlpha = 0;
 
             if (layerType == LAYER_TYPE_NONE) {
                 cachePaint = parent.mCachePaint;
@@ -13369,18 +15156,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                     cachePaint.setDither(false);
                     parent.mCachePaint = cachePaint;
                 }
-                if (alpha < 1) {
-                    cachePaint.setAlpha((int) (alpha * 255));
-                    parent.mGroupFlags |= ViewGroup.FLAG_ALPHA_LOWER_THAN_ONE;
-                } else if  ((flags & ViewGroup.FLAG_ALPHA_LOWER_THAN_ONE) != 0) {
-                    cachePaint.setAlpha(255);
-                    parent.mGroupFlags &= ~ViewGroup.FLAG_ALPHA_LOWER_THAN_ONE;
-                }
             } else {
                 cachePaint = mLayerPaint;
-                cachePaint.setAlpha((int) (alpha * 255));
+                restoreAlpha = mLayerPaint.getAlpha();
             }
+            cachePaint.setAlpha((int) (alpha * 255));
             canvas.drawBitmap(cache, 0.0f, 0.0f, cachePaint);
+            cachePaint.setAlpha(restoreAlpha);
         }
 
         if (restoreTo >= 0) {
@@ -13395,11 +15177,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         if (more && hardwareAccelerated) {
-            // invalidation is the trigger to recreate display lists, so if we're using
-            // display lists to render, force an invalidate to allow the animation to
-            // continue drawing another frame
-            parent.invalidate(true);
-            if (a.hasAlpha() && (mPrivateFlags & ALPHA_SET) == ALPHA_SET) {
+            if (a.hasAlpha() && (mPrivateFlags & PFLAG_ALPHA_SET) == PFLAG_ALPHA_SET) {
                 // alpha animations should cause the child to recreate its display list
                 invalidate(true);
             }
@@ -13421,9 +15199,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void draw(Canvas canvas) {
         final int privateFlags = mPrivateFlags;
-        final boolean dirtyOpaque = (privateFlags & DIRTY_MASK) == DIRTY_OPAQUE &&
+        final boolean dirtyOpaque = (privateFlags & PFLAG_DIRTY_MASK) == PFLAG_DIRTY_OPAQUE &&
                 (mAttachInfo == null || !mAttachInfo.mIgnoreDirtyState);
-        mPrivateFlags = (privateFlags & ~DIRTY_MASK) | DRAWN;
+        mPrivateFlags = (privateFlags & ~PFLAG_DIRTY_MASK) | PFLAG_DRAWN;
 
         /*
          * Draw traversal performs several drawing steps which must be executed
@@ -13441,24 +15219,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         int saveCount;
 
         if (!dirtyOpaque) {
-            final Drawable background = mBackground;
-            if (background != null) {
-                final int scrollX = mScrollX;
-                final int scrollY = mScrollY;
-
-                if (mBackgroundSizeChanged) {
-                    background.setBounds(0, 0,  mRight - mLeft, mBottom - mTop);
-                    mBackgroundSizeChanged = false;
-                }
-
-                if ((scrollX | scrollY) == 0) {
-                    background.draw(canvas);
-                } else {
-                    canvas.translate(scrollX, scrollY);
-                    background.draw(canvas);
-                    canvas.translate(-scrollX, -scrollY);
-                }
-            }
+            drawBackground(canvas);
         }
 
         // skip step 2 & 5 if possible (common case)
@@ -13474,6 +15235,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
             // Step 6, draw decorations (scrollbars)
             onDrawScrollBars(canvas);
+
+            if (mOverlay != null && !mOverlay.isEmpty()) {
+                mOverlay.getOverlayView().dispatchDraw(canvas);
+            }
 
             // we're done...
             return;
@@ -13583,6 +15348,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             matrix.setScale(1, fadeHeight * topFadeStrength);
             matrix.postTranslate(left, top);
             fade.setLocalMatrix(matrix);
+            p.setShader(fade);
             canvas.drawRect(left, top, right, top + length, p);
         }
 
@@ -13591,6 +15357,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             matrix.postRotate(180);
             matrix.postTranslate(left, bottom);
             fade.setLocalMatrix(matrix);
+            p.setShader(fade);
             canvas.drawRect(left, bottom - length, right, bottom, p);
         }
 
@@ -13599,6 +15366,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             matrix.postRotate(-90);
             matrix.postTranslate(left, top);
             fade.setLocalMatrix(matrix);
+            p.setShader(fade);
             canvas.drawRect(left, top, left + length, bottom, p);
         }
 
@@ -13607,6 +15375,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             matrix.postRotate(90);
             matrix.postTranslate(right, top);
             fade.setLocalMatrix(matrix);
+            p.setShader(fade);
             canvas.drawRect(right - length, top, right, bottom, p);
         }
 
@@ -13614,6 +15383,115 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         // Step 6, draw decorations (scrollbars)
         onDrawScrollBars(canvas);
+
+        if (mOverlay != null && !mOverlay.isEmpty()) {
+            mOverlay.getOverlayView().dispatchDraw(canvas);
+        }
+    }
+
+    /**
+     * Draws the background onto the specified canvas.
+     *
+     * @param canvas Canvas on which to draw the background
+     */
+    private void drawBackground(Canvas canvas) {
+        final Drawable background = mBackground;
+        if (background == null) {
+            return;
+        }
+
+        if (mBackgroundSizeChanged) {
+            background.setBounds(0, 0,  mRight - mLeft, mBottom - mTop);
+            mBackgroundSizeChanged = false;
+            rebuildOutline();
+        }
+
+        // Attempt to use a display list if requested.
+        if (canvas.isHardwareAccelerated() && mAttachInfo != null
+                && mAttachInfo.mHardwareRenderer != null) {
+            mBackgroundRenderNode = getDrawableRenderNode(background, mBackgroundRenderNode);
+
+            final RenderNode renderNode = mBackgroundRenderNode;
+            if (renderNode != null && renderNode.isValid()) {
+                setBackgroundRenderNodeProperties(renderNode);
+                ((HardwareCanvas) canvas).drawRenderNode(renderNode);
+                return;
+            }
+        }
+
+        final int scrollX = mScrollX;
+        final int scrollY = mScrollY;
+        if ((scrollX | scrollY) == 0) {
+            background.draw(canvas);
+        } else {
+            canvas.translate(scrollX, scrollY);
+            background.draw(canvas);
+            canvas.translate(-scrollX, -scrollY);
+        }
+    }
+
+    private void setBackgroundRenderNodeProperties(RenderNode renderNode) {
+        renderNode.setTranslationX(mScrollX);
+        renderNode.setTranslationY(mScrollY);
+    }
+
+    /**
+     * Creates a new display list or updates the existing display list for the
+     * specified Drawable.
+     *
+     * @param drawable Drawable for which to create a display list
+     * @param renderNode Existing RenderNode, or {@code null}
+     * @return A valid display list for the specified drawable
+     */
+    private RenderNode getDrawableRenderNode(Drawable drawable, RenderNode renderNode) {
+        if (renderNode == null) {
+            renderNode = RenderNode.create(drawable.getClass().getName(), this);
+        }
+
+        final Rect bounds = drawable.getBounds();
+        final int width = bounds.width();
+        final int height = bounds.height();
+        final HardwareCanvas canvas = renderNode.start(width, height);
+
+        // Reverse left/top translation done by drawable canvas, which will
+        // instead be applied by rendernode's LTRB bounds below. This way, the
+        // drawable's bounds match with its rendernode bounds and its content
+        // will lie within those bounds in the rendernode tree.
+        canvas.translate(-bounds.left, -bounds.top);
+
+        try {
+            drawable.draw(canvas);
+        } finally {
+            renderNode.end(canvas);
+        }
+
+        // Set up drawable properties that are view-independent.
+        renderNode.setLeftTopRightBottom(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        renderNode.setProjectBackwards(drawable.isProjected());
+        renderNode.setProjectionReceiver(true);
+        renderNode.setClipToBounds(false);
+        return renderNode;
+    }
+
+    /**
+     * Returns the overlay for this view, creating it if it does not yet exist.
+     * Adding drawables to the overlay will cause them to be displayed whenever
+     * the view itself is redrawn. Objects in the overlay should be actively
+     * managed: remove them when they should not be displayed anymore. The
+     * overlay will always have the same size as its host view.
+     *
+     * <p>Note: Overlays do not currently work correctly with {@link
+     * SurfaceView} or {@link TextureView}; contents in overlays for these
+     * types of views may not display correctly.</p>
+     *
+     * @return The ViewOverlay object for this view.
+     * @see ViewOverlay
+     */
+    public ViewOverlay getOverlay() {
+        if (mOverlay == null) {
+            mOverlay = new ViewOverlay(mContext, this);
+        }
+        return mOverlay;
     }
 
     /**
@@ -13678,12 +15556,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         String output = "";
         int numFlags = 0;
 
-        if ((privateFlags & WANTS_FOCUS) == WANTS_FOCUS) {
+        if ((privateFlags & PFLAG_WANTS_FOCUS) == PFLAG_WANTS_FOCUS) {
             output += "WANTS_FOCUS";
             numFlags++;
         }
 
-        if ((privateFlags & FOCUSED) == FOCUSED) {
+        if ((privateFlags & PFLAG_FOCUSED) == PFLAG_FOCUSED) {
             if (numFlags > 0) {
                 output += " ";
             }
@@ -13691,7 +15569,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             numFlags++;
         }
 
-        if ((privateFlags & SELECTED) == SELECTED) {
+        if ((privateFlags & PFLAG_SELECTED) == PFLAG_SELECTED) {
             if (numFlags > 0) {
                 output += " ";
             }
@@ -13699,7 +15577,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             numFlags++;
         }
 
-        if ((privateFlags & IS_ROOT_NAMESPACE) == IS_ROOT_NAMESPACE) {
+        if ((privateFlags & PFLAG_IS_ROOT_NAMESPACE) == PFLAG_IS_ROOT_NAMESPACE) {
             if (numFlags > 0) {
                 output += " ";
             }
@@ -13707,7 +15585,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             numFlags++;
         }
 
-        if ((privateFlags & HAS_BOUNDS) == HAS_BOUNDS) {
+        if ((privateFlags & PFLAG_HAS_BOUNDS) == PFLAG_HAS_BOUNDS) {
             if (numFlags > 0) {
                 output += " ";
             }
@@ -13715,7 +15593,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             numFlags++;
         }
 
-        if ((privateFlags & DRAWN) == DRAWN) {
+        if ((privateFlags & PFLAG_DRAWN) == PFLAG_DRAWN) {
             if (numFlags > 0) {
                 output += " ";
             }
@@ -13732,7 +15610,26 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return true if the layout will be forced during next layout pass
      */
     public boolean isLayoutRequested() {
-        return (mPrivateFlags & FORCE_LAYOUT) == FORCE_LAYOUT;
+        return (mPrivateFlags & PFLAG_FORCE_LAYOUT) == PFLAG_FORCE_LAYOUT;
+    }
+
+    /**
+     * Return true if o is a ViewGroup that is laying out using optical bounds.
+     * @hide
+     */
+    public static boolean isLayoutModeOptical(Object o) {
+        return o instanceof ViewGroup && ((ViewGroup) o).isLayoutModeOptical();
+    }
+
+    private boolean setOpticalFrame(int left, int top, int right, int bottom) {
+        Insets parentInsets = mParent instanceof View ?
+                ((View) mParent).getOpticalInsets() : Insets.NONE;
+        Insets childInsets = getOpticalInsets();
+        return setFrame(
+                left   + parentInsets.left - childInsets.left,
+                top    + parentInsets.top  - childInsets.top,
+                right  + parentInsets.left + childInsets.right,
+                bottom + parentInsets.top  + childInsets.bottom);
     }
 
     /**
@@ -13757,14 +15654,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @SuppressWarnings({"unchecked"})
     public void layout(int l, int t, int r, int b) {
+        if ((mPrivateFlags3 & PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT) != 0) {
+            onMeasure(mOldWidthMeasureSpec, mOldHeightMeasureSpec);
+            mPrivateFlags3 &= ~PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT;
+        }
+
         int oldL = mLeft;
         int oldT = mTop;
         int oldB = mBottom;
         int oldR = mRight;
-        boolean changed = setFrame(l, t, r, b);
-        if (changed || (mPrivateFlags & LAYOUT_REQUIRED) == LAYOUT_REQUIRED) {
+
+        boolean changed = isLayoutModeOptical(mParent) ?
+                setOpticalFrame(l, t, r, b) : setFrame(l, t, r, b);
+
+        if (changed || (mPrivateFlags & PFLAG_LAYOUT_REQUIRED) == PFLAG_LAYOUT_REQUIRED) {
             onLayout(changed, l, t, r, b);
-            mPrivateFlags &= ~LAYOUT_REQUIRED;
+            mPrivateFlags &= ~PFLAG_LAYOUT_REQUIRED;
 
             ListenerInfo li = mListenerInfo;
             if (li != null && li.mOnLayoutChangeListeners != null) {
@@ -13776,7 +15681,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 }
             }
         }
-        mPrivateFlags &= ~FORCE_LAYOUT;
+
+        mPrivateFlags &= ~PFLAG_FORCE_LAYOUT;
+        mPrivateFlags3 |= PFLAG3_IS_LAID_OUT;
     }
 
     /**
@@ -13820,7 +15727,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             changed = true;
 
             // Remember our drawn bit
-            int drawn = mPrivateFlags & DRAWN;
+            int drawn = mPrivateFlags & PFLAG_DRAWN;
 
             int oldWidth = mRight - mLeft;
             int oldHeight = mBottom - mTop;
@@ -13835,30 +15742,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             mTop = top;
             mRight = right;
             mBottom = bottom;
-            if (mDisplayList != null) {
-                mDisplayList.setLeftTopRightBottom(mLeft, mTop, mRight, mBottom);
-            }
+            mRenderNode.setLeftTopRightBottom(mLeft, mTop, mRight, mBottom);
 
-            mPrivateFlags |= HAS_BOUNDS;
+            mPrivateFlags |= PFLAG_HAS_BOUNDS;
 
 
             if (sizeChanged) {
-                if ((mPrivateFlags & PIVOT_EXPLICITLY_SET) == 0) {
-                    // A change in dimension means an auto-centered pivot point changes, too
-                    if (mTransformationInfo != null) {
-                        mTransformationInfo.mMatrixDirty = true;
-                    }
-                }
-                onSizeChanged(newWidth, newHeight, oldWidth, oldHeight);
+                sizeChange(newWidth, newHeight, oldWidth, oldHeight);
             }
 
-            if ((mViewFlags & VISIBILITY_MASK) == VISIBLE) {
+            if ((mViewFlags & VISIBILITY_MASK) == VISIBLE || mGhostView != null) {
                 // If we are visible, force the DRAWN bit to on so that
                 // this invalidate will go through (at least to our parent).
                 // This is because someone may have invalidated this view
                 // before this call to setFrame came in, thereby clearing
                 // the DRAWN bit.
-                mPrivateFlags |= DRAWN;
+                mPrivateFlags |= PFLAG_DRAWN;
                 invalidate(sizeChanged);
                 // parent display list may need to be recreated based on a change in the bounds
                 // of any child
@@ -13869,8 +15768,27 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             mPrivateFlags |= drawn;
 
             mBackgroundSizeChanged = true;
+
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
         return changed;
+    }
+
+    /**
+     * Same as setFrame, but public and hidden. For use in {@link android.transition.ChangeBounds}.
+     * @hide
+     */
+    public void setLeftTopRightBottom(int left, int top, int right, int bottom) {
+        setFrame(left, top, right, bottom);
+    }
+
+    private void sizeChange(int newWidth, int newHeight, int oldWidth, int oldHeight) {
+        onSizeChanged(newWidth, newHeight, oldWidth, oldHeight);
+        if (mOverlay != null) {
+            mOverlay.getOverlayView().setRight(newWidth);
+            mOverlay.getOverlayView().setBottom(newHeight);
+        }
+        rebuildOutline();
     }
 
     /**
@@ -13897,14 +15815,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @param drawable the drawable to invalidate
      */
-    public void invalidateDrawable(Drawable drawable) {
+    @Override
+    public void invalidateDrawable(@NonNull Drawable drawable) {
         if (verifyDrawable(drawable)) {
-            final Rect dirty = drawable.getBounds();
+            final Rect dirty = drawable.getDirtyBounds();
             final int scrollX = mScrollX;
             final int scrollY = mScrollY;
 
             invalidate(dirty.left + scrollX, dirty.top + scrollY,
                     dirty.right + scrollX, dirty.bottom + scrollY);
+            rebuildOutline();
         }
     }
 
@@ -13916,6 +15836,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param when the time at which the action must occur. Uses the
      *        {@link SystemClock#uptimeMillis} timebase.
      */
+    @Override
     public void scheduleDrawable(Drawable who, Runnable what, long when) {
         if (verifyDrawable(who) && what != null) {
             final long delay = when - SystemClock.uptimeMillis();
@@ -13935,14 +15856,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param who the recipient of the action
      * @param what the action to cancel
      */
+    @Override
     public void unscheduleDrawable(Drawable who, Runnable what) {
         if (verifyDrawable(who) && what != null) {
             if (mAttachInfo != null) {
                 mAttachInfo.mViewRootImpl.mChoreographer.removeCallbacks(
                         Choreographer.CALLBACK_ANIMATION, what, who);
-            } else {
-                ViewRootImpl.getRunQueue().removeCallbacks(what);
             }
+            ViewRootImpl.getRunQueue().removeCallbacks(what);
         }
     }
 
@@ -13963,13 +15884,64 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-    * Return the layout direction of a given Drawable.
-    *
-    * @param who the Drawable to query
-    * @hide
-    */
-    public int getResolvedLayoutDirection(Drawable who) {
-        return (who == mBackground) ? getResolvedLayoutDirection() : LAYOUT_DIRECTION_DEFAULT;
+     * Resolve the Drawables depending on the layout direction. This is implicitly supposing
+     * that the View directionality can and will be resolved before its Drawables.
+     *
+     * Will call {@link View#onResolveDrawables} when resolution is done.
+     *
+     * @hide
+     */
+    protected void resolveDrawables() {
+        // Drawables resolution may need to happen before resolving the layout direction (which is
+        // done only during the measure() call).
+        // If the layout direction is not resolved yet, we cannot resolve the Drawables except in
+        // one case: when the raw layout direction has not been defined as LAYOUT_DIRECTION_INHERIT.
+        // So, if the raw layout direction is LAYOUT_DIRECTION_LTR or LAYOUT_DIRECTION_RTL or
+        // LAYOUT_DIRECTION_LOCALE, we can "cheat" and we don't need to wait for the layout
+        // direction to be resolved as its resolved value will be the same as its raw value.
+        if (!isLayoutDirectionResolved() &&
+                getRawLayoutDirection() == View.LAYOUT_DIRECTION_INHERIT) {
+            return;
+        }
+
+        final int layoutDirection = isLayoutDirectionResolved() ?
+                getLayoutDirection() : getRawLayoutDirection();
+
+        if (mBackground != null) {
+            mBackground.setLayoutDirection(layoutDirection);
+        }
+        mPrivateFlags2 |= PFLAG2_DRAWABLE_RESOLVED;
+        onResolveDrawables(layoutDirection);
+    }
+
+    boolean areDrawablesResolved() {
+        return (mPrivateFlags2 & PFLAG2_DRAWABLE_RESOLVED) == PFLAG2_DRAWABLE_RESOLVED;
+    }
+
+    /**
+     * Called when layout direction has been resolved.
+     *
+     * The default implementation does nothing.
+     *
+     * @param layoutDirection The resolved layout direction.
+     *
+     * @see #LAYOUT_DIRECTION_LTR
+     * @see #LAYOUT_DIRECTION_RTL
+     *
+     * @hide
+     */
+    public void onResolveDrawables(@ResolvedLayoutDir int layoutDirection) {
+    }
+
+    /**
+     * @hide
+     */
+    protected void resetResolvedDrawables() {
+        resetResolvedDrawablesInternal();
+    }
+
+    void resetResolvedDrawablesInternal() {
+        mPrivateFlags2 &= ~PFLAG2_DRAWABLE_RESOLVED;
     }
 
     /**
@@ -13998,17 +15970,53 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * This function is called whenever the state of the view changes in such
      * a way that it impacts the state of drawables being shown.
-     *
-     * <p>Be sure to call through to the superclass when overriding this
-     * function.
+     * <p>
+     * If the View has a StateListAnimator, it will also be called to run necessary state
+     * change animations.
+     * <p>
+     * Be sure to call through to the superclass when overriding this function.
      *
      * @see Drawable#setState(int[])
      */
     protected void drawableStateChanged() {
-        Drawable d = mBackground;
+        final Drawable d = mBackground;
         if (d != null && d.isStateful()) {
             d.setState(getDrawableState());
         }
+
+        if (mStateListAnimator != null) {
+            mStateListAnimator.setState(getDrawableState());
+        }
+    }
+
+    /**
+     * This function is called whenever the view hotspot changes and needs to
+     * be propagated to drawables or child views managed by the view.
+     * <p>
+     * Dispatching to child views is handled by
+     * {@link #dispatchDrawableHotspotChanged(float, float)}.
+     * <p>
+     * Be sure to call through to the superclass when overriding this function.
+     *
+     * @param x hotspot x coordinate
+     * @param y hotspot y coordinate
+     */
+    public void drawableHotspotChanged(float x, float y) {
+        if (mBackground != null) {
+            mBackground.setHotspot(x, y);
+        }
+
+        dispatchDrawableHotspotChanged(x, y);
+    }
+
+    /**
+     * Dispatches drawableHotspotChanged to all of this View's children.
+     *
+     * @param x hotspot x coordinate
+     * @param y hotspot y coordinate
+     * @see #drawableHotspotChanged(float, float)
+     */
+    public void dispatchDrawableHotspotChanged(float x, float y) {
     }
 
     /**
@@ -14020,7 +16028,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #getDrawableState
      */
     public void refreshDrawableState() {
-        mPrivateFlags |= DRAWABLE_STATE_DIRTY;
+        mPrivateFlags |= PFLAG_DRAWABLE_STATE_DIRTY;
         drawableStateChanged();
 
         ViewParent parent = mParent;
@@ -14040,11 +16048,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #onCreateDrawableState(int)
      */
     public final int[] getDrawableState() {
-        if ((mDrawableState != null) && ((mPrivateFlags & DRAWABLE_STATE_DIRTY) == 0)) {
+        if ((mDrawableState != null) && ((mPrivateFlags & PFLAG_DRAWABLE_STATE_DIRTY) == 0)) {
             return mDrawableState;
         } else {
             mDrawableState = onCreateDrawableState(0);
-            mPrivateFlags &= ~DRAWABLE_STATE_DIRTY;
+            mPrivateFlags &= ~PFLAG_DRAWABLE_STATE_DIRTY;
             return mDrawableState;
         }
     }
@@ -14075,12 +16083,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         int privateFlags = mPrivateFlags;
 
         int viewStateIndex = 0;
-        if ((privateFlags & PRESSED) != 0) viewStateIndex |= VIEW_STATE_PRESSED;
+        if ((privateFlags & PFLAG_PRESSED) != 0) viewStateIndex |= VIEW_STATE_PRESSED;
         if ((mViewFlags & ENABLED_MASK) == ENABLED) viewStateIndex |= VIEW_STATE_ENABLED;
         if (isFocused()) viewStateIndex |= VIEW_STATE_FOCUSED;
-        if ((privateFlags & SELECTED) != 0) viewStateIndex |= VIEW_STATE_SELECTED;
+        if ((privateFlags & PFLAG_SELECTED) != 0) viewStateIndex |= VIEW_STATE_SELECTED;
         if (hasWindowFocus()) viewStateIndex |= VIEW_STATE_WINDOW_FOCUSED;
-        if ((privateFlags & ACTIVATED) != 0) viewStateIndex |= VIEW_STATE_ACTIVATED;
+        if ((privateFlags & PFLAG_ACTIVATED) != 0) viewStateIndex |= VIEW_STATE_ACTIVATED;
         if (mAttachInfo != null && mAttachInfo.mHardwareAccelerationRequested &&
                 HardwareRenderer.isAvailable()) {
             // This is set if HW acceleration is requested, even if the current
@@ -14088,11 +16096,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             // windows to better match their app.
             viewStateIndex |= VIEW_STATE_ACCELERATED;
         }
-        if ((privateFlags & HOVERED) != 0) viewStateIndex |= VIEW_STATE_HOVERED;
+        if ((privateFlags & PFLAG_HOVERED) != 0) viewStateIndex |= VIEW_STATE_HOVERED;
 
         final int privateFlags2 = mPrivateFlags2;
-        if ((privateFlags2 & DRAG_CAN_ACCEPT) != 0) viewStateIndex |= VIEW_STATE_DRAG_CAN_ACCEPT;
-        if ((privateFlags2 & DRAG_HOVERED) != 0) viewStateIndex |= VIEW_STATE_DRAG_HOVERED;
+        if ((privateFlags2 & PFLAG2_DRAG_CAN_ACCEPT) != 0) viewStateIndex |= VIEW_STATE_DRAG_CAN_ACCEPT;
+        if ((privateFlags2 & PFLAG2_DRAG_HOVERED) != 0) viewStateIndex |= VIEW_STATE_DRAG_HOVERED;
 
         drawableState = VIEW_STATE_SETS[viewStateIndex];
 
@@ -14100,10 +16108,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         if (false) {
             Log.i("View", "drawableStateIndex=" + viewStateIndex);
             Log.i("View", toString()
-                    + " pressed=" + ((privateFlags & PRESSED) != 0)
+                    + " pressed=" + ((privateFlags & PFLAG_PRESSED) != 0)
                     + " en=" + ((mViewFlags & ENABLED_MASK) == ENABLED)
                     + " fo=" + hasFocus()
-                    + " sl=" + ((privateFlags & SELECTED) != 0)
+                    + " sl=" + ((privateFlags & PFLAG_SELECTED) != 0)
                     + " wf=" + hasWindowFocus()
                     + ": " + Arrays.toString(drawableState));
         }
@@ -14153,10 +16161,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Call {@link Drawable#jumpToCurrentState() Drawable.jumpToCurrentState()}
      * on all Drawable objects associated with this view.
+     * <p>
+     * Also calls {@link StateListAnimator#jumpToCurrentState()} if there is a StateListAnimator
+     * attached to this view.
      */
     public void jumpDrawablesToCurrentState() {
         if (mBackground != null) {
             mBackground.jumpToCurrentState();
+        }
+        if (mStateListAnimator != null) {
+            mStateListAnimator.jumpToCurrentState();
         }
     }
 
@@ -14167,7 +16181,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     @RemotableViewMethod
     public void setBackgroundColor(int color) {
         if (mBackground instanceof ColorDrawable) {
-            ((ColorDrawable) mBackground).setColor(color);
+            ((ColorDrawable) mBackground.mutate()).setColor(color);
+            computeOpaqueFlags();
+            mBackgroundResource = 0;
         } else {
             setBackground(new ColorDrawable(color));
         }
@@ -14186,9 +16202,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             return;
         }
 
-        Drawable d= null;
+        Drawable d = null;
         if (resid != 0) {
-            d = mResources.getDrawable(resid);
+            d = mContext.getDrawable(resid);
         }
         setBackground(d);
 
@@ -14215,6 +16231,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @Deprecated
     public void setBackgroundDrawable(Drawable background) {
+        computeOpaqueFlags();
+
         if (background == mBackground) {
             return;
         }
@@ -14238,21 +16256,31 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 padding = new Rect();
                 sThreadLocal.set(padding);
             }
+            resetResolvedDrawablesInternal();
+            background.setLayoutDirection(getLayoutDirection());
             if (background.getPadding(padding)) {
-                switch (background.getResolvedLayoutDirectionSelf()) {
+                resetResolvedPaddingInternal();
+                switch (background.getLayoutDirection()) {
                     case LAYOUT_DIRECTION_RTL:
-                        setPadding(padding.right, padding.top, padding.left, padding.bottom);
+                        mUserPaddingLeftInitial = padding.right;
+                        mUserPaddingRightInitial = padding.left;
+                        internalSetPadding(padding.right, padding.top, padding.left, padding.bottom);
                         break;
                     case LAYOUT_DIRECTION_LTR:
                     default:
-                        setPadding(padding.left, padding.top, padding.right, padding.bottom);
+                        mUserPaddingLeftInitial = padding.left;
+                        mUserPaddingRightInitial = padding.right;
+                        internalSetPadding(padding.left, padding.top, padding.right, padding.bottom);
                 }
+                mLeftPaddingDefined = false;
+                mRightPaddingDefined = false;
             }
 
             // Compare the minimum sizes of the old Drawable and the new.  If there isn't an old or
             // if it has a different minimum size, we should layout again
-            if (mBackground == null || mBackground.getMinimumHeight() != background.getMinimumHeight() ||
-                    mBackground.getMinimumWidth() != background.getMinimumWidth()) {
+            if (mBackground == null
+                    || mBackground.getMinimumHeight() != background.getMinimumHeight()
+                    || mBackground.getMinimumWidth() != background.getMinimumWidth()) {
                 requestLayout = true;
             }
 
@@ -14263,23 +16291,25 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             background.setVisible(getVisibility() == VISIBLE, false);
             mBackground = background;
 
-            if ((mPrivateFlags & SKIP_DRAW) != 0) {
-                mPrivateFlags &= ~SKIP_DRAW;
-                mPrivateFlags |= ONLY_DRAWS_BACKGROUND;
+            applyBackgroundTint();
+
+            if ((mPrivateFlags & PFLAG_SKIP_DRAW) != 0) {
+                mPrivateFlags &= ~PFLAG_SKIP_DRAW;
+                mPrivateFlags |= PFLAG_ONLY_DRAWS_BACKGROUND;
                 requestLayout = true;
             }
         } else {
             /* Remove the background */
             mBackground = null;
 
-            if ((mPrivateFlags & ONLY_DRAWS_BACKGROUND) != 0) {
+            if ((mPrivateFlags & PFLAG_ONLY_DRAWS_BACKGROUND) != 0) {
                 /*
                  * This view ONLY drew the background before and we're removing
                  * the background, so now it won't draw anything
                  * (hence we SKIP_DRAW)
                  */
-                mPrivateFlags &= ~ONLY_DRAWS_BACKGROUND;
-                mPrivateFlags |= SKIP_DRAW;
+                mPrivateFlags &= ~PFLAG_ONLY_DRAWS_BACKGROUND;
+                mPrivateFlags |= PFLAG_SKIP_DRAW;
             }
 
             /*
@@ -14318,6 +16348,100 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Applies a tint to the background drawable. Does not modify the current tint
+     * mode, which is {@link PorterDuff.Mode#SRC_IN} by default.
+     * <p>
+     * Subsequent calls to {@link #setBackground(Drawable)} will automatically
+     * mutate the drawable and apply the specified tint and tint mode using
+     * {@link Drawable#setTintList(ColorStateList)}.
+     *
+     * @param tint the tint to apply, may be {@code null} to clear tint
+     *
+     * @attr ref android.R.styleable#View_backgroundTint
+     * @see #getBackgroundTintList()
+     * @see Drawable#setTintList(ColorStateList)
+     */
+    public void setBackgroundTintList(@Nullable ColorStateList tint) {
+        if (mBackgroundTint == null) {
+            mBackgroundTint = new TintInfo();
+        }
+        mBackgroundTint.mTintList = tint;
+        mBackgroundTint.mHasTintList = true;
+
+        applyBackgroundTint();
+    }
+
+    /**
+     * Return the tint applied to the background drawable, if specified.
+     *
+     * @return the tint applied to the background drawable
+     * @attr ref android.R.styleable#View_backgroundTint
+     * @see #setBackgroundTintList(ColorStateList)
+     */
+    @Nullable
+    public ColorStateList getBackgroundTintList() {
+        return mBackgroundTint != null ? mBackgroundTint.mTintList : null;
+    }
+
+    /**
+     * Specifies the blending mode used to apply the tint specified by
+     * {@link #setBackgroundTintList(ColorStateList)}} to the background
+     * drawable. The default mode is {@link PorterDuff.Mode#SRC_IN}.
+     *
+     * @param tintMode the blending mode used to apply the tint, may be
+     *                 {@code null} to clear tint
+     * @attr ref android.R.styleable#View_backgroundTintMode
+     * @see #getBackgroundTintMode()
+     * @see Drawable#setTintMode(PorterDuff.Mode)
+     */
+    public void setBackgroundTintMode(@Nullable PorterDuff.Mode tintMode) {
+        if (mBackgroundTint == null) {
+            mBackgroundTint = new TintInfo();
+        }
+        mBackgroundTint.mTintMode = tintMode;
+        mBackgroundTint.mHasTintMode = true;
+
+        applyBackgroundTint();
+    }
+
+    /**
+     * Return the blending mode used to apply the tint to the background
+     * drawable, if specified.
+     *
+     * @return the blending mode used to apply the tint to the background
+     *         drawable
+     * @attr ref android.R.styleable#View_backgroundTintMode
+     * @see #setBackgroundTintMode(PorterDuff.Mode)
+     */
+    @Nullable
+    public PorterDuff.Mode getBackgroundTintMode() {
+        return mBackgroundTint != null ? mBackgroundTint.mTintMode : null;
+    }
+
+    private void applyBackgroundTint() {
+        if (mBackground != null && mBackgroundTint != null) {
+            final TintInfo tintInfo = mBackgroundTint;
+            if (tintInfo.mHasTintList || tintInfo.mHasTintMode) {
+                mBackground = mBackground.mutate();
+
+                if (tintInfo.mHasTintList) {
+                    mBackground.setTintList(tintInfo.mTintList);
+                }
+
+                if (tintInfo.mHasTintMode) {
+                    mBackground.setTintMode(tintInfo.mTintMode);
+                }
+
+                // The drawable (or one of its children) may not have been
+                // stateful before applying the tint, so let's try again.
+                if (mBackground.isStateful()) {
+                    mBackground.setState(getDrawableState());
+                }
+            }
+        }
+    }
+
+    /**
      * Sets the padding. The view may add on the space required to display
      * the scrollbars, depending on the style and visibility of the scrollbars.
      * So the values returned from {@link #getPaddingLeft}, {@link #getPaddingTop},
@@ -14335,14 +16459,24 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param bottom the bottom padding in pixels
      */
     public void setPadding(int left, int top, int right, int bottom) {
-        mUserPaddingStart = -1;
-        mUserPaddingEnd = -1;
-        mUserPaddingRelative = false;
+        resetResolvedPaddingInternal();
+
+        mUserPaddingStart = UNDEFINED_PADDING;
+        mUserPaddingEnd = UNDEFINED_PADDING;
+
+        mUserPaddingLeftInitial = left;
+        mUserPaddingRightInitial = right;
+
+        mLeftPaddingDefined = true;
+        mRightPaddingDefined = true;
 
         internalSetPadding(left, top, right, bottom);
     }
 
-    private void internalSetPadding(int left, int top, int right, int bottom) {
+    /**
+     * @hide
+     */
+    protected void internalSetPadding(int left, int top, int right, int bottom) {
         mUserPaddingLeft = left;
         mUserPaddingRight = right;
         mUserPaddingBottom = bottom;
@@ -14357,7 +16491,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                         ? 0 : getVerticalScrollbarWidth();
                 switch (mVerticalScrollbarPosition) {
                     case SCROLLBAR_POSITION_DEFAULT:
-                        if (getResolvedLayoutDirection() == LAYOUT_DIRECTION_RTL) {
+                        if (isLayoutRtl()) {
                             left += offset;
                         } else {
                             right += offset;
@@ -14396,31 +16530,45 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         if (changed) {
             requestLayout();
+            invalidateOutline();
         }
     }
 
     /**
      * Sets the relative padding. The view may add on the space required to display
      * the scrollbars, depending on the style and visibility of the scrollbars.
+     * So the values returned from {@link #getPaddingStart}, {@link #getPaddingTop},
+     * {@link #getPaddingEnd} and {@link #getPaddingBottom} may be different
      * from the values set in this call.
      *
+     * @attr ref android.R.styleable#View_padding
+     * @attr ref android.R.styleable#View_paddingBottom
+     * @attr ref android.R.styleable#View_paddingStart
+     * @attr ref android.R.styleable#View_paddingEnd
+     * @attr ref android.R.styleable#View_paddingTop
      * @param start the start padding in pixels
      * @param top the top padding in pixels
      * @param end the end padding in pixels
      * @param bottom the bottom padding in pixels
-     * @hide
      */
     public void setPaddingRelative(int start, int top, int end, int bottom) {
+        resetResolvedPaddingInternal();
+
         mUserPaddingStart = start;
         mUserPaddingEnd = end;
-        mUserPaddingRelative = true;
+        mLeftPaddingDefined = true;
+        mRightPaddingDefined = true;
 
-        switch(getResolvedLayoutDirection()) {
+        switch(getLayoutDirection()) {
             case LAYOUT_DIRECTION_RTL:
+                mUserPaddingLeftInitial = end;
+                mUserPaddingRightInitial = start;
                 internalSetPadding(end, top, start, bottom);
                 break;
             case LAYOUT_DIRECTION_LTR:
             default:
+                mUserPaddingLeftInitial = start;
+                mUserPaddingRightInitial = end;
                 internalSetPadding(start, top, end, bottom);
         }
     }
@@ -14453,6 +16601,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return the left padding in pixels
      */
     public int getPaddingLeft() {
+        if (!isPaddingResolved()) {
+            resolvePadding();
+        }
         return mPaddingLeft;
     }
 
@@ -14462,10 +16613,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * required to display the scrollbars as well.
      *
      * @return the start padding in pixels
-     * @hide
      */
     public int getPaddingStart() {
-        return (getResolvedLayoutDirection() == LAYOUT_DIRECTION_RTL) ?
+        if (!isPaddingResolved()) {
+            resolvePadding();
+        }
+        return (getLayoutDirection() == LAYOUT_DIRECTION_RTL) ?
                 mPaddingRight : mPaddingLeft;
     }
 
@@ -14477,6 +16630,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return the right padding in pixels
      */
     public int getPaddingRight() {
+        if (!isPaddingResolved()) {
+            resolvePadding();
+        }
         return mPaddingRight;
     }
 
@@ -14486,22 +16642,47 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * required to display the scrollbars as well.
      *
      * @return the end padding in pixels
-     * @hide
      */
     public int getPaddingEnd() {
-        return (getResolvedLayoutDirection() == LAYOUT_DIRECTION_RTL) ?
+        if (!isPaddingResolved()) {
+            resolvePadding();
+        }
+        return (getLayoutDirection() == LAYOUT_DIRECTION_RTL) ?
                 mPaddingLeft : mPaddingRight;
     }
 
     /**
      * Return if the padding as been set thru relative values
-     * {@link #setPaddingRelative(int, int, int, int)}
+     * {@link #setPaddingRelative(int, int, int, int)} or thru
+     * @attr ref android.R.styleable#View_paddingStart or
+     * @attr ref android.R.styleable#View_paddingEnd
      *
      * @return true if the padding is relative or false if it is not.
-     * @hide
      */
     public boolean isPaddingRelative() {
-        return mUserPaddingRelative;
+        return (mUserPaddingStart != UNDEFINED_PADDING || mUserPaddingEnd != UNDEFINED_PADDING);
+    }
+
+    Insets computeOpticalInsets() {
+        return (mBackground == null) ? Insets.NONE : mBackground.getOpticalInsets();
+    }
+
+    /**
+     * @hide
+     */
+    public void resetPaddingToInitialValues() {
+        if (isRtlCompatibilityMode()) {
+            mPaddingLeft = mUserPaddingLeftInitial;
+            mPaddingRight = mUserPaddingRightInitial;
+            return;
+        }
+        if (isLayoutRtl()) {
+            mPaddingLeft = (mUserPaddingEnd >= 0) ? mUserPaddingEnd : mUserPaddingLeftInitial;
+            mPaddingRight = (mUserPaddingStart >= 0) ? mUserPaddingStart : mUserPaddingRightInitial;
+        } else {
+            mPaddingLeft = (mUserPaddingStart >= 0) ? mUserPaddingStart : mUserPaddingLeftInitial;
+            mPaddingRight = (mUserPaddingEnd >= 0) ? mUserPaddingEnd : mUserPaddingRightInitial;
+        }
     }
 
     /**
@@ -14509,16 +16690,23 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public Insets getOpticalInsets() {
         if (mLayoutInsets == null) {
-            mLayoutInsets = (mBackground == null) ? Insets.NONE : mBackground.getLayoutInsets();
+            mLayoutInsets = computeOpticalInsets();
         }
         return mLayoutInsets;
     }
 
     /**
+     * Set this view's optical insets.
+     *
+     * <p>This method should be treated similarly to setMeasuredDimension and not as a general
+     * property. Views that compute their own optical insets should call it as part of measurement.
+     * This method does not request layout. If you are setting optical insets outside of
+     * measure/layout itself you will want to call requestLayout() yourself.
+     * </p>
      * @hide
      */
-    public void setLayoutInsets(Insets layoutInsets) {
-        mLayoutInsets = layoutInsets;
+    public void setOpticalInsets(Insets insets) {
+        mLayoutInsets = insets;
     }
 
     /**
@@ -14530,14 +16718,18 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param selected true if the view must be selected, false otherwise
      */
     public void setSelected(boolean selected) {
-        if (((mPrivateFlags & SELECTED) != 0) != selected) {
-            mPrivateFlags = (mPrivateFlags & ~SELECTED) | (selected ? SELECTED : 0);
+        //noinspection DoubleNegation
+        if (((mPrivateFlags & PFLAG_SELECTED) != 0) != selected) {
+            mPrivateFlags = (mPrivateFlags & ~PFLAG_SELECTED) | (selected ? PFLAG_SELECTED : 0);
             if (!selected) resetPressedState();
             invalidate(true);
             refreshDrawableState();
             dispatchSetSelected(selected);
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                notifyAccessibilityStateChanged();
+            if (selected) {
+                sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
+            } else {
+                notifyViewAccessibilityStateChangedIfNeeded(
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -14559,7 +16751,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty
     public boolean isSelected() {
-        return (mPrivateFlags & SELECTED) != 0;
+        return (mPrivateFlags & PFLAG_SELECTED) != 0;
     }
 
     /**
@@ -14576,8 +16768,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param activated true if the view must be activated, false otherwise
      */
     public void setActivated(boolean activated) {
-        if (((mPrivateFlags & ACTIVATED) != 0) != activated) {
-            mPrivateFlags = (mPrivateFlags & ~ACTIVATED) | (activated ? ACTIVATED : 0);
+        //noinspection DoubleNegation
+        if (((mPrivateFlags & PFLAG_ACTIVATED) != 0) != activated) {
+            mPrivateFlags = (mPrivateFlags & ~PFLAG_ACTIVATED) | (activated ? PFLAG_ACTIVATED : 0);
             invalidate(true);
             refreshDrawableState();
             dispatchSetActivated(activated);
@@ -14601,7 +16794,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     @ViewDebug.ExportedProperty
     public boolean isActivated() {
-        return (mPrivateFlags & ACTIVATED) != 0;
+        return (mPrivateFlags & PFLAG_ACTIVATED) != 0;
     }
 
     /**
@@ -14646,6 +16839,113 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
 
         return parent;
+    }
+
+    /**
+     * Transforms a motion event from view-local coordinates to on-screen
+     * coordinates.
+     *
+     * @param ev the view-local motion event
+     * @return false if the transformation could not be applied
+     * @hide
+     */
+    public boolean toGlobalMotionEvent(MotionEvent ev) {
+        final AttachInfo info = mAttachInfo;
+        if (info == null) {
+            return false;
+        }
+
+        final Matrix m = info.mTmpMatrix;
+        m.set(Matrix.IDENTITY_MATRIX);
+        transformMatrixToGlobal(m);
+        ev.transform(m);
+        return true;
+    }
+
+    /**
+     * Transforms a motion event from on-screen coordinates to view-local
+     * coordinates.
+     *
+     * @param ev the on-screen motion event
+     * @return false if the transformation could not be applied
+     * @hide
+     */
+    public boolean toLocalMotionEvent(MotionEvent ev) {
+        final AttachInfo info = mAttachInfo;
+        if (info == null) {
+            return false;
+        }
+
+        final Matrix m = info.mTmpMatrix;
+        m.set(Matrix.IDENTITY_MATRIX);
+        transformMatrixToLocal(m);
+        ev.transform(m);
+        return true;
+    }
+
+    /**
+     * Modifies the input matrix such that it maps view-local coordinates to
+     * on-screen coordinates.
+     *
+     * @param m input matrix to modify
+     * @hide
+     */
+    public void transformMatrixToGlobal(Matrix m) {
+        final ViewParent parent = mParent;
+        if (parent instanceof View) {
+            final View vp = (View) parent;
+            vp.transformMatrixToGlobal(m);
+            m.preTranslate(-vp.mScrollX, -vp.mScrollY);
+        } else if (parent instanceof ViewRootImpl) {
+            final ViewRootImpl vr = (ViewRootImpl) parent;
+            vr.transformMatrixToGlobal(m);
+            m.preTranslate(0, -vr.mCurScrollY);
+        }
+
+        m.preTranslate(mLeft, mTop);
+
+        if (!hasIdentityMatrix()) {
+            m.preConcat(getMatrix());
+        }
+    }
+
+    /**
+     * Modifies the input matrix such that it maps on-screen coordinates to
+     * view-local coordinates.
+     *
+     * @param m input matrix to modify
+     * @hide
+     */
+    public void transformMatrixToLocal(Matrix m) {
+        final ViewParent parent = mParent;
+        if (parent instanceof View) {
+            final View vp = (View) parent;
+            vp.transformMatrixToLocal(m);
+            m.postTranslate(vp.mScrollX, vp.mScrollY);
+        } else if (parent instanceof ViewRootImpl) {
+            final ViewRootImpl vr = (ViewRootImpl) parent;
+            vr.transformMatrixToLocal(m);
+            m.postTranslate(0, vr.mCurScrollY);
+        }
+
+        m.postTranslate(-mLeft, -mTop);
+
+        if (!hasIdentityMatrix()) {
+            m.postConcat(getInverseMatrix());
+        }
+    }
+
+    /**
+     * @hide
+     */
+    @ViewDebug.ExportedProperty(category = "layout", indexMapping = {
+            @ViewDebug.IntToString(from = 0, to = "x"),
+            @ViewDebug.IntToString(from = 1, to = "y")
+    })
+    public int[] getLocationOnScreen() {
+        int[] location = new int[2];
+        getLocationOnScreen(location);
+        return location;
     }
 
     /**
@@ -14796,8 +17096,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @param accessibilityId The accessibility id.
      * @return The found view.
+     *
+     * @hide
      */
-    View findViewByAccessibilityIdTraversal(int accessibilityId) {
+    public View findViewByAccessibilityIdTraversal(int accessibilityId) {
         if (getAccessibilityViewId() == accessibilityId) {
             return this;
         }
@@ -14879,6 +17181,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void setId(int id) {
         mID = id;
+        if (mID == View.NO_ID && mLabelForId != View.NO_ID) {
+            mID = generateViewId();
+        }
     }
 
     /**
@@ -14889,9 +17194,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      */
     public void setIsRootNamespace(boolean isRoot) {
         if (isRoot) {
-            mPrivateFlags |= IS_ROOT_NAMESPACE;
+            mPrivateFlags |= PFLAG_IS_ROOT_NAMESPACE;
         } else {
-            mPrivateFlags &= ~IS_ROOT_NAMESPACE;
+            mPrivateFlags &= ~PFLAG_IS_ROOT_NAMESPACE;
         }
     }
 
@@ -14901,7 +17206,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @return true if the view belongs to the root namespace, false otherwise
      */
     public boolean isRootNamespace() {
-        return (mPrivateFlags&IS_ROOT_NAMESPACE) != 0;
+        return (mPrivateFlags&PFLAG_IS_ROOT_NAMESPACE) != 0;
     }
 
     /**
@@ -14922,7 +17227,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Returns this view's tag.
      *
-     * @return the Object stored in this view as a tag
+     * @return the Object stored in this view as a tag, or {@code null} if not
+     *         set
      *
      * @see #setTag(Object)
      * @see #getTag(int)
@@ -14952,7 +17258,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      *
      * @param key The key identifying the tag
      *
-     * @return the Object stored in this view as a tag
+     * @return the Object stored in this view as a tag, or {@code null} if not
+     *         set
      *
      * @see #setTag(int, Object)
      * @see #getTag()
@@ -15011,7 +17318,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
     private void setKeyedTag(int key, Object tag) {
         if (mKeyedTags == null) {
-            mKeyedTags = new SparseArray<Object>();
+            mKeyedTags = new SparseArray<Object>(2);
         }
 
         mKeyedTags.put(key, tag);
@@ -15050,7 +17357,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
         Log.d(VIEW_LOG_TAG, output);
 
-        if ((mPrivateFlags & FOCUSED) != 0) {
+        if ((mPrivateFlags & PFLAG_FOCUSED) != 0) {
             output = debugIndent(depth) + " FOCUSED";
             Log.d(VIEW_LOG_TAG, output);
         }
@@ -15125,20 +17432,51 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Returns whether the view hierarchy is currently undergoing a layout pass. This
+     * information is useful to avoid situations such as calling {@link #requestLayout()} during
+     * a layout pass.
+     *
+     * @return whether the view hierarchy is currently undergoing a layout pass
+     */
+    public boolean isInLayout() {
+        ViewRootImpl viewRoot = getViewRootImpl();
+        return (viewRoot != null && viewRoot.isInLayout());
+    }
+
+    /**
      * Call this when something has changed which has invalidated the
      * layout of this view. This will schedule a layout pass of the view
-     * tree.
+     * tree. This should not be called while the view hierarchy is currently in a layout
+     * pass ({@link #isInLayout()}. If layout is happening, the request may be honored at the
+     * end of the current layout pass (and then layout will run again) or after the current
+     * frame is drawn and the next layout occurs.
+     *
+     * <p>Subclasses which override this method should call the superclass method to
+     * handle possible request-during-layout errors correctly.</p>
      */
     public void requestLayout() {
-        mPrivateFlags |= FORCE_LAYOUT;
-        mPrivateFlags |= INVALIDATED;
+        if (mMeasureCache != null) mMeasureCache.clear();
 
-        if (mLayoutParams != null) {
-            mLayoutParams.onResolveLayoutDirection(getResolvedLayoutDirection());
+        if (mAttachInfo != null && mAttachInfo.mViewRequestingLayout == null) {
+            // Only trigger request-during-layout logic if this is the view requesting it,
+            // not the views in its parent hierarchy
+            ViewRootImpl viewRoot = getViewRootImpl();
+            if (viewRoot != null && viewRoot.isInLayout()) {
+                if (!viewRoot.requestLayoutDuringLayout(this)) {
+                    return;
+                }
+            }
+            mAttachInfo.mViewRequestingLayout = this;
         }
+
+        mPrivateFlags |= PFLAG_FORCE_LAYOUT;
+        mPrivateFlags |= PFLAG_INVALIDATED;
 
         if (mParent != null && !mParent.isLayoutRequested()) {
             mParent.requestLayout();
+        }
+        if (mAttachInfo != null && mAttachInfo.mViewRequestingLayout == this) {
+            mAttachInfo.mViewRequestingLayout = null;
         }
     }
 
@@ -15148,8 +17486,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * on the parent.
      */
     public void forceLayout() {
-        mPrivateFlags |= FORCE_LAYOUT;
-        mPrivateFlags |= INVALIDATED;
+        if (mMeasureCache != null) mMeasureCache.clear();
+
+        mPrivateFlags |= PFLAG_FORCE_LAYOUT;
+        mPrivateFlags |= PFLAG_INVALIDATED;
     }
 
     /**
@@ -15173,29 +17513,62 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #onMeasure(int, int)
      */
     public final void measure(int widthMeasureSpec, int heightMeasureSpec) {
-        if ((mPrivateFlags & FORCE_LAYOUT) == FORCE_LAYOUT ||
-                widthMeasureSpec != mOldWidthMeasureSpec ||
-                heightMeasureSpec != mOldHeightMeasureSpec) {
+        boolean optical = isLayoutModeOptical(this);
+        if (optical != isLayoutModeOptical(mParent)) {
+            Insets insets = getOpticalInsets();
+            int oWidth  = insets.left + insets.right;
+            int oHeight = insets.top  + insets.bottom;
+            widthMeasureSpec  = MeasureSpec.adjust(widthMeasureSpec,  optical ? -oWidth  : oWidth);
+            heightMeasureSpec = MeasureSpec.adjust(heightMeasureSpec, optical ? -oHeight : oHeight);
+        }
+
+        // Suppress sign extension for the low bytes
+        long key = (long) widthMeasureSpec << 32 | (long) heightMeasureSpec & 0xffffffffL;
+        if (mMeasureCache == null) mMeasureCache = new LongSparseLongArray(2);
+
+        final boolean forceLayout = (mPrivateFlags & PFLAG_FORCE_LAYOUT) == PFLAG_FORCE_LAYOUT;
+        final boolean isExactly = MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.EXACTLY &&
+                MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY;
+        final boolean matchingSize = isExactly &&
+                getMeasuredWidth() == MeasureSpec.getSize(widthMeasureSpec) &&
+                getMeasuredHeight() == MeasureSpec.getSize(heightMeasureSpec);
+        if (forceLayout || !matchingSize &&
+                (widthMeasureSpec != mOldWidthMeasureSpec ||
+                        heightMeasureSpec != mOldHeightMeasureSpec)) {
 
             // first clears the measured dimension flag
-            mPrivateFlags &= ~MEASURED_DIMENSION_SET;
+            mPrivateFlags &= ~PFLAG_MEASURED_DIMENSION_SET;
 
-            // measure ourselves, this should set the measured dimension flag back
-            onMeasure(widthMeasureSpec, heightMeasureSpec);
+            resolveRtlPropertiesIfNeeded();
+
+            int cacheIndex = forceLayout ? -1 : mMeasureCache.indexOfKey(key);
+            if (cacheIndex < 0 || sIgnoreMeasureCache) {
+                // measure ourselves, this should set the measured dimension flag back
+                onMeasure(widthMeasureSpec, heightMeasureSpec);
+                mPrivateFlags3 &= ~PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT;
+            } else {
+                long value = mMeasureCache.valueAt(cacheIndex);
+                // Casting a long to int drops the high 32 bits, no mask needed
+                setMeasuredDimensionRaw((int) (value >> 32), (int) value);
+                mPrivateFlags3 |= PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT;
+            }
 
             // flag not set, setMeasuredDimension() was not invoked, we raise
             // an exception to warn the developer
-            if ((mPrivateFlags & MEASURED_DIMENSION_SET) != MEASURED_DIMENSION_SET) {
+            if ((mPrivateFlags & PFLAG_MEASURED_DIMENSION_SET) != PFLAG_MEASURED_DIMENSION_SET) {
                 throw new IllegalStateException("onMeasure() did not set the"
                         + " measured dimension by calling"
                         + " setMeasuredDimension()");
             }
 
-            mPrivateFlags |= LAYOUT_REQUIRED;
+            mPrivateFlags |= PFLAG_LAYOUT_REQUIRED;
         }
 
         mOldWidthMeasureSpec = widthMeasureSpec;
         mOldHeightMeasureSpec = heightMeasureSpec;
+
+        mMeasureCache.put(key, ((long) mMeasuredWidth) << 32 |
+                (long) mMeasuredHeight & 0xffffffffL); // suppress sign extension
     }
 
     /**
@@ -15250,7 +17623,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * <p>This mehod must be called by {@link #onMeasure(int, int)} to store the
+     * <p>This method must be called by {@link #onMeasure(int, int)} to store the
      * measured width and measured height. Failing to do so will trigger an
      * exception at measurement time.</p>
      *
@@ -15262,10 +17635,35 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #MEASURED_STATE_TOO_SMALL}.
      */
     protected final void setMeasuredDimension(int measuredWidth, int measuredHeight) {
+        boolean optical = isLayoutModeOptical(this);
+        if (optical != isLayoutModeOptical(mParent)) {
+            Insets insets = getOpticalInsets();
+            int opticalWidth  = insets.left + insets.right;
+            int opticalHeight = insets.top  + insets.bottom;
+
+            measuredWidth  += optical ? opticalWidth  : -opticalWidth;
+            measuredHeight += optical ? opticalHeight : -opticalHeight;
+        }
+        setMeasuredDimensionRaw(measuredWidth, measuredHeight);
+    }
+
+    /**
+     * Sets the measured dimension without extra processing for things like optical bounds.
+     * Useful for reapplying consistent values that have already been cooked with adjustments
+     * for optical bounds, etc. such as those from the measurement cache.
+     *
+     * @param measuredWidth The measured width of this view.  May be a complex
+     * bit mask as defined by {@link #MEASURED_SIZE_MASK} and
+     * {@link #MEASURED_STATE_TOO_SMALL}.
+     * @param measuredHeight The measured height of this view.  May be a complex
+     * bit mask as defined by {@link #MEASURED_SIZE_MASK} and
+     * {@link #MEASURED_STATE_TOO_SMALL}.
+     */
+    private void setMeasuredDimensionRaw(int measuredWidth, int measuredHeight) {
         mMeasuredWidth = measuredWidth;
         mMeasuredHeight = measuredHeight;
 
-        mPrivateFlags |= MEASURED_DIMENSION_SET;
+        mPrivateFlags |= PFLAG_MEASURED_DIMENSION_SET;
     }
 
     /**
@@ -15492,8 +17890,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             // If the screen is off assume the animation start time is now instead of
             // the next frame we draw. Keeping the START_ON_FIRST_FRAME start time
             // would cause the animation to start when the screen turns back on
-            if (mAttachInfo != null && !mAttachInfo.mScreenOn &&
-                    animation.getStartTime() == Animation.START_ON_FIRST_FRAME) {
+            if (mAttachInfo != null && mAttachInfo.mDisplayState == Display.STATE_OFF
+                    && animation.getStartTime() == Animation.START_ON_FIRST_FRAME) {
                 animation.setStartTime(AnimationUtils.currentAnimationTimeMillis());
             }
             animation.reset();
@@ -15509,7 +17907,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #getAnimation()
      */
     protected void onAnimationStart() {
-        mPrivateFlags |= ANIMATION_STARTED;
+        mPrivateFlags |= PFLAG_ANIMATION_STARTED;
     }
 
     /**
@@ -15521,7 +17919,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @see #getAnimation()
      */
     protected void onAnimationEnd() {
-        mPrivateFlags &= ~ANIMATION_STARTED;
+        mPrivateFlags &= ~PFLAG_ANIMATION_STARTED;
     }
 
     /**
@@ -15558,14 +17956,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         final AttachInfo attachInfo = mAttachInfo;
         if (region != null && attachInfo != null) {
             final int pflags = mPrivateFlags;
-            if ((pflags & SKIP_DRAW) == 0) {
+            if ((pflags & PFLAG_SKIP_DRAW) == 0) {
                 // The SKIP_DRAW flag IS NOT set, so this view draws. We need to
                 // remove it from the transparent region.
                 final int[] location = attachInfo.mTransparentLocation;
                 getLocationInWindow(location);
                 region.op(location[0], location[1], location[0] + mRight - mLeft,
                         location[1] + mBottom - mTop, Region.Op.DIFFERENCE);
-            } else if ((pflags & ONLY_DRAWS_BACKGROUND) != 0 && mBackground != null) {
+            } else if ((pflags & PFLAG_ONLY_DRAWS_BACKGROUND) != 0 && mBackground != null &&
+                    mBackground.getOpacity() != PixelFormat.TRANSPARENT) {
                 // The ONLY_DRAWS_BACKGROUND flag IS set and the background drawable
                 // exists, so we remove the background drawable's non-transparent
                 // parts from this transparent region.
@@ -15678,7 +18077,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * @param visibility  Bitwise-or of flags {@link #SYSTEM_UI_FLAG_LOW_PROFILE},
      * {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}, {@link #SYSTEM_UI_FLAG_FULLSCREEN},
      * {@link #SYSTEM_UI_FLAG_LAYOUT_STABLE}, {@link #SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION},
-     * and {@link #SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN}.
+     * {@link #SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN}, {@link #SYSTEM_UI_FLAG_IMMERSIVE},
+     * and {@link #SYSTEM_UI_FLAG_IMMERSIVE_STICKY}.
      */
     public void setSystemUiVisibility(int visibility) {
         if (visibility != mSystemUiVisibility) {
@@ -15690,11 +18090,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
-     * Returns the last {@link #setSystemUiVisibility(int) that this view has requested.
+     * Returns the last {@link #setSystemUiVisibility(int)} that this view has requested.
      * @return  Bitwise-or of flags {@link #SYSTEM_UI_FLAG_LOW_PROFILE},
      * {@link #SYSTEM_UI_FLAG_HIDE_NAVIGATION}, {@link #SYSTEM_UI_FLAG_FULLSCREEN},
      * {@link #SYSTEM_UI_FLAG_LAYOUT_STABLE}, {@link #SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION},
-     * and {@link #SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN}.
+     * {@link #SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN}, {@link #SYSTEM_UI_FLAG_IMMERSIVE},
+     * and {@link #SYSTEM_UI_FLAG_IMMERSIVE_STICKY}.
      */
     public int getSystemUiVisibility() {
         return mSystemUiVisibility;
@@ -15713,7 +18114,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Override to find out when the window's requested system UI visibility
      * has changed, that is the value returned by {@link #getWindowSystemUiVisibility()}.
-     * This is different from the callbacks recieved through
+     * This is different from the callbacks received through
      * {@link #setOnSystemUiVisibilityChangeListener(OnSystemUiVisibilityChangeListener)}
      * in that this is only telling you about the local request of the window,
      * not the actual values applied by the system.
@@ -16032,8 +18433,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * </p>
      */
     public boolean dispatchDragEvent(DragEvent event) {
-        //noinspection SimplifiableIfStatement
         ListenerInfo li = mListenerInfo;
+        //noinspection SimplifiableIfStatement
         if (li != null && li.mOnDragListener != null && (mViewFlags & ENABLED_MASK) == ENABLED
                 && li.mOnDragListener.onDrag(this, event)) {
             return true;
@@ -16042,7 +18443,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     boolean canAcceptDrag() {
-        return (mPrivateFlags2 & DRAG_CAN_ACCEPT) != 0;
+        return (mPrivateFlags2 & PFLAG2_DRAG_CAN_ACCEPT) != 0;
     }
 
     /**
@@ -16255,6 +18656,306 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     /**
+     * Enable or disable nested scrolling for this view.
+     *
+     * <p>If this property is set to true the view will be permitted to initiate nested
+     * scrolling operations with a compatible parent view in the current hierarchy. If this
+     * view does not implement nested scrolling this will have no effect. Disabling nested scrolling
+     * while a nested scroll is in progress has the effect of {@link #stopNestedScroll() stopping}
+     * the nested scroll.</p>
+     *
+     * @param enabled true to enable nested scrolling, false to disable
+     *
+     * @see #isNestedScrollingEnabled()
+     */
+    public void setNestedScrollingEnabled(boolean enabled) {
+        if (enabled) {
+            mPrivateFlags3 |= PFLAG3_NESTED_SCROLLING_ENABLED;
+        } else {
+            stopNestedScroll();
+            mPrivateFlags3 &= ~PFLAG3_NESTED_SCROLLING_ENABLED;
+        }
+    }
+
+    /**
+     * Returns true if nested scrolling is enabled for this view.
+     *
+     * <p>If nested scrolling is enabled and this View class implementation supports it,
+     * this view will act as a nested scrolling child view when applicable, forwarding data
+     * about the scroll operation in progress to a compatible and cooperating nested scrolling
+     * parent.</p>
+     *
+     * @return true if nested scrolling is enabled
+     *
+     * @see #setNestedScrollingEnabled(boolean)
+     */
+    public boolean isNestedScrollingEnabled() {
+        return (mPrivateFlags3 & PFLAG3_NESTED_SCROLLING_ENABLED) ==
+                PFLAG3_NESTED_SCROLLING_ENABLED;
+    }
+
+    /**
+     * Begin a nestable scroll operation along the given axes.
+     *
+     * <p>A view starting a nested scroll promises to abide by the following contract:</p>
+     *
+     * <p>The view will call startNestedScroll upon initiating a scroll operation. In the case
+     * of a touch scroll this corresponds to the initial {@link MotionEvent#ACTION_DOWN}.
+     * In the case of touch scrolling the nested scroll will be terminated automatically in
+     * the same manner as {@link ViewParent#requestDisallowInterceptTouchEvent(boolean)}.
+     * In the event of programmatic scrolling the caller must explicitly call
+     * {@link #stopNestedScroll()} to indicate the end of the nested scroll.</p>
+     *
+     * <p>If <code>startNestedScroll</code> returns true, a cooperative parent was found.
+     * If it returns false the caller may ignore the rest of this contract until the next scroll.
+     * Calling startNestedScroll while a nested scroll is already in progress will return true.</p>
+     *
+     * <p>At each incremental step of the scroll the caller should invoke
+     * {@link #dispatchNestedPreScroll(int, int, int[], int[]) dispatchNestedPreScroll}
+     * once it has calculated the requested scrolling delta. If it returns true the nested scrolling
+     * parent at least partially consumed the scroll and the caller should adjust the amount it
+     * scrolls by.</p>
+     *
+     * <p>After applying the remainder of the scroll delta the caller should invoke
+     * {@link #dispatchNestedScroll(int, int, int, int, int[]) dispatchNestedScroll}, passing
+     * both the delta consumed and the delta unconsumed. A nested scrolling parent may treat
+     * these values differently. See {@link ViewParent#onNestedScroll(View, int, int, int, int)}.
+     * </p>
+     *
+     * @param axes Flags consisting of a combination of {@link #SCROLL_AXIS_HORIZONTAL} and/or
+     *             {@link #SCROLL_AXIS_VERTICAL}.
+     * @return true if a cooperative parent was found and nested scrolling has been enabled for
+     *         the current gesture.
+     *
+     * @see #stopNestedScroll()
+     * @see #dispatchNestedPreScroll(int, int, int[], int[])
+     * @see #dispatchNestedScroll(int, int, int, int, int[])
+     */
+    public boolean startNestedScroll(int axes) {
+        if (hasNestedScrollingParent()) {
+            // Already in progress
+            return true;
+        }
+        if (isNestedScrollingEnabled()) {
+            ViewParent p = getParent();
+            View child = this;
+            while (p != null) {
+                try {
+                    if (p.onStartNestedScroll(child, this, axes)) {
+                        mNestedScrollingParent = p;
+                        p.onNestedScrollAccepted(child, this, axes);
+                        return true;
+                    }
+                } catch (AbstractMethodError e) {
+                    Log.e(VIEW_LOG_TAG, "ViewParent " + p + " does not implement interface " +
+                            "method onStartNestedScroll", e);
+                    // Allow the search upward to continue
+                }
+                if (p instanceof View) {
+                    child = (View) p;
+                }
+                p = p.getParent();
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Stop a nested scroll in progress.
+     *
+     * <p>Calling this method when a nested scroll is not currently in progress is harmless.</p>
+     *
+     * @see #startNestedScroll(int)
+     */
+    public void stopNestedScroll() {
+        if (mNestedScrollingParent != null) {
+            mNestedScrollingParent.onStopNestedScroll(this);
+            mNestedScrollingParent = null;
+        }
+    }
+
+    /**
+     * Returns true if this view has a nested scrolling parent.
+     *
+     * <p>The presence of a nested scrolling parent indicates that this view has initiated
+     * a nested scroll and it was accepted by an ancestor view further up the view hierarchy.</p>
+     *
+     * @return whether this view has a nested scrolling parent
+     */
+    public boolean hasNestedScrollingParent() {
+        return mNestedScrollingParent != null;
+    }
+
+    /**
+     * Dispatch one step of a nested scroll in progress.
+     *
+     * <p>Implementations of views that support nested scrolling should call this to report
+     * info about a scroll in progress to the current nested scrolling parent. If a nested scroll
+     * is not currently in progress or nested scrolling is not
+     * {@link #isNestedScrollingEnabled() enabled} for this view this method does nothing.</p>
+     *
+     * <p>Compatible View implementations should also call
+     * {@link #dispatchNestedPreScroll(int, int, int[], int[]) dispatchNestedPreScroll} before
+     * consuming a component of the scroll event themselves.</p>
+     *
+     * @param dxConsumed Horizontal distance in pixels consumed by this view during this scroll step
+     * @param dyConsumed Vertical distance in pixels consumed by this view during this scroll step
+     * @param dxUnconsumed Horizontal scroll distance in pixels not consumed by this view
+     * @param dyUnconsumed Horizontal scroll distance in pixels not consumed by this view
+     * @param offsetInWindow Optional. If not null, on return this will contain the offset
+     *                       in local view coordinates of this view from before this operation
+     *                       to after it completes. View implementations may use this to adjust
+     *                       expected input coordinate tracking.
+     * @return true if the event was dispatched, false if it could not be dispatched.
+     * @see #dispatchNestedPreScroll(int, int, int[], int[])
+     */
+    public boolean dispatchNestedScroll(int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed, int[] offsetInWindow) {
+        if (isNestedScrollingEnabled() && mNestedScrollingParent != null) {
+            if (dxConsumed != 0 || dyConsumed != 0 || dxUnconsumed != 0 || dyUnconsumed != 0) {
+                int startX = 0;
+                int startY = 0;
+                if (offsetInWindow != null) {
+                    getLocationInWindow(offsetInWindow);
+                    startX = offsetInWindow[0];
+                    startY = offsetInWindow[1];
+                }
+
+                mNestedScrollingParent.onNestedScroll(this, dxConsumed, dyConsumed,
+                        dxUnconsumed, dyUnconsumed);
+
+                if (offsetInWindow != null) {
+                    getLocationInWindow(offsetInWindow);
+                    offsetInWindow[0] -= startX;
+                    offsetInWindow[1] -= startY;
+                }
+                return true;
+            } else if (offsetInWindow != null) {
+                // No motion, no dispatch. Keep offsetInWindow up to date.
+                offsetInWindow[0] = 0;
+                offsetInWindow[1] = 0;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Dispatch one step of a nested scroll in progress before this view consumes any portion of it.
+     *
+     * <p>Nested pre-scroll events are to nested scroll events what touch intercept is to touch.
+     * <code>dispatchNestedPreScroll</code> offers an opportunity for the parent view in a nested
+     * scrolling operation to consume some or all of the scroll operation before the child view
+     * consumes it.</p>
+     *
+     * @param dx Horizontal scroll distance in pixels
+     * @param dy Vertical scroll distance in pixels
+     * @param consumed Output. If not null, consumed[0] will contain the consumed component of dx
+     *                 and consumed[1] the consumed dy.
+     * @param offsetInWindow Optional. If not null, on return this will contain the offset
+     *                       in local view coordinates of this view from before this operation
+     *                       to after it completes. View implementations may use this to adjust
+     *                       expected input coordinate tracking.
+     * @return true if the parent consumed some or all of the scroll delta
+     * @see #dispatchNestedScroll(int, int, int, int, int[])
+     */
+    public boolean dispatchNestedPreScroll(int dx, int dy, int[] consumed, int[] offsetInWindow) {
+        if (isNestedScrollingEnabled() && mNestedScrollingParent != null) {
+            if (dx != 0 || dy != 0) {
+                int startX = 0;
+                int startY = 0;
+                if (offsetInWindow != null) {
+                    getLocationInWindow(offsetInWindow);
+                    startX = offsetInWindow[0];
+                    startY = offsetInWindow[1];
+                }
+
+                if (consumed == null) {
+                    if (mTempNestedScrollConsumed == null) {
+                        mTempNestedScrollConsumed = new int[2];
+                    }
+                    consumed = mTempNestedScrollConsumed;
+                }
+                consumed[0] = 0;
+                consumed[1] = 0;
+                mNestedScrollingParent.onNestedPreScroll(this, dx, dy, consumed);
+
+                if (offsetInWindow != null) {
+                    getLocationInWindow(offsetInWindow);
+                    offsetInWindow[0] -= startX;
+                    offsetInWindow[1] -= startY;
+                }
+                return consumed[0] != 0 || consumed[1] != 0;
+            } else if (offsetInWindow != null) {
+                offsetInWindow[0] = 0;
+                offsetInWindow[1] = 0;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Dispatch a fling to a nested scrolling parent.
+     *
+     * <p>This method should be used to indicate that a nested scrolling child has detected
+     * suitable conditions for a fling. Generally this means that a touch scroll has ended with a
+     * {@link VelocityTracker velocity} in the direction of scrolling that meets or exceeds
+     * the {@link ViewConfiguration#getScaledMinimumFlingVelocity() minimum fling velocity}
+     * along a scrollable axis.</p>
+     *
+     * <p>If a nested scrolling child view would normally fling but it is at the edge of
+     * its own content, it can use this method to delegate the fling to its nested scrolling
+     * parent instead. The parent may optionally consume the fling or observe a child fling.</p>
+     *
+     * @param velocityX Horizontal fling velocity in pixels per second
+     * @param velocityY Vertical fling velocity in pixels per second
+     * @param consumed true if the child consumed the fling, false otherwise
+     * @return true if the nested scrolling parent consumed or otherwise reacted to the fling
+     */
+    public boolean dispatchNestedFling(float velocityX, float velocityY, boolean consumed) {
+        if (isNestedScrollingEnabled() && mNestedScrollingParent != null) {
+            return mNestedScrollingParent.onNestedFling(this, velocityX, velocityY, consumed);
+        }
+        return false;
+    }
+
+    /**
+     * Dispatch a fling to a nested scrolling parent before it is processed by this view.
+     *
+     * <p>Nested pre-fling events are to nested fling events what touch intercept is to touch
+     * and what nested pre-scroll is to nested scroll. <code>dispatchNestedPreFling</code>
+     * offsets an opportunity for the parent view in a nested fling to fully consume the fling
+     * before the child view consumes it. If this method returns <code>true</code>, a nested
+     * parent view consumed the fling and this view should not scroll as a result.</p>
+     *
+     * <p>For a better user experience, only one view in a nested scrolling chain should consume
+     * the fling at a time. If a parent view consumed the fling this method will return false.
+     * Custom view implementations should account for this in two ways:</p>
+     *
+     * <ul>
+     *     <li>If a custom view is paged and needs to settle to a fixed page-point, do not
+     *     call <code>dispatchNestedPreFling</code>; consume the fling and settle to a valid
+     *     position regardless.</li>
+     *     <li>If a nested parent does consume the fling, this view should not scroll at all,
+     *     even to settle back to a valid idle position.</li>
+     * </ul>
+     *
+     * <p>Views should also not offer fling velocities to nested parent views along an axis
+     * where scrolling is not currently supported; a {@link android.widget.ScrollView ScrollView}
+     * should not offer a horizontal fling velocity to its parents since scrolling along that
+     * axis is not permitted and carrying velocity along that motion does not make sense.</p>
+     *
+     * @param velocityX Horizontal fling velocity in pixels per second
+     * @param velocityY Vertical fling velocity in pixels per second
+     * @return true if a nested scrolling parent consumed the fling
+     */
+    public boolean dispatchNestedPreFling(float velocityX, float velocityY) {
+        if (isNestedScrollingEnabled() && mNestedScrollingParent != null) {
+            return mNestedScrollingParent.onNestedPreFling(this, velocityX, velocityY);
+        }
+        return false;
+    }
+
+    /**
      * Gets a scale factor that determines the distance the view should scroll
      * vertically in response to {@link MotionEvent#ACTION_SCROLL}.
      * @return The vertical scroll scale factor.
@@ -16297,6 +18998,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_DIRECTION_LTR},
      * {@link #TEXT_DIRECTION_RTL},
      * {@link #TEXT_DIRECTION_LOCALE}
+     *
+     * @attr ref android.R.styleable#View_textDirection
+     *
      * @hide
      */
     @ViewDebug.ExportedProperty(category = "text", mapping = {
@@ -16307,8 +19011,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             @ViewDebug.IntToString(from = TEXT_DIRECTION_RTL, to = "RTL"),
             @ViewDebug.IntToString(from = TEXT_DIRECTION_LOCALE, to = "LOCALE")
     })
-    public int getTextDirection() {
-        return (mPrivateFlags2 & TEXT_DIRECTION_MASK) >> TEXT_DIRECTION_MASK_SHIFT;
+    public int getRawTextDirection() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_DIRECTION_MASK) >> PFLAG2_TEXT_DIRECTION_MASK_SHIFT;
     }
 
     /**
@@ -16322,15 +19026,24 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_DIRECTION_LTR},
      * {@link #TEXT_DIRECTION_RTL},
      * {@link #TEXT_DIRECTION_LOCALE}
-     * @hide
+     *
+     * Resolution will be done if the value is set to TEXT_DIRECTION_INHERIT. The resolution
+     * proceeds up the parent chain of the view to get the value. If there is no parent, then it will
+     * return the default {@link #TEXT_DIRECTION_FIRST_STRONG}.
+     *
+     * @attr ref android.R.styleable#View_textDirection
      */
     public void setTextDirection(int textDirection) {
-        if (getTextDirection() != textDirection) {
+        if (getRawTextDirection() != textDirection) {
             // Reset the current text direction and the resolved one
-            mPrivateFlags2 &= ~TEXT_DIRECTION_MASK;
+            mPrivateFlags2 &= ~PFLAG2_TEXT_DIRECTION_MASK;
             resetResolvedTextDirection();
             // Set the new text direction
-            mPrivateFlags2 |= ((textDirection << TEXT_DIRECTION_MASK_SHIFT) & TEXT_DIRECTION_MASK);
+            mPrivateFlags2 |= ((textDirection << PFLAG2_TEXT_DIRECTION_MASK_SHIFT) & PFLAG2_TEXT_DIRECTION_MASK);
+            // Do resolution
+            resolveTextDirection();
+            // Notify change
+            onRtlPropertiesChanged(getLayoutDirection());
             // Refresh
             requestLayout();
             invalidate(true);
@@ -16340,11 +19053,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Return the resolved text direction.
      *
-     * This needs resolution if the value is TEXT_DIRECTION_INHERIT. The resolution matches
-     * {@link #getTextDirection()}if it is not TEXT_DIRECTION_INHERIT, otherwise resolution proceeds
-     * up the parent chain of the view. if there is no parent, then it will return the default
-     * {@link #TEXT_DIRECTION_FIRST_STRONG}.
-     *
      * @return the resolved text direction. Returns one of:
      *
      * {@link #TEXT_DIRECTION_FIRST_STRONG}
@@ -16352,51 +19060,80 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_DIRECTION_LTR},
      * {@link #TEXT_DIRECTION_RTL},
      * {@link #TEXT_DIRECTION_LOCALE}
-     * @hide
+     *
+     * @attr ref android.R.styleable#View_textDirection
      */
-    public int getResolvedTextDirection() {
-        // The text direction will be resolved only if needed
-        if ((mPrivateFlags2 & TEXT_DIRECTION_RESOLVED) != TEXT_DIRECTION_RESOLVED) {
-            resolveTextDirection();
-        }
-        return (mPrivateFlags2 & TEXT_DIRECTION_RESOLVED_MASK) >> TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
+    @ViewDebug.ExportedProperty(category = "text", mapping = {
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_INHERIT, to = "INHERIT"),
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_FIRST_STRONG, to = "FIRST_STRONG"),
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_ANY_RTL, to = "ANY_RTL"),
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_LTR, to = "LTR"),
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_RTL, to = "RTL"),
+            @ViewDebug.IntToString(from = TEXT_DIRECTION_LOCALE, to = "LOCALE")
+    })
+    public int getTextDirection() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_DIRECTION_RESOLVED_MASK) >> PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT;
     }
 
     /**
-     * Resolve the text direction. Will call {@link View#onResolvedTextDirectionChanged} when
-     * resolution is done.
+     * Resolve the text direction.
+     *
+     * @return true if resolution has been done, false otherwise.
+     *
      * @hide
      */
-    public void resolveTextDirection() {
+    public boolean resolveTextDirection() {
         // Reset any previous text direction resolution
-        mPrivateFlags2 &= ~(TEXT_DIRECTION_RESOLVED | TEXT_DIRECTION_RESOLVED_MASK);
+        mPrivateFlags2 &= ~(PFLAG2_TEXT_DIRECTION_RESOLVED | PFLAG2_TEXT_DIRECTION_RESOLVED_MASK);
 
         if (hasRtlSupport()) {
             // Set resolved text direction flag depending on text direction flag
-            final int textDirection = getTextDirection();
+            final int textDirection = getRawTextDirection();
             switch(textDirection) {
                 case TEXT_DIRECTION_INHERIT:
-                    if (canResolveTextDirection()) {
-                        ViewGroup viewGroup = ((ViewGroup) mParent);
-
-                        // Set current resolved direction to the same value as the parent's one
-                        final int parentResolvedDirection = viewGroup.getResolvedTextDirection();
-                        switch (parentResolvedDirection) {
-                            case TEXT_DIRECTION_FIRST_STRONG:
-                            case TEXT_DIRECTION_ANY_RTL:
-                            case TEXT_DIRECTION_LTR:
-                            case TEXT_DIRECTION_RTL:
-                            case TEXT_DIRECTION_LOCALE:
-                                mPrivateFlags2 |=
-                                        (parentResolvedDirection << TEXT_DIRECTION_RESOLVED_MASK_SHIFT);
-                                break;
-                            default:
-                                // Default resolved direction is "first strong" heuristic
-                                mPrivateFlags2 |= TEXT_DIRECTION_RESOLVED_DEFAULT;
-                        }
-                    } else {
+                    if (!canResolveTextDirection()) {
                         // We cannot do the resolution if there is no parent, so use the default one
-                        mPrivateFlags2 |= TEXT_DIRECTION_RESOLVED_DEFAULT;
+                        mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
+                        // Resolution will need to happen again later
+                        return false;
+                    }
+
+                    // Parent has not yet resolved, so we still return the default
+                    try {
+                        if (!mParent.isTextDirectionResolved()) {
+                            mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
+                            // Resolution will need to happen again later
+                            return false;
+                        }
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                        mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED |
+                                PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
+                        return true;
+                    }
+
+                    // Set current resolved direction to the same value as the parent's one
+                    int parentResolvedDirection;
+                    try {
+                        parentResolvedDirection = mParent.getTextDirection();
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                        parentResolvedDirection = TEXT_DIRECTION_LTR;
+                    }
+                    switch (parentResolvedDirection) {
+                        case TEXT_DIRECTION_FIRST_STRONG:
+                        case TEXT_DIRECTION_ANY_RTL:
+                        case TEXT_DIRECTION_LTR:
+                        case TEXT_DIRECTION_RTL:
+                        case TEXT_DIRECTION_LOCALE:
+                            mPrivateFlags2 |=
+                                    (parentResolvedDirection << PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT);
+                            break;
+                        default:
+                            // Default resolved direction is "first strong" heuristic
+                            mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
                     }
                     break;
                 case TEXT_DIRECTION_FIRST_STRONG:
@@ -16405,65 +19142,72 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 case TEXT_DIRECTION_RTL:
                 case TEXT_DIRECTION_LOCALE:
                     // Resolved direction is the same as text direction
-                    mPrivateFlags2 |= (textDirection << TEXT_DIRECTION_RESOLVED_MASK_SHIFT);
+                    mPrivateFlags2 |= (textDirection << PFLAG2_TEXT_DIRECTION_RESOLVED_MASK_SHIFT);
                     break;
                 default:
                     // Default resolved direction is "first strong" heuristic
-                    mPrivateFlags2 |= TEXT_DIRECTION_RESOLVED_DEFAULT;
+                    mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
             }
         } else {
             // Default resolved direction is "first strong" heuristic
-            mPrivateFlags2 |= TEXT_DIRECTION_RESOLVED_DEFAULT;
+            mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
         }
 
         // Set to resolved
-        mPrivateFlags2 |= TEXT_DIRECTION_RESOLVED;
-        onResolvedTextDirectionChanged();
-    }
-
-    /**
-     * Called when text direction has been resolved. Subclasses that care about text direction
-     * resolution should override this method.
-     *
-     * The default implementation does nothing.
-     * @hide
-     */
-    public void onResolvedTextDirectionChanged() {
+        mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED;
+        return true;
     }
 
     /**
      * Check if text direction resolution can be done.
      *
      * @return true if text direction resolution can be done otherwise return false.
-     * @hide
      */
     public boolean canResolveTextDirection() {
-        switch (getTextDirection()) {
+        switch (getRawTextDirection()) {
             case TEXT_DIRECTION_INHERIT:
-                return (mParent != null) && (mParent instanceof ViewGroup);
+                if (mParent != null) {
+                    try {
+                        return mParent.canResolveTextDirection();
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                    }
+                }
+                return false;
+
             default:
                 return true;
         }
     }
 
     /**
-     * Reset resolved text direction. Text direction can be resolved with a call to
-     * getResolvedTextDirection(). Will call {@link View#onResolvedTextDirectionReset} when
-     * reset is done.
+     * Reset resolved text direction. Text direction will be resolved during a call to
+     * {@link #onMeasure(int, int)}.
+     *
      * @hide
      */
     public void resetResolvedTextDirection() {
-        mPrivateFlags2 &= ~(TEXT_DIRECTION_RESOLVED | TEXT_DIRECTION_RESOLVED_MASK);
-        onResolvedTextDirectionReset();
+        // Reset any previous text direction resolution
+        mPrivateFlags2 &= ~(PFLAG2_TEXT_DIRECTION_RESOLVED | PFLAG2_TEXT_DIRECTION_RESOLVED_MASK);
+        // Set to default value
+        mPrivateFlags2 |= PFLAG2_TEXT_DIRECTION_RESOLVED_DEFAULT;
     }
 
     /**
-     * Called when text direction is reset. Subclasses that care about text direction reset should
-     * override this method and do a reset of the text direction of their children. The default
-     * implementation does nothing.
+     * @return true if text direction is inherited.
+     *
      * @hide
      */
-    public void onResolvedTextDirectionReset() {
+    public boolean isTextDirectionInherited() {
+        return (getRawTextDirection() == TEXT_DIRECTION_INHERIT);
+    }
+
+    /**
+     * @return true if text direction is resolved.
+     */
+    public boolean isTextDirectionResolved() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_DIRECTION_RESOLVED) == PFLAG2_TEXT_DIRECTION_RESOLVED;
     }
 
     /**
@@ -16479,6 +19223,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_ALIGNMENT_TEXT_END},
      * {@link #TEXT_ALIGNMENT_VIEW_START},
      * {@link #TEXT_ALIGNMENT_VIEW_END}
+     *
+     * @attr ref android.R.styleable#View_textAlignment
+     *
      * @hide
      */
     @ViewDebug.ExportedProperty(category = "text", mapping = {
@@ -16490,8 +19237,9 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             @ViewDebug.IntToString(from = TEXT_ALIGNMENT_VIEW_START, to = "VIEW_START"),
             @ViewDebug.IntToString(from = TEXT_ALIGNMENT_VIEW_END, to = "VIEW_END")
     })
-    public int getTextAlignment() {
-        return (mPrivateFlags2 & TEXT_ALIGNMENT_MASK) >> TEXT_ALIGNMENT_MASK_SHIFT;
+    @TextAlignment
+    public int getRawTextAlignment() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_ALIGNMENT_MASK) >> PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT;
     }
 
     /**
@@ -16507,16 +19255,24 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_ALIGNMENT_VIEW_START},
      * {@link #TEXT_ALIGNMENT_VIEW_END}
      *
+     * Resolution will be done if the value is set to TEXT_ALIGNMENT_INHERIT. The resolution
+     * proceeds up the parent chain of the view to get the value. If there is no parent, then it
+     * will return the default {@link #TEXT_ALIGNMENT_GRAVITY}.
+     *
      * @attr ref android.R.styleable#View_textAlignment
-     * @hide
      */
-    public void setTextAlignment(int textAlignment) {
-        if (textAlignment != getTextAlignment()) {
+    public void setTextAlignment(@TextAlignment int textAlignment) {
+        if (textAlignment != getRawTextAlignment()) {
             // Reset the current and resolved text alignment
-            mPrivateFlags2 &= ~TEXT_ALIGNMENT_MASK;
+            mPrivateFlags2 &= ~PFLAG2_TEXT_ALIGNMENT_MASK;
             resetResolvedTextAlignment();
             // Set the new text alignment
-            mPrivateFlags2 |= ((textAlignment << TEXT_ALIGNMENT_MASK_SHIFT) & TEXT_ALIGNMENT_MASK);
+            mPrivateFlags2 |=
+                    ((textAlignment << PFLAG2_TEXT_ALIGNMENT_MASK_SHIFT) & PFLAG2_TEXT_ALIGNMENT_MASK);
+            // Do resolution
+            resolveTextAlignment();
+            // Notify change
+            onRtlPropertiesChanged(getLayoutDirection());
             // Refresh
             requestLayout();
             invalidate(true);
@@ -16526,10 +19282,6 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     /**
      * Return the resolved text alignment.
      *
-     * The resolved text alignment. This needs resolution if the value is
-     * TEXT_ALIGNMENT_INHERIT. The resolution matches {@link #setTextAlignment(int)}  if it is
-     * not TEXT_ALIGNMENT_INHERIT, otherwise resolution proceeds up the parent chain of the view.
-     *
      * @return the resolved text alignment. Returns one of:
      *
      * {@link #TEXT_ALIGNMENT_GRAVITY},
@@ -16538,7 +19290,8 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * {@link #TEXT_ALIGNMENT_TEXT_END},
      * {@link #TEXT_ALIGNMENT_VIEW_START},
      * {@link #TEXT_ALIGNMENT_VIEW_END}
-     * @hide
+     *
+     * @attr ref android.R.styleable#View_textAlignment
      */
     @ViewDebug.ExportedProperty(category = "text", mapping = {
             @ViewDebug.IntToString(from = TEXT_ALIGNMENT_INHERIT, to = "INHERIT"),
@@ -16549,53 +19302,74 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             @ViewDebug.IntToString(from = TEXT_ALIGNMENT_VIEW_START, to = "VIEW_START"),
             @ViewDebug.IntToString(from = TEXT_ALIGNMENT_VIEW_END, to = "VIEW_END")
     })
-    public int getResolvedTextAlignment() {
-        // If text alignment is not resolved, then resolve it
-        if ((mPrivateFlags2 & TEXT_ALIGNMENT_RESOLVED) != TEXT_ALIGNMENT_RESOLVED) {
-            resolveTextAlignment();
-        }
-        return (mPrivateFlags2 & TEXT_ALIGNMENT_RESOLVED_MASK) >> TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
+    @TextAlignment
+    public int getTextAlignment() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK) >>
+                PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT;
     }
 
     /**
-     * Resolve the text alignment. Will call {@link View#onResolvedTextAlignmentChanged} when
-     * resolution is done.
+     * Resolve the text alignment.
+     *
+     * @return true if resolution has been done, false otherwise.
+     *
      * @hide
      */
-    public void resolveTextAlignment() {
+    public boolean resolveTextAlignment() {
         // Reset any previous text alignment resolution
-        mPrivateFlags2 &= ~(TEXT_ALIGNMENT_RESOLVED | TEXT_ALIGNMENT_RESOLVED_MASK);
+        mPrivateFlags2 &= ~(PFLAG2_TEXT_ALIGNMENT_RESOLVED | PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK);
 
         if (hasRtlSupport()) {
             // Set resolved text alignment flag depending on text alignment flag
-            final int textAlignment = getTextAlignment();
+            final int textAlignment = getRawTextAlignment();
             switch (textAlignment) {
                 case TEXT_ALIGNMENT_INHERIT:
                     // Check if we can resolve the text alignment
-                    if (canResolveLayoutDirection() && mParent instanceof View) {
-                        View view = (View) mParent;
-
-                        final int parentResolvedTextAlignment = view.getResolvedTextAlignment();
-                        switch (parentResolvedTextAlignment) {
-                            case TEXT_ALIGNMENT_GRAVITY:
-                            case TEXT_ALIGNMENT_TEXT_START:
-                            case TEXT_ALIGNMENT_TEXT_END:
-                            case TEXT_ALIGNMENT_CENTER:
-                            case TEXT_ALIGNMENT_VIEW_START:
-                            case TEXT_ALIGNMENT_VIEW_END:
-                                // Resolved text alignment is the same as the parent resolved
-                                // text alignment
-                                mPrivateFlags2 |=
-                                        (parentResolvedTextAlignment << TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT);
-                                break;
-                            default:
-                                // Use default resolved text alignment
-                                mPrivateFlags2 |= TEXT_ALIGNMENT_RESOLVED_DEFAULT;
-                        }
-                    }
-                    else {
+                    if (!canResolveTextAlignment()) {
                         // We cannot do the resolution if there is no parent so use the default
-                        mPrivateFlags2 |= TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+                        mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+                        // Resolution will need to happen again later
+                        return false;
+                    }
+
+                    // Parent has not yet resolved, so we still return the default
+                    try {
+                        if (!mParent.isTextAlignmentResolved()) {
+                            mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+                            // Resolution will need to happen again later
+                            return false;
+                        }
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                        mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED |
+                                PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+                        return true;
+                    }
+
+                    int parentResolvedTextAlignment;
+                    try {
+                        parentResolvedTextAlignment = mParent.getTextAlignment();
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                        parentResolvedTextAlignment = TEXT_ALIGNMENT_GRAVITY;
+                    }
+                    switch (parentResolvedTextAlignment) {
+                        case TEXT_ALIGNMENT_GRAVITY:
+                        case TEXT_ALIGNMENT_TEXT_START:
+                        case TEXT_ALIGNMENT_TEXT_END:
+                        case TEXT_ALIGNMENT_CENTER:
+                        case TEXT_ALIGNMENT_VIEW_START:
+                        case TEXT_ALIGNMENT_VIEW_END:
+                            // Resolved text alignment is the same as the parent resolved
+                            // text alignment
+                            mPrivateFlags2 |=
+                                    (parentResolvedTextAlignment << PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT);
+                            break;
+                        default:
+                            // Use default resolved text alignment
+                            mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
                     }
                     break;
                 case TEXT_ALIGNMENT_GRAVITY:
@@ -16605,66 +19379,117 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
                 case TEXT_ALIGNMENT_VIEW_START:
                 case TEXT_ALIGNMENT_VIEW_END:
                     // Resolved text alignment is the same as text alignment
-                    mPrivateFlags2 |= (textAlignment << TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT);
+                    mPrivateFlags2 |= (textAlignment << PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK_SHIFT);
                     break;
                 default:
                     // Use default resolved text alignment
-                    mPrivateFlags2 |= TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+                    mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
             }
         } else {
             // Use default resolved text alignment
-            mPrivateFlags2 |= TEXT_ALIGNMENT_RESOLVED_DEFAULT;
+            mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
         }
 
         // Set the resolved
-        mPrivateFlags2 |= TEXT_ALIGNMENT_RESOLVED;
-        onResolvedTextAlignmentChanged();
+        mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED;
+        return true;
     }
 
     /**
      * Check if text alignment resolution can be done.
      *
      * @return true if text alignment resolution can be done otherwise return false.
-     * @hide
      */
     public boolean canResolveTextAlignment() {
-        switch (getTextAlignment()) {
+        switch (getRawTextAlignment()) {
             case TEXT_DIRECTION_INHERIT:
-                return (mParent != null);
+                if (mParent != null) {
+                    try {
+                        return mParent.canResolveTextAlignment();
+                    } catch (AbstractMethodError e) {
+                        Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                                " does not fully implement ViewParent", e);
+                    }
+                }
+                return false;
+
             default:
                 return true;
         }
     }
 
     /**
-     * Called when text alignment has been resolved. Subclasses that care about text alignment
-     * resolution should override this method.
+     * Reset resolved text alignment. Text alignment will be resolved during a call to
+     * {@link #onMeasure(int, int)}.
      *
-     * The default implementation does nothing.
-     * @hide
-     */
-    public void onResolvedTextAlignmentChanged() {
-    }
-
-    /**
-     * Reset resolved text alignment. Text alignment can be resolved with a call to
-     * getResolvedTextAlignment(). Will call {@link View#onResolvedTextAlignmentReset} when
-     * reset is done.
      * @hide
      */
     public void resetResolvedTextAlignment() {
         // Reset any previous text alignment resolution
-        mPrivateFlags2 &= ~(TEXT_ALIGNMENT_RESOLVED | TEXT_ALIGNMENT_RESOLVED_MASK);
-        onResolvedTextAlignmentReset();
+        mPrivateFlags2 &= ~(PFLAG2_TEXT_ALIGNMENT_RESOLVED | PFLAG2_TEXT_ALIGNMENT_RESOLVED_MASK);
+        // Set to default
+        mPrivateFlags2 |= PFLAG2_TEXT_ALIGNMENT_RESOLVED_DEFAULT;
     }
 
     /**
-     * Called when text alignment is reset. Subclasses that care about text alignment reset should
-     * override this method and do a reset of the text alignment of their children. The default
-     * implementation does nothing.
+     * @return true if text alignment is inherited.
+     *
      * @hide
      */
-    public void onResolvedTextAlignmentReset() {
+    public boolean isTextAlignmentInherited() {
+        return (getRawTextAlignment() == TEXT_ALIGNMENT_INHERIT);
+    }
+
+    /**
+     * @return true if text alignment is resolved.
+     */
+    public boolean isTextAlignmentResolved() {
+        return (mPrivateFlags2 & PFLAG2_TEXT_ALIGNMENT_RESOLVED) == PFLAG2_TEXT_ALIGNMENT_RESOLVED;
+    }
+
+    /**
+     * Generate a value suitable for use in {@link #setId(int)}.
+     * This value will not collide with ID values generated at build time by aapt for R.id.
+     *
+     * @return a generated ID value
+     */
+    public static int generateViewId() {
+        for (;;) {
+            final int result = sNextGeneratedId.get();
+            // aapt-generated IDs have the high byte nonzero; clamp to the range under that.
+            int newValue = result + 1;
+            if (newValue > 0x00FFFFFF) newValue = 1; // Roll over to 1, not 0.
+            if (sNextGeneratedId.compareAndSet(result, newValue)) {
+                return result;
+            }
+        }
+    }
+
+    /**
+     * Gets the Views in the hierarchy affected by entering and exiting Activity Scene transitions.
+     * @param transitioningViews This View will be added to transitioningViews if it is VISIBLE and
+     *                           a normal View or a ViewGroup with
+     *                           {@link android.view.ViewGroup#isTransitionGroup()} true.
+     * @hide
+     */
+    public void captureTransitioningViews(List<View> transitioningViews) {
+        if (getVisibility() == View.VISIBLE) {
+            transitioningViews.add(this);
+        }
+    }
+
+    /**
+     * Adds all Views that have {@link #getTransitionName()} non-null to namedElements.
+     * @param namedElements Will contain all Views in the hierarchy having a transitionName.
+     * @hide
+     */
+    public void findNamedViews(Map<String, View> namedElements) {
+        if (getVisibility() == VISIBLE || mGhostView != null) {
+            String transitionName = getTransitionName();
+            if (transitionName != null) {
+                namedElements.put(transitionName, this);
+            }
+        }
     }
 
     //
@@ -16719,6 +19544,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     };
 
     /**
+     * A Property wrapper around the <code>translationZ</code> functionality handled by the
+     * {@link View#setTranslationZ(float)} and {@link View#getTranslationZ()} methods.
+     */
+    public static final Property<View, Float> TRANSLATION_Z = new FloatProperty<View>("translationZ") {
+        @Override
+        public void setValue(View object, float value) {
+            object.setTranslationZ(value);
+        }
+
+        @Override
+        public Float get(View object) {
+            return object.getTranslationZ();
+        }
+    };
+
+    /**
      * A Property wrapper around the <code>x</code> functionality handled by the
      * {@link View#setX(float)} and {@link View#getX()} methods.
      */
@@ -16747,6 +19588,22 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         @Override
         public Float get(View object) {
             return object.getY();
+        }
+    };
+
+    /**
+     * A Property wrapper around the <code>z</code> functionality handled by the
+     * {@link View#setZ(float)} and {@link View#getZ()} methods.
+     */
+    public static final Property<View, Float> Z = new FloatProperty<View>("z") {
+        @Override
+        public void setValue(View object, float value) {
+            object.setZ(value);
+        }
+
+        @Override
+        public Float get(View object) {
+            return object.getZ();
         }
     };
 
@@ -16890,12 +19747,23 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          *  <li>{@link android.view.View.MeasureSpec#AT_MOST}</li>
          * </ul>
          *
+         * <p><strong>Note:</strong> On API level 17 and lower, makeMeasureSpec's
+         * implementation was such that the order of arguments did not matter
+         * and overflow in either value could impact the resulting MeasureSpec.
+         * {@link android.widget.RelativeLayout} was affected by this bug.
+         * Apps targeting API levels greater than 17 will get the fixed, more strict
+         * behavior.</p>
+         *
          * @param size the size of the measure specification
          * @param mode the mode of the measure specification
          * @return the measure specification based on size and mode
          */
         public static int makeMeasureSpec(int size, int mode) {
-            return size + mode;
+            if (sUseBrokenMakeMeasureSpec) {
+                return size + mode;
+            } else {
+                return (size & ~MODE_MASK) | (mode & MODE_MASK);
+            }
         }
 
         /**
@@ -16918,6 +19786,21 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          */
         public static int getSize(int measureSpec) {
             return (measureSpec & ~MODE_MASK);
+        }
+
+        static int adjust(int measureSpec, int delta) {
+            final int mode = getMode(measureSpec);
+            if (mode == UNSPECIFIED) {
+                // No need to adjust size for UNSPECIFIED mode.
+                return makeMeasureSpec(0, UNSPECIFIED);
+            }
+            int size = getSize(measureSpec) + delta;
+            if (size < 0) {
+                Log.e(VIEW_LOG_TAG, "MeasureSpec.adjust: new size would be negative! (" + size +
+                        ") spec: " + toString(measureSpec) + " delta: " + delta);
+                size = 0;
+            }
+            return makeMeasureSpec(size, mode);
         }
 
         /**
@@ -16947,10 +19830,10 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         }
     }
 
-    class CheckForLongPress implements Runnable {
-
+    private final class CheckForLongPress implements Runnable {
         private int mOriginalWindowAttachCount;
 
+        @Override
         public void run() {
             if (isPressed() && (mParent != null)
                     && mOriginalWindowAttachCount == mWindowAttachCount) {
@@ -16966,14 +19849,19 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
     }
 
     private final class CheckForTap implements Runnable {
+        public float x;
+        public float y;
+
+        @Override
         public void run() {
-            mPrivateFlags &= ~PREPRESSED;
-            setPressed(true);
+            mPrivateFlags &= ~PFLAG_PREPRESSED;
+            setPressed(true, x, y);
             checkForLongClick(ViewConfiguration.getTapTimeout());
         }
     }
 
     private final class PerformClick implements Runnable {
+        @Override
         public void run() {
             performClick();
         }
@@ -16995,6 +19883,30 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             mAnimator = new ViewPropertyAnimator(this);
         }
         return mAnimator;
+    }
+
+    /**
+     * Sets the name of the View to be used to identify Views in Transitions.
+     * Names should be unique in the View hierarchy.
+     *
+     * @param transitionName The name of the View to uniquely identify it for Transitions.
+     */
+    public final void setTransitionName(String transitionName) {
+        mTransitionName = transitionName;
+    }
+
+    /**
+     * Returns the name of the View to be used to identify Views in Transitions.
+     * Names should be unique in the View hierarchy.
+     *
+     * <p>This returns null if the View has not been given a name.</p>
+     *
+     * @return The name used of the View to be used to identify Views in Transitions or null
+     * if no name has been given.
+     */
+    @ViewDebug.ExportedProperty
+    public String getTransitionName() {
+        return mTransitionName;
     }
 
     /**
@@ -17197,7 +20109,33 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         public void onViewDetachedFromWindow(View v);
     }
 
+    /**
+     * Listener for applying window insets on a view in a custom way.
+     *
+     * <p>Apps may choose to implement this interface if they want to apply custom policy
+     * to the way that window insets are treated for a view. If an OnApplyWindowInsetsListener
+     * is set, its
+     * {@link OnApplyWindowInsetsListener#onApplyWindowInsets(View, WindowInsets) onApplyWindowInsets}
+     * method will be called instead of the View's own
+     * {@link #onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method. The listener
+     * may optionally call the parameter View's <code>onApplyWindowInsets</code> method to apply
+     * the View's normal behavior as part of its own.</p>
+     */
+    public interface OnApplyWindowInsetsListener {
+        /**
+         * When {@link View#setOnApplyWindowInsetsListener(View.OnApplyWindowInsetsListener) set}
+         * on a View, this listener method will be called instead of the view's own
+         * {@link View#onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method.
+         *
+         * @param v The view applying window insets
+         * @param insets The insets to apply
+         * @return The insets supplied, minus any insets that were consumed
+         */
+        public WindowInsets onApplyWindowInsets(View v, WindowInsets insets);
+    }
+
     private final class UnsetPressedState implements Runnable {
+        @Override
         public void run() {
             setPressed(false);
         }
@@ -17242,7 +20180,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
      * A set of information given to a view when it is attached to its parent
      * window.
      */
-    static class AttachInfo {
+    final static class AttachInfo {
         interface Callbacks {
             void playSoundEffect(int effectId);
             boolean performHapticFeedback(int effectId, boolean always);
@@ -17257,25 +20195,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          * POOL_LIMIT objects that get reused. This reduces memory allocations
          * whenever possible.
          */
-        static class InvalidateInfo implements Poolable<InvalidateInfo> {
+        static class InvalidateInfo {
             private static final int POOL_LIMIT = 10;
-            private static final Pool<InvalidateInfo> sPool = Pools.synchronizedPool(
-                    Pools.finitePool(new PoolableManager<InvalidateInfo>() {
-                        public InvalidateInfo newInstance() {
-                            return new InvalidateInfo();
-                        }
 
-                        public void onAcquired(InvalidateInfo element) {
-                        }
-
-                        public void onReleased(InvalidateInfo element) {
-                            element.target = null;
-                        }
-                    }, POOL_LIMIT)
-            );
-
-            private InvalidateInfo mNext;
-            private boolean mIsPooled;
+            private static final SynchronizedPool<InvalidateInfo> sPool =
+                    new SynchronizedPool<InvalidateInfo>(POOL_LIMIT);
 
             View target;
 
@@ -17284,28 +20208,14 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             int right;
             int bottom;
 
-            public void setNextPoolable(InvalidateInfo element) {
-                mNext = element;
+            public static InvalidateInfo obtain() {
+                InvalidateInfo instance = sPool.acquire();
+                return (instance != null) ? instance : new InvalidateInfo();
             }
 
-            public InvalidateInfo getNextPoolable() {
-                return mNext;
-            }
-
-            static InvalidateInfo acquire() {
-                return sPool.acquire();
-            }
-
-            void release() {
+            public void recycle() {
+                target = null;
                 sPool.release(this);
-            }
-
-            public boolean isPooled() {
-                return mIsPooled;
-            }
-
-            public void setPooled(boolean isPooled) {
-                mIsPooled = isPooled;
             }
         }
 
@@ -17315,9 +20225,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
 
         final IBinder mWindowToken;
 
+        final Display mDisplay;
+
         final Callbacks mRootCallbacks;
 
-        HardwareCanvas mHardwareCanvas;
+        IWindowId mIWindowId;
+        WindowId mWindowId;
 
         /**
          * The top view of the hierarchy.
@@ -17325,13 +20238,20 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         View mRootView;
 
         IBinder mPanelParentWindowToken;
-        Surface mSurface;
 
         boolean mHardwareAccelerated;
         boolean mHardwareAccelerationRequested;
         HardwareRenderer mHardwareRenderer;
+        List<RenderNode> mPendingAnimatingRenderNodes;
 
-        boolean mScreenOn;
+        /**
+         * The state of the display to which the window is attached, as reported
+         * by {@link Display#getState()}.  Note that the display state constants
+         * declared by {@link Display} do not exactly line up with the screen state
+         * constants declared by {@link View} (there are more display states than
+         * screen states).
+         */
+        int mDisplayState = Display.STATE_UNKNOWN;
 
         /**
          * Scale factor used by the compatibility mode
@@ -17344,7 +20264,7 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         boolean mScalingRequired;
 
         /**
-         * If set, ViewAncestor doesn't use its lame animation for when the window resizes.
+         * If set, ViewRootImpl doesn't use its lame animation for when the window resizes.
          */
         boolean mTurnOffWindowResizeAnim;
 
@@ -17359,23 +20279,16 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         int mWindowTop;
 
         /**
-         * Left actual position of this view's window.
-         *
-         * TODO: This is a workaround for 6623031. Remove when fixed.
-         */
-        int mActualWindowLeft;
-
-        /**
-         * Actual top position of this view's window.
-         *
-         * TODO: This is a workaround for 6623031. Remove when fixed.
-         */
-        int mActualWindowTop;
-
-        /**
          * Indicates whether views need to use 32-bit drawing caches
          */
         boolean mUse32BitDrawingCache;
+
+        /**
+         * For windows that are full-screen but using insets to layout inside
+         * of the screen areas, these are the current insets to appear inside
+         * the overscan area of the display.
+         */
+        final Rect mOverscanInsets = new Rect();
 
         /**
          * For windows that are full-screen but using insets to layout inside
@@ -17392,6 +20305,13 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         final Rect mVisibleInsets = new Rect();
 
         /**
+         * For windows that are full-screen but using insets to layout inside
+         * of the screen decorations, these are the current insets for the
+         * stable system windows.
+         */
+        final Rect mStableInsets = new Rect();
+
+        /**
          * The internal insets given by this window.  This value is
          * supplied by the client (through
          * {@link ViewTreeObserver.OnComputeInternalInsetsListener}) and will
@@ -17400,6 +20320,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          */
         final ViewTreeObserver.InternalInsetsInfo mGivenInternalInsets
                 = new ViewTreeObserver.InternalInsetsInfo();
+
+        /**
+         * Set to true when mGivenInternalInsets is non-empty.
+         */
+        boolean mHasNonEmptyGivenInternalInsets;
 
         /**
          * All views in the window's hierarchy that serve as scroll containers,
@@ -17443,6 +20368,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         boolean mInTouchMode;
 
         /**
+         * Indicates whether the view has requested unbuffered input dispatching for the current
+         * event stream.
+         */
+        boolean mUnbufferedDispatchRequested;
+
+        /**
          * Indicates that ViewAncestor should trigger a global layout change
          * the next time it performs a traversal
          */
@@ -17480,6 +20411,12 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         boolean mHasSystemUiListeners;
 
         /**
+         * Set if the window has requested to extend into the overscan region
+         * via WindowManager.LayoutParams.FLAG_LAYOUT_IN_OVERSCAN.
+         */
+        boolean mOverscanRequested;
+
+        /**
          * Set if the visibility of any views has changed.
          */
         boolean mViewVisibilityChanged;
@@ -17488,6 +20425,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          * Set to true if a view has been scrolled.
          */
         boolean mViewScrollChanged;
+
+        /**
+         * Set to true if high contrast mode enabled
+         */
+        boolean mHighContrastText;
 
         /**
          * Global to the view hierarchy used as a temporary for dealing with
@@ -17501,6 +20443,11 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
          */
         final int[] mInvalidateChildLocation = new int[2];
 
+        /**
+         * Global to the view hierarchy used as a temporary for dealng with
+         * computing absolute on-screen location.
+         */
+        final int[] mTmpLocation = new int[2];
 
         /**
          * Global to the view hierarchy used as a temporary for dealing with
@@ -17542,6 +20489,31 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         final RectF mTmpTransformRect = new RectF();
 
         /**
+         * Temporary for use in computing hit areas with transformed views
+         */
+        final RectF mTmpTransformRect1 = new RectF();
+
+        /**
+         * Temporary list of rectanges.
+         */
+        final List<RectF> mTmpRectList = new ArrayList<>();
+
+        /**
+         * Temporary for use in transforming invalidation rect
+         */
+        final Matrix mTmpMatrix = new Matrix();
+
+        /**
+         * Temporary for use in transforming invalidation rect
+         */
+        final Transformation mTmpTransformation = new Transformation();
+
+        /**
+         * Temporary for use in querying outlines from OutlineProviders
+         */
+        final Outline mTmpOutline = new Outline();
+
+        /**
          * Temporary list for use in collecting focusable descendents of a view.
          */
         final ArrayList<View> mTempArrayList = new ArrayList<View>(24);
@@ -17549,13 +20521,15 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         /**
          * The id of the window for accessibility purposes.
          */
-        int mAccessibilityWindowId = View.NO_ID;
+        int mAccessibilityWindowId = AccessibilityNodeInfo.UNDEFINED_ITEM_ID;
 
         /**
-         * Whether to ingore not exposed for accessibility Views when
-         * reporting the view tree to accessibility services.
+         * Flags related to accessibility processing.
+         *
+         * @see AccessibilityNodeInfo#FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+         * @see AccessibilityNodeInfo#FLAG_REPORT_VIEW_IDS
          */
-        boolean mIncludeNotImportantViews;
+        int mAccessibilityFetchFlags;
 
         /**
          * The drawable for highlighting accessibility focus.
@@ -17573,16 +20547,23 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         final Point mPoint = new Point();
 
         /**
+         * Used to track which View originated a requestLayout() call, used when
+         * requestLayout() is called during layout.
+         */
+        View mViewRequestingLayout;
+
+        /**
          * Creates a new set of attachment information with the specified
          * events handler and thread.
          *
          * @param handler the events handler the view must use
          */
-        AttachInfo(IWindowSession session, IWindow window,
+        AttachInfo(IWindowSession session, IWindow window, Display display,
                 ViewRootImpl viewRootImpl, Handler handler, Callbacks effectPlayer) {
             mSession = session;
             mWindow = window;
             mWindowToken = window.asBinder();
+            mDisplay = display;
             mViewRootImpl = viewRootImpl;
             mHandler = handler;
             mRootCallbacks = effectPlayer;
@@ -17656,23 +20637,27 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
             // use use a height of 1, and then wack the matrix each time we
             // actually use it.
             shader = new LinearGradient(0, 0, 0, 1, 0xFF000000, 0, Shader.TileMode.CLAMP);
-
             paint.setShader(shader);
             paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+
             this.host = host;
         }
 
         public void setFadeColor(int color) {
-            if (color != 0 && color != mLastColor) {
+            if (color != mLastColor) {
                 mLastColor = color;
-                color |= 0xFF000000;
 
-                shader = new LinearGradient(0, 0, 0, 1, color | 0xFF000000,
-                        color & 0x00FFFFFF, Shader.TileMode.CLAMP);
-
-                paint.setShader(shader);
-                // Restore the default transfer mode (src_over)
-                paint.setXfermode(null);
+                if (color != 0) {
+                    shader = new LinearGradient(0, 0, 0, 1, color | 0xFF000000,
+                            color & 0x00FFFFFF, Shader.TileMode.CLAMP);
+                    paint.setShader(shader);
+                    // Restore the default transfer mode (src_over)
+                    paint.setXfermode(null);
+                } else {
+                    shader = new LinearGradient(0, 0, 0, 1, 0xFF000000, 0, Shader.TileMode.CLAMP);
+                    paint.setShader(shader);
+                    paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+                }
             }
         }
 
@@ -17959,5 +20944,165 @@ public class View implements Drawable.Callback, Drawable.Callback2, KeyEvent.Cal
         public AccessibilityNodeProvider getAccessibilityNodeProvider(View host) {
             return null;
         }
+
+        /**
+         * Returns an {@link AccessibilityNodeInfo} representing the host view from the
+         * point of view of an {@link android.accessibilityservice.AccessibilityService}.
+         * This method is responsible for obtaining an accessibility node info from a
+         * pool of reusable instances and calling
+         * {@link #onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo)} on the host
+         * view to initialize the former.
+         * <p>
+         * <strong>Note:</strong> The client is responsible for recycling the obtained
+         * instance by calling {@link AccessibilityNodeInfo#recycle()} to minimize object
+         * creation.
+         * </p>
+         * <p>
+         * The default implementation behaves as
+         * {@link View#createAccessibilityNodeInfo() View#createAccessibilityNodeInfo()} for
+         * the case of no accessibility delegate been set.
+         * </p>
+         * @return A populated {@link AccessibilityNodeInfo}.
+         *
+         * @see AccessibilityNodeInfo
+         *
+         * @hide
+         */
+        public AccessibilityNodeInfo createAccessibilityNodeInfo(View host) {
+            return host.createAccessibilityNodeInfoInternal();
+        }
+    }
+
+    private class MatchIdPredicate implements Predicate<View> {
+        public int mId;
+
+        @Override
+        public boolean apply(View view) {
+            return (view.mID == mId);
+        }
+    }
+
+    private class MatchLabelForPredicate implements Predicate<View> {
+        private int mLabeledId;
+
+        @Override
+        public boolean apply(View view) {
+            return (view.mLabelForId == mLabeledId);
+        }
+    }
+
+    private class SendViewStateChangedAccessibilityEvent implements Runnable {
+        private int mChangeTypes = 0;
+        private boolean mPosted;
+        private boolean mPostedWithDelay;
+        private long mLastEventTimeMillis;
+
+        @Override
+        public void run() {
+            mPosted = false;
+            mPostedWithDelay = false;
+            mLastEventTimeMillis = SystemClock.uptimeMillis();
+            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
+                final AccessibilityEvent event = AccessibilityEvent.obtain();
+                event.setEventType(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+                event.setContentChangeTypes(mChangeTypes);
+                sendAccessibilityEventUnchecked(event);
+            }
+            mChangeTypes = 0;
+        }
+
+        public void runOrPost(int changeType) {
+            mChangeTypes |= changeType;
+
+            // If this is a live region or the child of a live region, collect
+            // all events from this frame and send them on the next frame.
+            if (inLiveRegion()) {
+                // If we're already posted with a delay, remove that.
+                if (mPostedWithDelay) {
+                    removeCallbacks(this);
+                    mPostedWithDelay = false;
+                }
+                // Only post if we're not already posted.
+                if (!mPosted) {
+                    post(this);
+                    mPosted = true;
+                }
+                return;
+            }
+
+            if (mPosted) {
+                return;
+            }
+
+            final long timeSinceLastMillis = SystemClock.uptimeMillis() - mLastEventTimeMillis;
+            final long minEventIntevalMillis =
+                    ViewConfiguration.getSendRecurringAccessibilityEventsInterval();
+            if (timeSinceLastMillis >= minEventIntevalMillis) {
+                removeCallbacks(this);
+                run();
+            } else {
+                postDelayed(this, minEventIntevalMillis - timeSinceLastMillis);
+                mPostedWithDelay = true;
+            }
+        }
+    }
+
+    private boolean inLiveRegion() {
+        if (getAccessibilityLiveRegion() != View.ACCESSIBILITY_LIVE_REGION_NONE) {
+            return true;
+        }
+
+        ViewParent parent = getParent();
+        while (parent instanceof View) {
+            if (((View) parent).getAccessibilityLiveRegion()
+                    != View.ACCESSIBILITY_LIVE_REGION_NONE) {
+                return true;
+            }
+            parent = parent.getParent();
+        }
+
+        return false;
+    }
+
+    /**
+     * Dump all private flags in readable format, useful for documentation and
+     * sanity checking.
+     */
+    private static void dumpFlags() {
+        final HashMap<String, String> found = Maps.newHashMap();
+        try {
+            for (Field field : View.class.getDeclaredFields()) {
+                final int modifiers = field.getModifiers();
+                if (Modifier.isStatic(modifiers) && Modifier.isFinal(modifiers)) {
+                    if (field.getType().equals(int.class)) {
+                        final int value = field.getInt(null);
+                        dumpFlag(found, field.getName(), value);
+                    } else if (field.getType().equals(int[].class)) {
+                        final int[] values = (int[]) field.get(null);
+                        for (int i = 0; i < values.length; i++) {
+                            dumpFlag(found, field.getName() + "[" + i + "]", values[i]);
+                        }
+                    }
+                }
+            }
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+
+        final ArrayList<String> keys = Lists.newArrayList();
+        keys.addAll(found.keySet());
+        Collections.sort(keys);
+        for (String key : keys) {
+            Log.d(VIEW_LOG_TAG, found.get(key));
+        }
+    }
+
+    private static void dumpFlag(HashMap<String, String> found, String name, int value) {
+        // Sort flags by prefix, then by bits, always keeping unique keys
+        final String bits = String.format("%32s", Integer.toBinaryString(value)).replace('0', ' ');
+        final int prefix = name.indexOf('_');
+        final String key = (prefix > 0 ? name.substring(0, prefix) : name) + bits + name;
+        final String output = bits + " " + name;
+        found.put(key, output);
     }
 }
